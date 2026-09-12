@@ -113,8 +113,19 @@ def test_health_and_legacy_manifest_years(client):
         with pytest.raises(ValueError):
             resolve_year(invalid)
     update_manifest('old-replay', lambda m: m.update(job_id='old-replay', mode='replay', status='done', decade='1920s'))
-    entries = client.get('/replays').json()['replays']
-    assert next(entry for entry in entries if entry['job_id'] == 'old-replay')['target_year'] == 1925
+    update_manifest('mapped-replay', lambda m: m.update(
+        job_id='mapped-replay', mode='replay', status='done', target_year=1945,
+        place={'name': 'Pittsburgh', 'admin1': 'Pennsylvania', 'cc': 'US', 'lat': 40.44, 'lon': -79.99, 'source': 'exif'},
+    ))
+    update_manifest('city-replay', lambda m: m.update(
+        job_id='city-replay', mode='replay', status='done', target_year=1925,
+        place={'name': 'Shanghai', 'cc': 'CN', 'source': 'manual', 'prompt_safe': True},
+    ))
+    entries = {entry['job_id']: entry for entry in client.get('/replays').json()['replays']}
+    assert entries['old-replay']['target_year'] == 1925
+    assert (entries['mapped-replay']['lat'], entries['mapped-replay']['lon']) == pytest.approx((40.44, -79.99))
+    assert 'lat' in entries['city-replay'] and 'lon' in entries['city-replay']
+    assert entries['city-replay']['lat'] == pytest.approx(31.22, abs=0.5)
 
 
 def test_atomic_manifest_concurrent_updates(client):

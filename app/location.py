@@ -105,6 +105,62 @@ def resolve_place(lat=None, lon=None, gps=None, place='') -> dict:
     return result
 
 
+@lru_cache(maxsize=512)
+def _city_centroid(name: str, admin1: str = '', cc: str = '') -> tuple[float, float] | None:
+    """Approximate a city centre from the offline gazetteer for archive map pins."""
+    query = name.strip().casefold()
+    if not query:
+        return None
+    with _lock:
+        geocoder = rg.RGeocoder(mode=1, verbose=False)
+        matches = [r for r in geocoder.locations if r['name'].casefold() == query]
+    if cc:
+        narrowed = [r for r in matches if r['cc'] == cc.upper()]
+        if narrowed:
+            matches = narrowed
+    if admin1:
+        narrowed = [r for r in matches if r['admin1'].casefold() == admin1.casefold()]
+        if narrowed:
+            matches = narrowed
+    if not matches:
+        return None
+    row = matches[0]
+    try:
+        lat, lon = float(row['lat']), float(row['lon'])
+    except (KeyError, TypeError, ValueError):
+        return None
+    return (lat, lon) if _valid(lat, lon) else None
+
+
+def coords_for_place(place) -> tuple[float, float] | None:
+    """Return (lat, lon) for a journey place, or None when nothing can be plotted.
+
+    Prefer stored GPS. Otherwise estimate a city centroid from the gazetteer so
+    typed city names can still appear on the archive world map.
+    """
+    if isinstance(place, str):
+        place = {'name': place}
+    if not isinstance(place, dict):
+        return None
+    if _valid(place.get('lat'), place.get('lon')):
+        return float(place['lat']), float(place['lon'])
+    name = str(place.get('name') or '').strip()
+    if not name:
+        return None
+    admin1 = str(place.get('admin1') or '').strip()
+    cc = str(place.get('cc') or '').strip().upper()
+    if not re.fullmatch(r'[A-Z]{2}', cc):
+        cc = ''
+    # Manual "City, Region, CC" strings often land only in name when unresolved.
+    if not admin1 and not cc and ',' in name:
+        resolved = _manual_city(name)
+        if resolved.get('prompt_safe'):
+            admin1 = resolved.get('admin1') or ''
+            cc = resolved.get('cc') or ''
+            name = resolved.get('name') or name
+    return _city_centroid(name, admin1, cc)
+
+
 def _clean_name(value) -> str:
     if not isinstance(value, str):
         return ''
