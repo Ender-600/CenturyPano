@@ -59,7 +59,10 @@ async def security_headers(request, call_next):
             return PlainTextResponse('Invalid Content-Length', status_code=400)
     response = await call_next(request)
     response.headers['X-Content-Type-Options'] = 'nosniff'
-    response.headers['Referrer-Policy'] = 'same-origin'
+    # OSM's public tile service requires a Referer for web requests.  The
+    # previous same-origin policy stripped it from the cross-origin tile
+    # requests and could result in 403 responses.
+    response.headers['Referrer-Policy'] = 'strict-origin-when-cross-origin'
     response.headers['Permissions-Policy'] = 'geolocation=(self), accelerometer=(self), gyroscope=(self), magnetometer=(self)'
     if request.url.path in ('/sw.js', '/health', '/replays') or request.url.path.endswith('/manifest'):
         response.headers['Cache-Control'] = 'no-store'
