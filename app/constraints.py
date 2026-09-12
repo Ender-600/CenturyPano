@@ -12,6 +12,7 @@ import httpx
 
 from app.editors.base import check_response
 from app.location import location_context
+from app.reasoning import generate_content
 from app.scene import DEFAULT_SCENE_SPEC, parse_json_object
 from app.temporal import decade_for_year, resolve_year
 
@@ -237,10 +238,13 @@ async def _request_facts(location: dict, year: int, scene: dict) -> tuple[dict, 
         }
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{settings.gemini_text_model}:generateContent"
         headers = {"x-goog-api-key": settings.gemini_api_key}
-    async with httpx.AsyncClient(timeout=25.0) as client:
-        response = await client.post(url, headers=headers, json=payload)
-    check_response(response, "k2" if use_k2 else "gemini")
-    data = response.json()
+    if use_k2:
+        async with httpx.AsyncClient(timeout=25.0) as client:
+            response = await client.post(url, headers=headers, json=payload)
+        check_response(response, "k2")
+        data = response.json()
+    else:
+        data = await generate_content(url, headers, payload, "gemini", timeout=25.0)
     if use_k2:
         raw = data["choices"][0]["message"]["content"]
         tokens = int(data.get("usage", {}).get("total_tokens", 0))

@@ -14,15 +14,22 @@ from PIL import Image
 
 from .alignment import align_tile
 from .config import COLOR_MATCH_K, H, TILE, settings
-from .consistency import anchor_crop, color_match, squeeze_anchor
+from .consistency import anchor_crop, color_match, compensate_exposure, squeeze_anchor
 from .constraints import PROMPT_VERSION, build_constraints, generic_decade_prompt
-from .editors.base import EditorPool
+from .editors.base import EditorPool, ProviderError
 from .geometry import image_bytes, open_rgb, preprocess, viewport_priority
 from .manifest import job_dir, read_manifest, update_manifest
 from .metrics import alignment_metrics, seam_metrics, timing_metrics
 from .scene import parse_scene
-from .stitch import stitch
+from .stitch import seam_plan, stitch
 from .temporal import decade_for_year, manifest_year
+
+
+def _reason(exc: Exception) -> str:
+    """A short, safe cause for the manifest: provider errors already carry no bodies."""
+    if isinstance(exc, ProviderError):
+        return str(exc)
+    return type(exc).__name__
 
 
 def cache_key(image: bytes, decade: str | int, provider: str, prompt_global: str) -> str:
@@ -123,7 +130,9 @@ async def run_job(job_id: str, *, concurrency: int | None = None, use_cache: boo
                  is_demo=provider == "demo", demo=provider == "demo", cache_hit=False)
         m["metrics"] = {"started_at": started, "anchor_done_at": None, "first_tile_at": None,
                         "finished_at": None, "first_view_s": None, "total_s": None,
-                        "seam_err": {"raw": None, "after_color_match": None, "originals_floor": None},
+                        "seam_err": {"raw": None, "after_color_match": None, "originals_floor": None,
+                                     "after_compensation": None, "at_seam_cut": None, "carved_seams": None},
+                        "compensation": None, "seams": [],
                         "serial_baseline_s": None, "speedup": None, "image_calls": 0,
                         "alignment": {"score_before": None, "score_after": None, "mean_shift_px": None, "applied": 0},
                         "tokens": {"vlm": 0, "llm": 0}}
@@ -184,9 +193,9 @@ async def run_job(job_id: str, *, concurrency: int | None = None, use_cache: boo
                     attempts=result.attempts, ms=round((time.perf_counter() - start_at) * 1000)))
                 return anchor
             except Exception as exc:
-                error_type = type(exc).__name__
+                reason = _reason(exc)
                 update_manifest(job_id, lambda m: m["anchor"].update(status="skipped",
-                    error=f"Anchor unavailable ({error_type})",
+                    error=f"Anchor unavailable: {reason}",
                     ms=round((time.perf_counter() - start_at) * 1000)))
                 return None
             finally:
@@ -262,14 +271,14 @@ async def run_job(job_id: str, *, concurrency: int | None = None, use_cache: boo
                         m["metrics"]["image_calls"] = pool.image_calls
                     update_manifest(job_id, done)
                 except Exception as exc:
-                    error_type = type(exc).__name__
+                    reason = _reason(exc)
                     attempts = getattr(exc, "attempts", 0)
                     failed_provider = getattr(exc, "provider", provider)
                     # Both paths remain inspectable even when the original is the fallback.
                     await asyncio.to_thread(_save_image, directory / f"t{index}_raw.jpg", originals[index])
                     await asyncio.to_thread(_save_image, directory / f"t{index}.jpg", originals[index])
                     update_manifest(job_id, lambda m: m["tiles"][index].update(status="error",
-                        error=f"Tile generation failed ({error_type}); original retained",
+                        error=f"Tile generation failed: {reason}; original retained",
                         attempts=attempts, provider=failed_provider,
                         ms=round((time.perf_counter() - tile_start) * 1000)))
 
@@ -290,19 +299,35 @@ async def run_job(job_id: str, *, concurrency: int | None = None, use_cache: boo
         stage = "stitch"
         update_manifest(job_id, lambda m: m.update(stage=stage))
 
-        def finish_images():
+        def finish_images(failed: frozenset[int]):
             raw = [open_rgb(directory / f"t{i}_raw.jpg") for i in range(geometry["n"])]
             matched = [open_rgb(directory / f"t{i}.jpg") for i in range(geometry["n"])]
-            result = stitch(matched, geometry["x"], geometry["overlap"], geometry["wrap"], W=geometry["W"])
+            # Anchor matching makes each tile plausible alone; these two steps make
+            # the neighbours agree. Compensation removes tonal drift across the whole
+            # band; the carve routes the cut around whatever the tiles drew differently.
+            # A failed tile is the unedited photograph and is left exactly as it is.
+            compensated, compensation = compensate_exposure(matched, geometry["x"], fixed=failed)
+            plan = seam_plan(compensated, geometry["x"])
+            result = stitch(compensated, geometry["x"], geometry["overlap"], geometry["wrap"],
+                            W=geometry["W"], plan=plan)
             _save_image(directory / "result.jpg", result)
-            return seam_metrics(raw, matched, originals, geometry["x"])
+            for index, tile in enumerate(compensated):
+                # The published tiles are the ones the result is built from, so the
+                # progressive view and the final panorama cannot disagree.
+                if index not in failed:
+                    _save_image(directory / f"t{index}.jpg", tile)
+            return (seam_metrics(raw, matched, originals, geometry["x"], compensated, plan),
+                    compensation, [seam.to_dict() for seam in plan])
 
-        seams = await asyncio.to_thread(finish_images)
+        failed_tiles = frozenset(tile["i"] for tile in read_manifest(job_id)["tiles"]
+                                 if tile.get("status") == "error")
+        seams, compensation, seam_details = await asyncio.to_thread(finish_images, failed_tiles)
         finished = time.time()
 
         def complete(m):
             m["metrics"].update(timing_metrics(m["metrics"], finished), seam_err=seams, image_calls=pool.image_calls,
-                                alignment=alignment_metrics(m["tiles"]))
+                                alignment=alignment_metrics(m["tiles"]),
+                                compensation=compensation, seams=seam_details)
             m["result"]["status"] = "done"
             m["status"] = "done_partial" if any(t["status"] == "error" for t in m["tiles"]) else "done"
             m["stage"] = "complete"
@@ -316,9 +341,9 @@ async def run_job(job_id: str, *, concurrency: int | None = None, use_cache: boo
                                     {"cache_key": final["cache_key"]})
         return final
     except Exception as exc:
-        error_type = type(exc).__name__
+        reason = _reason(exc)
         def fail(m):
-            m.update(status="error", stage=stage, error=f"Processing failed during {stage} ({error_type})")
+            m.update(status="error", stage=stage, error=f"Processing failed during {stage}: {reason}")
             m["metrics"].update(timing_metrics(m["metrics"], time.time()))
         return update_manifest(job_id, fail)
 

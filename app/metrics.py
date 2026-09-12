@@ -22,9 +22,27 @@ def seam_error(tiles: list[Image.Image | np.ndarray], x: list[int]) -> float:
 
 
 def seam_metrics(raw: list[Image.Image], matched: list[Image.Image],
-                 originals: list[Image.Image], x: list[int]) -> dict:
-    return {"raw": seam_error(raw, x), "after_color_match": seam_error(matched, x),
-            "originals_floor": seam_error(originals, x)}
+                 originals: list[Image.Image], x: list[int],
+                 compensated: list[Image.Image] | None = None,
+                 plan: list | None = None) -> dict:
+    """The full chain, each step measured on the same overlaps.
+
+    `at_seam_cut` is the number that matters: the disagreement along the path the
+    stitcher actually cuts on, rather than across the whole overlap it used to
+    average. The earlier columns are kept so the improvement is auditable.
+    """
+    result = {"raw": seam_error(raw, x), "after_color_match": seam_error(matched, x),
+              "originals_floor": seam_error(originals, x),
+              "after_compensation": None, "at_seam_cut": None, "carved_seams": None}
+    if compensated is not None:
+        result["after_compensation"] = seam_error(compensated, x)
+    if plan:
+        cuts = [seam for seam in plan if seam.overlap > 0]
+        if cuts:
+            result["at_seam_cut"] = round(float(np.mean([seam.cut_de if seam.carved else seam.centre_de
+                                                         for seam in cuts])), 5)
+            result["carved_seams"] = sum(1 for seam in cuts if seam.carved)
+    return result
 
 
 def timing_metrics(metrics: dict, finished_at: float) -> dict:

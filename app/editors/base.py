@@ -27,6 +27,7 @@ class ProviderError(Exception):
     def __init__(
         self, message: str, *, provider: str = "unknown", retryable: bool = True,
         rate_limited: bool = False, refusal: bool = False, attempts: int = 0,
+        status: int | None = None, fatal: bool = False,
     ) -> None:
         super().__init__(message)
         self.provider = provider
@@ -34,17 +35,28 @@ class ProviderError(Exception):
         self.rate_limited = rate_limited
         self.refusal = refusal
         self.attempts = attempts
+        # The HTTP status is safe to keep and report: it is the difference between
+        # "retry later" and "this key or model name will never work".
+        self.status = status
+        self.fatal = fatal
 
 
 def check_response(response: httpx.Response, provider: str) -> None:
     if response.is_success:
         return
     status = response.status_code
-    # Response bodies may contain request details, credentials, or image data.
+    # Response bodies may contain request details, credentials, or image data,
+    # so only the status code crosses this boundary. 401/403/404 mean a bad key,
+    # a disabled API or a retired model name: retrying and failing over to a
+    # second provider cannot help, and it hides the real cause behind timeouts.
+    fatal = status in {400, 401, 403, 404}
+    hint = {401: " (check GEMINI_API_KEY)", 403: " (key lacks access to this API)",
+            404: " (model name unavailable — check GEMINI_IMAGE_MODEL / GEMINI_TEXT_MODEL)",
+            400: " (malformed request or unsupported parameter)"}.get(status, "")
     raise ProviderError(
-        f"{provider} returned HTTP {status}", provider=provider,
+        f"{provider} returned HTTP {status}{hint}", provider=provider,
         retryable=status in {408, 409, 429} or status >= 500,
-        rate_limited=status == 429,
+        rate_limited=status == 429, status=status, fatal=fatal,
     )
 
 
@@ -168,7 +180,13 @@ class EditorPool:
         current_negative = negative
         providers = [self.primary] + ([self.fallback] if self.fallback else [])
         last_error = ProviderError("No image provider available", retryable=False)
+        # A bad key, a disabled API or a retired model name is a configuration
+        # fault, not an outage: failing over replaces the real cause with the
+        # second provider's own error and makes the manifest useless.
+        misconfigured = False
         for editor in providers:
+            if misconfigured:
+                break
             if editor is self.primary and self.primary_open and self.fallback:
                 continue
             refusal_retried = False
@@ -189,6 +207,9 @@ class EditorPool:
                     break
                 except ProviderError as exc:
                     last_error = exc
+                    if exc.status in {401, 403, 404}:
+                        misconfigured = True
+                        break
                     if editor is self.primary:
                         self._primary_failures += 1
                         if self._primary_failures >= 2 or exc.rate_limited:

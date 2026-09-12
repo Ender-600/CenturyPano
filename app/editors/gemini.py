@@ -58,6 +58,8 @@ class GeminiEditor:
                 if candidate.get("finishReason") in {"SAFETY", "BLOCKLIST", "PROHIBITED_CONTENT", "IMAGE_SAFETY", "RECITATION"}:
                     raise ProviderError("gemini declined this image edit", provider=self.name, refusal=True)
                 for part in candidate.get("content", {}).get("parts", []):
+                    if part.get("thought"):
+                        continue
                     inline = part.get("inlineData") or part.get("inline_data")
                     if inline and inline.get("data"):
                         return jpeg_bytes(base64.b64decode(inline["data"], validate=True), source_size)

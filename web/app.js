@@ -901,12 +901,14 @@
     const cells = [
       ['首个可见画面', metricNumber(metrics.first_view_s), '首次完成的重建画面'],
       ['完整旅程', metricNumber(metrics.total_s), '本次运行实际用时'],
-      ['接缝色差 · 调色前 / 后', `${metricNumber(seam.raw, '')} / ${metricNumber(seam.after_color_match, '')}`, `原图参考值 ${metricNumber(seam.originals_floor, '')}`],
+      ['接缝色差 · 生成 → 最终', `${metricNumber(seam.raw, '')} → ${metricNumber(seam.at_seam_cut ?? seam.after_color_match, '')}`,
+        seam.at_seam_cut == null ? `调色后 ${metricNumber(seam.after_color_match, '')}` :
+          `调色 ${metricNumber(seam.after_color_match, '')} · 统一曝光 ${metricNumber(seam.after_compensation, '')} · 切缝 ${seam.carved_seams ?? 0} 处`],
       ['相对串行加速', metricNumber(metrics.speedup, '×'), metrics.serial_baseline_s == null ? '尚未测量串行基线' : `串行基线 ${metricNumber(metrics.serial_baseline_s)}`],
       ['像素对齐 · 配准前 / 后', `${metricNumber(align.score_before, '')} / ${metricNumber(align.score_after, '')}`,
         align.mean_shift_px == null ? '尚未测量' : `平均漂移 ${metricNumber(align.mean_shift_px, ' px')} · 已校正 ${align.applied ?? 0} 块`],
     ];
-    $('metrics-panel').innerHTML = cells.map(([name, value, note]) => `<div class="metric"><span>${escapeHTML(name)}</span><strong>${escapeHTML(value)}</strong><small>${escapeHTML(note)}</small></div>`).join('') + `<p class="metrics-note">${isDemo(manifest) ? '以上为本地演示管线的运行数据，不代表 AI 服务的速度或质量。' : '数据来自该旅程的实际运行；回放不重新计时。'} 破折号表示尚未测量。接缝色差采用重叠区域 Lab 距离，数值越小代表色彩越接近；这不衡量历史真实性。${manifest.scene?.fallback ? ' 场景解析使用了默认设置。' : ''}${manifest.anchor?.status === 'skipped' ? ' 年代参考图未生成，已跳过色彩匹配。' : ''}${manifest.scene?.is_outdoor === false ? ' 这是室内场景：重建只更换材质与陈设，效果通常弱于室外街景。' : ''} 像素对齐为原图与生成图边缘结构的相关度，1 表示完全重合。</p>`;
+    $('metrics-panel').innerHTML = cells.map(([name, value, note]) => `<div class="metric"><span>${escapeHTML(name)}</span><strong>${escapeHTML(value)}</strong><small>${escapeHTML(note)}</small></div>`).join('') + `<p class="metrics-note">${isDemo(manifest) ? '以上为本地演示管线的运行数据，不代表 AI 服务的速度或质量。' : '数据来自该旅程的实际运行；回放不重新计时。'} 破折号表示尚未测量。接缝色差采用 Lab 距离，数值越小代表两块拼图越一致；这不衡量历史真实性。最终值测的是实际裁切路径上的差异：相邻两块若画出了不同的物体，我们不把它们平均成重影，而是沿着两块最吻合的一条竖线裁开。${manifest.scene?.fallback ? ' 场景解析使用了默认设置。' : ''}${manifest.anchor?.status === 'skipped' ? ' 年代参考图未生成，已跳过色彩匹配。' : ''}${manifest.scene?.is_outdoor === false ? ' 这是室内场景：重建只更换材质与陈设，效果通常弱于室外街景。' : ''} 像素对齐为原图与生成图边缘结构的相关度，1 表示完全重合。</p>`;
   }
   $('metrics-toggle').addEventListener('click', () => {
     const open = $('metrics-panel').hidden;
