@@ -3,13 +3,10 @@
 (() => {
   const $ = (id) => document.getElementById(id);
   const screens = ['capture', 'preview', 'result'];
-  const legacyYears = { '1900s': 1905, '1920s': 1925, '1950s': 1955, '1970s': 1975 };
-  const defaultTitle = document.title;
+  const years = { '1900s': 1905, '1920s': 1925, '1950s': 1955, '1970s': 1975 };
   const state = {
-    screen: 'capture', file: null, fileURL: null, targetYear: 1925,
-    minYear: 1800, maxYear: new Date().getFullYear(), yearEdited: false,
+    screen: 'capture', file: null, fileURL: null, decade: '1920s',
     imageWidth: 0, imageHeight: 0, location: null, locationSource: null,
-    manualPlace: false, locationPromise: null,
     offset: 0, renderWidth: 0, renderHeight: 0, wrap: false,
     manifest: null, jobId: null, generation: 0, pollTimer: null,
     geometryKey: null, originalImage: null, loadedTiles: new Set(),
@@ -17,6 +14,8 @@
     gyro: false, alpha0: null, gyroBase: 0, gyroTarget: 0, gyroSeen: false,
     drag: null, audioContext: null, audioBuffers: new Map(), sound: true,
     loadingFile: 0, offlineSaved: false, revealing: false,
+    viewMode: 'past', clean: false, submitting: false, loadingSource: false,
+    viewRevision: 0, viewportWidth: 0, cachePending: false, fileOrigin: null,
   };
 
   function text(id, value) { $(id).textContent = value; }
@@ -27,22 +26,102 @@
     clearTimeout(showToast.timer); showToast.timer = setTimeout(() => { $('toast').hidden = true; }, duration);
   }
   function showScreen(screen) {
+    closeOptions();
     state.screen = screen;
     screens.forEach((name) => { $(name + '-screen').hidden = name !== screen; });
     document.body.dataset.screen = screen;
+    syncChrome();
     window.scrollTo({ top: 0, behavior: 'instant' });
     requestAnimationFrame(resizeViewport);
   }
   function stopJourney() {
     state.generation++; clearTimeout(state.pollTimer); disableGyro();
+    state.loadingFile++;
+    state.loadingSource = false;
+    if (state.drag) {
+      const { target, pointerId } = state.drag;
+      if (target.hasPointerCapture(pointerId)) target.releasePointerCapture(pointerId);
+    }
+    document.querySelectorAll('.dragging').forEach((element) => element.classList.remove('dragging'));
     state.drag = null; state.revealing = false;
+    state.clean = false;
+    setClean(false, false);
     document.body.classList.remove('revealing');
   }
   function goHome() {
-    stopJourney(); showScreen('capture');
-    document.title = defaultTitle;
+    stopJourney(); state.viewMode = 'past'; state.offset = 0; state.renderWidth = 0; state.wrap = false;
+    showScreen('capture');
     if (location.search) history.replaceState(null, '', location.pathname);
   }
+
+  function closeOptions() { if ($('options-dialog').open) $('options-dialog').close(); }
+  function setClean(enabled, focus = true) {
+    state.clean = enabled;
+    document.body.classList.toggle('clean', enabled);
+    document.querySelectorAll('.chrome').forEach((element) => { element.inert = enabled; });
+    $('slider-handle').inert = enabled;
+    $('restore-button').hidden = !enabled;
+    if (focus) (enabled ? $('restore-button') : $('clean-button')).focus({ preventScroll: true });
+  }
+  function syncChrome() {
+    const result = state.screen === 'result', preview = state.screen === 'preview';
+    const failed = result && state.manifest?.status === 'error';
+    const original = state.viewMode === 'present';
+    const available = result && (!!state.loadedTiles.size || state.finalLoaded);
+    const busy = state.submitting || state.loadingSource;
+    document.querySelectorAll('#decade-options [data-decade]').forEach((button) => {
+      const active = !original && button.dataset.decade === state.decade;
+      button.classList.toggle('active', active);
+      button.setAttribute('aria-pressed', String(active));
+      button.disabled = busy;
+    });
+    $('present-button').classList.toggle('active', original);
+    $('present-button').setAttribute('aria-pressed', String(original));
+    $('compare-button').disabled = !available;
+    $('compare-button').setAttribute('aria-pressed', String(state.viewMode === 'compare'));
+    $('compare-button').title = available ? '拖动分界线，对比今昔' : '生成画面后即可对比';
+    $('slider-handle').hidden = !result || state.viewMode !== 'compare';
+    document.querySelectorAll('.viewport-label').forEach((label) => { label.hidden = !result || state.viewMode !== 'compare'; });
+    $('generate-button').hidden = !failed && (!preview || original);
+    $('generate-button').disabled = busy;
+    $('generate-button').innerHTML = `${failed ? '重新预览这张照片' : state.submitting ? '正在提交…' : `走进 ${state.decade.slice(0, 4)} 年代`}<svg><use href="#i-arrow"/></svg>`;
+    $('album-button').disabled = busy;
+    $('capture-button').disabled = busy;
+    $('photo-settings').hidden = !preview;
+    $('result-actions').hidden = !result;
+    $('journey-info').hidden = !result;
+    $('retake-button').hidden = !preview;
+    $('new-journey-button').hidden = !result;
+    text('window-year', original ? '现在' : state.decade.slice(0, 4));
+    $('window-year-suffix').hidden = original;
+    text('window-place', result ? placeName(state.manifest?.place) : preview ? $('place-input').value.trim() || '你的视角' : 'Pittsburgh');
+    const caption = state.submitting ? '正在提交你的旅程。' : state.loadingSource ? '正在打开这个视角。' :
+      original ? '就在此刻。' : state.viewMode === 'compare' ? '轻轻一划，今昔之间。' :
+        preview ? '保留眼前，选择一个年代。' : result ? '同一个地方，另一个年代。' : '让手机，成为时间的视窗。';
+    text('window-caption', caption);
+    text('provider-note', state.screen === 'capture' ? '概念影像 · 非历史照片' : preview ?
+      '原图预览 · 点击生成后开始重建' : isDemo(state.manifest || {}) ? '工程示例 · 本地调色' : '想象重建 · 非历史影像');
+    const filters = { '1900s': 'sepia(.95) saturate(.4)', '1920s': 'sepia(.58) saturate(.65)', '1950s': 'sepia(.22) saturate(.82)', '1970s': 'sepia(.16) saturate(.9) contrast(.92)' };
+    $('hero-past').style.setProperty('--hero-filter', filters[state.decade]);
+    $('hero-past').style.opacity = original ? '0' : '1';
+  }
+  function setView(mode) {
+    state.viewMode = mode; state.viewRevision++;
+    if (state.screen === 'result') setPastPercent(mode === 'present' ? 0 : mode === 'compare' ? 50 : 100);
+    syncChrome();
+  }
+  $('menu-button').addEventListener('click', () => { syncChrome(); $('options-dialog').showModal(); });
+  $('close-options').addEventListener('click', closeOptions);
+  $('options-dialog').addEventListener('click', (event) => {
+    if (event.target !== $('options-dialog')) return;
+    const rect = $('options-dialog').getBoundingClientRect();
+    if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) closeOptions();
+  });
+  $('clean-button').addEventListener('click', () => setClean(true));
+  $('restore-button').addEventListener('click', () => setClean(false));
+  document.addEventListener('keydown', (event) => { if (event.key === 'Escape' && state.clean) setClean(false); });
+  $('present-button').addEventListener('click', () => setView('present'));
+  $('compare-button').addEventListener('click', () => { if (!$('compare-button').disabled) setView(state.viewMode === 'compare' ? 'past' : 'compare'); });
   function connectionStatus() {
     const offline = !navigator.onLine;
     $('connection-status').classList.toggle('offline', offline);
@@ -51,64 +130,32 @@
   async function checkHealth() {
     try {
       const response = await fetch('/health');
-      if (response.ok) {
-        state.health = await response.json();
-        const min = Number(state.health.min_year), max = Number(state.health.max_year);
-        if (Number.isInteger(min) && Number.isInteger(max) && min <= max) {
-          state.minYear = min; state.maxYear = max;
-        }
-        setTargetYear(!state.yearEdited ? (state.health.default_year ?? state.targetYear) : state.targetYear);
-      }
+      if (response.ok) state.health = await response.json();
     } catch { /* Replay remains available when the live service is offline. */ }
     connectionStatus();
-    text('provider-note', state.health?.provider === 'demo' ? '本地效果演示 · 未调用 AI' : '想象重建，非历史影像');
+    syncChrome();
   }
 
-  $('capture-button').addEventListener('click', () => $('camera-input').click());
-  $('album-button').addEventListener('click', () => $('album-input').click());
+  $('capture-button').addEventListener('click', () => { closeOptions(); $('camera-input').click(); });
+  $('album-button').addEventListener('click', () => { closeOptions(); $('album-input').click(); });
   $('camera-input').addEventListener('change', (event) => acceptFile(event.target.files[0]));
   $('album-input').addEventListener('change', (event) => acceptFile(event.target.files[0]));
   $('retake-button').addEventListener('click', goHome);
   $('new-journey-button').addEventListener('click', goHome);
   document.querySelector('.brand').addEventListener('click', (event) => { event.preventDefault(); goHome(); });
   $('place-input').addEventListener('input', () => {
-    state.manualPlace = true;
-    text('location-note', $('place-input').value.trim() ? '手填城市会覆盖照片 GPS 和设备定位，仅提供城市级背景；可补充州和国家以准确识别。' : '未填写城市时，优先使用照片 GPS；没有照片 GPS 时使用设备定位。');
+    state.location = null; state.locationSource = 'manual';
+    text('location-note', '将使用你填写的城市；留空也可以继续。');
+    syncChrome();
   });
-  function yearOf(manifest) {
-    return manifest.target_year ?? manifest.anchor_year ?? legacyYears[manifest.decade] ?? null;
-  }
-  function setTargetYear(value, edited = false) {
-    const year = Number(value);
-    if (!Number.isInteger(year)) return false;
-    state.targetYear = Math.max(state.minYear, Math.min(state.maxYear, year));
-    state.yearEdited ||= edited;
-    for (const id of ['year-range', 'year-input']) {
-      $(id).min = state.minYear; $(id).max = state.maxYear; $(id).value = state.targetYear;
-    }
-    $('year-range').setAttribute('aria-valuetext', `${state.targetYear} 年，以 7 月 1 日为参考`);
-    text('year-min', state.minYear); text('year-max', state.maxYear);
-    document.querySelectorAll('[data-year]').forEach((item) => {
-      const active = Number(item.dataset.year) === state.targetYear;
-      item.classList.toggle('active', active); item.setAttribute('aria-pressed', String(active));
-      item.disabled = Number(item.dataset.year) < state.minYear || Number(item.dataset.year) > state.maxYear;
-    });
-    text('generate-button', `走进 ${state.targetYear} 年`);
-    $('generate-button').insertAdjacentHTML('beforeend', '<svg><use href="#i-arrow"/></svg>');
-    return true;
-  }
-  $('year-range').addEventListener('input', (event) => setTargetYear(event.target.value, true));
-  $('year-input').addEventListener('input', (event) => {
-    const year = Number(event.target.value);
-    if (event.target.value && Number.isInteger(year) && year >= state.minYear && year <= state.maxYear) setTargetYear(year, true);
-  });
-  $('year-input').addEventListener('change', (event) => {
-    if (!event.target.value || !setTargetYear(event.target.value, true)) setTargetYear(state.targetYear);
-  });
-  $('year-options').addEventListener('click', (event) => {
-    const button = event.target.closest('[data-year]');
+  $('decade-options').addEventListener('click', (event) => {
+    const button = event.target.closest('[data-decade]');
     if (!button) return;
-    setTargetYear(button.dataset.year, true);
+    if (state.submitting || state.loadingSource) return;
+    const decade = button.dataset.decade;
+    if (state.screen === 'result' && (decade !== state.decade || state.manifest?.status === 'error')) { editJourney(decade); return; }
+    state.decade = decade;
+    setView('past');
   });
 
   function loadImage(url) {
@@ -122,10 +169,11 @@
     if (!file) return;
     if (file.size > 40 * 1024 * 1024) { showToast('照片大于 40 MB，请选择小一些的全景。'); return; }
     if (!(/^image\/(jpeg|png|heic|heif|heic-sequence|heif-sequence)$/.test(file.type) || (!file.type && /\.(heic|heif|jpe?g|png)$/i.test(file.name)))) { showToast('请选择 JPEG、PNG 或 HEIC 全景照片。'); return; }
-    const request = ++state.loadingFile;
-    $('capture-button').disabled = true; $('album-button').disabled = true;
+    let request = ++state.loadingFile;
+    state.loadingSource = true; syncChrome();
+    let url = null;
     try {
-      let url = URL.createObjectURL(file), image;
+      url = URL.createObjectURL(file); let image;
       try { image = await loadImage(url); }
       catch {
         URL.revokeObjectURL(url);
@@ -137,21 +185,72 @@
       }
       if (request !== state.loadingFile) { URL.revokeObjectURL(url); return; }
       stopJourney();
+      request = state.loadingFile;
       if (state.fileURL) URL.revokeObjectURL(state.fileURL);
       state.file = file; state.fileURL = url; state.imageWidth = image.naturalWidth; state.imageHeight = image.naturalHeight;
-      state.location = null; state.locationSource = null; state.manualPlace = false;
+      state.fileOrigin = null; state.viewMode = 'past'; state.renderWidth = 0;
+      state.location = null; state.locationSource = null;
       state.offset = 0; state.wrap = false;
       $('preview-image').src = url; $('place-input').value = '';
       $('is-360').checked = Math.abs(state.imageWidth / state.imageHeight - 2) < 0.1;
       const narrow = state.imageWidth / state.imageHeight < 2;
       $('image-warning').hidden = !narrow;
       text('image-warning', '这张照片看起来较窄。仍然可以继续，横向全景会带来更开阔的体验。');
-      text('location-note', '正在读取照片位置… 也可以手动填写拍摄城市。');
+      text('location-note', '正在查找城市… 也可以直接手动填写。');
       showScreen('preview');
+      if (location.search) history.replaceState(null, '', location.pathname);
       requestAnimationFrame(() => { resizeViewport(); state.offset = Math.max(0, (state.renderWidth - $('preview-window').clientWidth) / 2); render(); });
-      state.locationPromise = locate(file, request);
-    } catch (error) { showToast(error.message || '照片读取失败，请重新选择。'); }
-    finally { $('capture-button').disabled = false; $('album-button').disabled = false; $('camera-input').value = ''; $('album-input').value = ''; }
+      if (narrow) showToast('已打开原图。横向全景会带来更开阔的视野。');
+      locate(file, request);
+    } catch (error) {
+      if (url && url !== state.fileURL) URL.revokeObjectURL(url);
+      if (request === state.loadingFile) showToast(error.message || '照片读取失败，请重新选择。');
+    } finally {
+      if (request === state.loadingFile) { state.loadingSource = false; syncChrome(); }
+      $('camera-input').value = ''; $('album-input').value = '';
+    }
+  }
+
+  async function editJourney(decade) {
+    const request = ++state.loadingFile, jobId = state.jobId, manifest = state.manifest;
+    const sourceWrap = manifest?.geometry?.wrap ?? manifest?.source?.is_360 ?? $('is-360').checked;
+    const heading = state.renderWidth ? (state.offset + $('pano-viewport').clientWidth / 2) / state.renderWidth : .5;
+    state.loadingSource = true; syncChrome();
+    let newURL = null;
+    try {
+      let file = state.file, url = state.fileURL;
+      const recovered = !file || state.fileOrigin !== jobId;
+      if (recovered) {
+        const response = await fetch(`/jobs/${encodeURIComponent(jobId)}/preview`);
+        if (!response.ok) throw new Error('这个旅程的工作图尚未就绪，请稍后再试。');
+        const blob = await response.blob();
+        file = new File([blob], `century-${jobId}.jpg`, { type: 'image/jpeg' });
+        newURL = URL.createObjectURL(file); url = newURL;
+      }
+      const image = await loadImage(url);
+      if (request !== state.loadingFile || state.jobId !== jobId) { if (newURL) URL.revokeObjectURL(newURL); return; }
+      stopJourney();
+      if (newURL && state.fileURL) URL.revokeObjectURL(state.fileURL);
+      state.file = file; state.fileURL = url; state.fileOrigin = null;
+      state.decade = decade; state.viewMode = 'past'; state.wrap = false;
+      state.imageWidth = image.naturalWidth; state.imageHeight = image.naturalHeight;
+      state.renderWidth = 0; state.location = null; state.locationSource = 'manual';
+      $('preview-image').src = url;
+      $('place-input').value = placeName(manifest?.place) === '未知城市' ? '' : placeName(manifest?.place);
+      $('is-360').checked = !!sourceWrap;
+      $('image-warning').hidden = !recovered;
+      text('image-warning', '沿用存档中的原始工作图；它可能已经裁剪或缩放。');
+      text('location-note', '沿用这个旅程的城市。可以修改或留空。');
+      showScreen('preview');
+      history.replaceState(null, '', location.pathname);
+      requestAnimationFrame(() => { resizeViewport(); state.offset = constrainOffset(heading * state.renderWidth - $('preview-window').clientWidth / 2); render(); });
+      showToast(recovered ? '已打开存档工作图。点击生成，开始新的年代。' : '已保留你的原图。点击生成，开始新的年代。');
+    } catch (error) {
+      if (newURL && newURL !== state.fileURL) URL.revokeObjectURL(newURL);
+      if (request === state.loadingFile) showToast(error.message || '暂时无法读取原始视角，请稍后再试。');
+    } finally {
+      if (request === state.loadingFile) { state.loadingSource = false; syncChrome(); }
+    }
   }
 
   // A small, bounds-checked JPEG EXIF GPS reader keeps the app usable without a CDN.
@@ -197,57 +296,59 @@
     } catch { /* Missing, truncated, or unsupported EXIF is non-blocking. */ }
     return null;
   }
-  async function locate(file, request) {
-    // The photo describes a place that may be far from the device's current location.
-    const exif = await readExifGPS(file);
-    if (request !== state.loadingFile) return;
-    const geo = exif ? null : await new Promise((resolve) => {
-      if (!navigator.geolocation) { resolve(null); return; }
+  async function locate(file, request, useDevice = false) {
+    const browserLocation = new Promise((resolve) => {
+      if (!useDevice || !navigator.geolocation) { resolve(null); return; }
       const timer = setTimeout(() => resolve(null), 5200);
       navigator.geolocation.getCurrentPosition((position) => { clearTimeout(timer); resolve({ lat: position.coords.latitude, lon: position.coords.longitude }); }, () => { clearTimeout(timer); resolve(null); }, { timeout: 5000, maximumAge: 120000, enableHighAccuracy: false });
     });
-    if (request !== state.loadingFile) return;
-    const coordinates = exif || geo;
-    if (!coordinates) {
-      if (!state.manualPlace) text('location-note', '浏览器未读取到位置；服务器会尝试照片 GPS，也可以手动填写拍摄城市。');
-      return;
-    }
-    state.location = coordinates; state.locationSource = exif ? 'exif' : 'geolocation';
-    if (state.manualPlace) return;
-    resolveDetectedLocation(coordinates, !!exif, request);
-  }
-  async function resolveDetectedLocation(coordinates, photoGPS, request) {
+    const [geo, exif] = await Promise.all([browserLocation, readExifGPS(file)]);
+    if (request !== state.loadingFile || state.locationSource === 'manual') return;
+    const coordinates = geo || exif;
+    if (!coordinates) { text('location-note', useDevice ? '未获取位置。可以手动填写城市，或留空继续。' : '可填写城市，或点「使用当前位置」。留空也可以继续。'); return; }
+    state.location = coordinates; state.locationSource = geo ? 'geolocation' : 'exif';
     try {
       const response = await fetch('/location/resolve', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(coordinates) });
       if (!response.ok) throw new Error('unavailable');
       const result = await response.json(); const city = result.place || result;
-      if (request !== state.loadingFile || state.manualPlace) return;
+      if (request !== state.loadingFile || state.locationSource === 'manual') return;
       $('place-input').value = city.name || '';
-      text('location-note', `${photoGPS ? '照片 GPS' : '设备定位（照片 GPS 由服务器优先读取）'} · ${city.name || '已定位'}${city.cc ? '，' + city.cc : ''}。可手动覆盖；设备位置可能与拍摄地不同。`);
+      text('location-note', `${geo ? '设备定位' : '照片位置'} · 仅使用城市：${city.name || '已定位'}${city.cc ? '，' + city.cc : ''}`);
+      syncChrome();
     } catch {
-      if (request === state.loadingFile && !state.manualPlace) text('location-note', '已获取坐标，将用于推测当地历史背景；可手动填写拍摄城市覆盖。');
+      text('location-note', '已获取位置，将在生成时离线解析城市；也可以手动修改。');
     }
   }
+  $('locate-button').addEventListener('click', () => {
+    if (!state.file || state.screen !== 'preview') return;
+    state.locationSource = null;
+    text('location-note', '正在获取当前位置…');
+    locate(state.file, state.loadingFile, true);
+  });
 
-  function activeViewport() { return state.screen === 'preview' ? $('preview-window') : $('pano-viewport'); }
+  function activeViewport() { return state.screen === 'capture' ? $('capture-screen') : state.screen === 'preview' ? $('preview-window') : $('pano-viewport'); }
   function constrainOffset(value) {
     if (state.wrap && state.renderWidth > 0) return ((value % state.renderWidth) + state.renderWidth) % state.renderWidth;
     return Math.max(0, Math.min(Math.max(0, state.renderWidth - activeViewport().clientWidth), value));
   }
   function resizeViewport() {
-    if (!['preview', 'result'].includes(state.screen)) return;
     const viewport = activeViewport(), oldWidth = state.renderWidth;
-    const fraction = oldWidth > 0 ? (state.offset + viewport.clientWidth / 2) / oldWidth : 0.5;
+    if (!viewport.clientWidth || !viewport.clientHeight) return;
+    const fraction = oldWidth > 0 ? (state.offset + (state.viewportWidth || viewport.clientWidth) / 2) / oldWidth : 0.5;
+    state.viewportWidth = viewport.clientWidth;
     const geometry = state.screen === 'result' && state.manifest?.geometry;
-    const width = geometry?.W || state.imageWidth || viewport.clientWidth;
-    const height = geometry?.H || state.imageHeight || viewport.clientHeight;
-    const scale = Math.max(viewport.clientHeight / height, viewport.clientWidth / width);
+    const hero = state.screen === 'capture';
+    const width = hero ? $('hero-image').naturalWidth || 1536 : geometry?.W || state.imageWidth || viewport.clientWidth;
+    const height = hero ? $('hero-image').naturalHeight || 1024 : geometry?.H || state.imageHeight || viewport.clientHeight;
+    const scale = Math.max(viewport.clientHeight / height, viewport.clientWidth / width) * (hero ? 1.08 : 1);
     state.renderWidth = width * scale; state.renderHeight = height * scale;
     state.offset = constrainOffset(fraction * state.renderWidth - viewport.clientWidth / 2);
     if (state.gyro && oldWidth !== state.renderWidth) {
       state.alpha0 = null; state.gyroBase = state.offset; state.gyroTarget = state.offset;
     }
-    if (state.screen === 'preview') {
+    if (hero) {
+      $('hero-image').style.width = state.renderWidth + 'px'; $('hero-image').style.height = state.renderHeight + 'px';
+    } else if (state.screen === 'preview') {
       $('preview-image').style.width = state.renderWidth + 'px'; $('preview-image').style.height = state.renderHeight + 'px';
     } else {
       for (const canvas of [$('original-canvas'), $('past-canvas')]) {
@@ -257,10 +358,10 @@
     render();
   }
   function render() {
-    if (state.screen === 'capture') return;
     const y = (activeViewport().clientHeight - state.renderHeight) / 2;
     const transform = `translate3d(${-state.offset}px,${y}px,0)`;
-    if (state.screen === 'preview') $('preview-image').style.transform = transform;
+    if (state.screen === 'capture') $('hero-image').style.transform = transform;
+    else if (state.screen === 'preview') $('preview-image').style.transform = transform;
     else {
       $('original-layer').style.transform = transform; $('past-layer').style.transform = transform;
       $('past-clip').style.clipPath = `inset(0 0 0 ${100 - state.pastPercent}%)`;
@@ -297,6 +398,8 @@
     viewport.addEventListener('pointerdown', (event) => {
       if (event.button !== 0 || state.revealing) return;
       const handle = event.target.closest('#slider-handle');
+      if (!handle && event.target.closest('button, a, input, select, textarea')) return;
+      $('gesture-hint').hidden = true;
       state.drag = { pointerId: event.pointerId, x: event.clientX, y: event.clientY, offset: state.offset, slider: !!handle, target: viewport };
       viewport.setPointerCapture(event.pointerId); viewport.classList.add('dragging');
       if (handle) { event.preventDefault(); sliderAt(event.clientX); }
@@ -316,7 +419,7 @@
       state.drag = null; viewport.classList.remove('dragging');
       if (viewport.hasPointerCapture(event.pointerId)) viewport.releasePointerCapture(event.pointerId);
     };
-    viewport.addEventListener('pointerup', endDrag); viewport.addEventListener('pointercancel', endDrag);
+    viewport.addEventListener('pointerup', endDrag); viewport.addEventListener('pointercancel', endDrag); viewport.addEventListener('lostpointercapture', endDrag);
     // Safari needs a non-passive touch listener to keep horizontal pano gestures local.
     let touchStart = null;
     viewport.addEventListener('touchstart', (event) => { if (event.touches.length === 1) touchStart = { x: event.touches[0].clientX, y: event.touches[0].clientY }; }, { passive: true });
@@ -336,7 +439,7 @@
       render();
     });
   }
-  installPan($('preview-window')); installPan($('pano-viewport'));
+  installPan($('capture-screen')); installPan($('preview-window')); installPan($('pano-viewport'));
   $('slider-handle').addEventListener('keydown', (event) => {
     const delta = event.shiftKey ? 20 : 5;
     if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) return;
@@ -345,6 +448,8 @@
   });
   new ResizeObserver(resizeViewport).observe($('pano-viewport'));
   new ResizeObserver(resizeViewport).observe($('preview-window'));
+  new ResizeObserver(resizeViewport).observe($('capture-screen'));
+  $('hero-image').addEventListener('load', resizeViewport);
   window.addEventListener('resize', resizeViewport);
 
   async function unlockAudio() {
@@ -369,8 +474,9 @@
   }
   async function playAudio() {
     if (!state.sound || !state.audioContext || !state.jobId) return;
-    const buffer = await getAudio(state.jobId);
-    if (!buffer || state.audioContext.state !== 'running') return;
+    const generation = state.generation, jobId = state.jobId;
+    const buffer = await getAudio(jobId);
+    if (!buffer || state.audioContext.state !== 'running' || generation !== state.generation || state.screen !== 'result') return;
     const source = state.audioContext.createBufferSource(), gain = state.audioContext.createGain();
     source.buffer = buffer; source.connect(gain); gain.connect(state.audioContext.destination);
     const t = state.audioContext.currentTime;
@@ -381,20 +487,19 @@
   $('audio-button').addEventListener('click', async () => { await unlockAudio(); await playAudio(); });
 
   $('generate-button').addEventListener('click', async () => {
-    if (!state.file || $('generate-button').disabled) return;
-    if (!$('year-input').checkValidity()) { $('year-input').reportValidity(); return; }
+    if (state.screen === 'result' && state.manifest?.status === 'error') { editJourney(state.decade); return; }
+    if (!state.file || state.screen !== 'preview' || state.submitting || state.loadingSource) return;
     unlockAudio();
-    const button = $('generate-button'); button.disabled = true;
-    const file = state.file, targetYear = state.targetYear;
+    const generation = state.generation, file = state.file, decade = state.decade;
+    const place = $('place-input').value.trim();
     const heading = state.renderWidth ? ((state.offset + $('preview-window').clientWidth / 2) / state.renderWidth) : 0.5;
+    const form = new FormData(); form.append('image', file); form.append('decade', decade);
+    form.append('heading', String(Math.max(0, Math.min(1, heading)))); form.append('is_360', String($('is-360').checked));
+    if (state.location && state.locationSource === 'geolocation') { form.append('lat', String(state.location.lat)); form.append('lon', String(state.location.lon)); }
+    if ((state.locationSource === 'manual' || !state.location) && place) form.append('place', place);
+    state.submitting = true; syncChrome();
     try {
       if (!navigator.onLine) throw new Error('目前处于离线状态，请打开时光档案，重访已保存的旅程。');
-      if (!state.manualPlace || !$('place-input').value.trim()) await state.locationPromise;
-      if (file !== state.file || state.screen !== 'preview') return;
-      const form = new FormData(); form.append('image', file); form.append('target_year', String(targetYear));
-      form.append('heading', String(Math.max(0, Math.min(1, heading)))); form.append('is_360', String($('is-360').checked));
-      if (state.location && state.locationSource === 'geolocation') { form.append('lat', String(state.location.lat)); form.append('lon', String(state.location.lon)); }
-      if (state.manualPlace) { const place = $('place-input').value.trim(); if (place) form.append('place', place); }
       const response = await fetch('/jobs', { method: 'POST', body: form });
       if (!response.ok) {
         let detail = await response.text();
@@ -403,45 +508,58 @@
       }
       const job = await response.json();
       if (!job.job_id) throw new Error('服务未返回旅程编号，请重试。');
-      if (file !== state.file || state.screen !== 'preview') return;
-      await startJob(job.job_id, false, heading, targetYear);
-    } catch (error) { showToast(error.message || '连接失败，照片已保留，可以再次尝试。', 8000); }
-    finally { button.disabled = false; }
+      rememberJob({ job_id: job.job_id, decade, place: place || '未知城市', status: 'running', provider: state.health?.provider });
+      if (generation !== state.generation || state.file !== file || state.screen !== 'preview') {
+        showToast('旅程已提交，可从时光档案继续查看。');
+        return;
+      }
+      state.decade = decade;
+      await startJob(job.job_id, false, heading);
+    } catch (error) {
+      if (generation === state.generation) showToast(error.message || '连接失败，照片已保留，可以再次尝试。', 8000);
+    } finally { state.submitting = false; syncChrome(); }
   });
 
-  async function startJob(jobId, replay = false, heading = 0.5, targetYear = null) {
+  async function startJob(jobId, replay = false, heading = 0.5) {
     stopJourney();
+    const generation = state.generation;
+    if (replay) {
+      state.file = null; state.fileOrigin = null;
+      if (state.fileURL) URL.revokeObjectURL(state.fileURL);
+      state.fileURL = null; state.imageWidth = 0; state.imageHeight = 0;
+    } else state.fileOrigin = jobId;
     state.jobId = jobId; state.manifest = null; state.geometryKey = null;
     state.viewingReplay = replay;
-    state.expectedYear = replay ? null : targetYear;
     state.loadedTiles = new Set(); state.originalImage = null; state.finalLoaded = false;
-    state.revealed = false; state.pastPercent = 0; state.offlineSaved = false;
+    state.revealed = false; state.pastPercent = 100; state.offlineSaved = false; state.cachePending = false;
+    state.viewMode = 'past'; state.viewRevision++; state.receiptStatus = null; state.renderWidth = 0;
     state.initialHeading = heading; state.wrap = false; state.offset = 0;
     $('generation-overlay').hidden = false; $('progress-strip').hidden = false;
     text('generation-title', replay ? '重访这一刻' : '让时间慢下来');
     text('generation-detail', replay ? '正在打开保存的全景…' : '正在读取你的全景…');
     text('progress-text', '准备出发'); text('progress-count', '0 / 0'); $('progress-fill').style.width = '0%';
-    $('download-button').hidden = true; $('metrics-panel').hidden = true; $('historical-context').hidden = true; $('place-warning').hidden = true;
+    $('download-button').hidden = true; $('metrics-panel').hidden = true;
     $('metrics-toggle').setAttribute('aria-expanded', 'false');
     $('replay-badge').hidden = !replay; text('result-mode', '');
     text('result-place', ''); text('result-subtitle', '旧日的风景，正在眼前展开。');
-    text('result-year', targetYear ?? '—'); text('reveal-year', targetYear ?? '—');
-    $('past-label').innerHTML = `${escapeHTML(targetYear ?? '待确认')} 年 <span>REIMAGINED</span>`;
-    document.title = `${targetYear ?? '读取旅程'} · CENTURY PANO`;
+    text('result-year', years[state.decade]); text('reveal-year', years[state.decade]);
     for (const canvas of [$('original-canvas'), $('past-canvas')]) { canvas.width = 1; canvas.height = 1; }
+    showScreen('result');
+    history.replaceState(null, '', `?replay=${encodeURIComponent(jobId)}`);
     if (!replay && state.fileURL) {
       try {
         const image = await loadImage(state.fileURL);
+        if (generation !== state.generation) return;
         for (const canvas of [$('original-canvas'), $('past-canvas')]) {
           canvas.width = Math.min(image.naturalWidth, 6000); canvas.height = Math.round(canvas.width / image.naturalWidth * image.naturalHeight);
           canvas.getContext('2d').drawImage(image, 0, 0, canvas.width, canvas.height);
         }
       } catch { /* Server preview will replace the temporary image. */ }
     }
-    showScreen('result');
-    history.replaceState(null, '', `?replay=${encodeURIComponent(jobId)}`);
+    if (generation !== state.generation) return;
+    resizeViewport();
     getAudio(jobId);
-    pollManifest(state.generation);
+    pollManifest(generation);
   }
   function duplicateCanvas(canvas, width, height) {
     if (state.wrap) canvas.getContext('2d').drawImage(canvas, 0, 0, width, height, width, 0, width, height);
@@ -466,55 +584,29 @@
   }
   function placeName(place) { return typeof place === 'string' ? place : place?.name || '未知城市'; }
   function isDemo(manifest) { return !!manifest.demo || manifest.provider === 'demo' || manifest.tiles?.some((tile) => tile.provider === 'demo'); }
-  function renderHistoricalContext(manifest) {
-    const context = manifest.constraints?.historical_context;
-    const panel = $('historical-context'); panel.hidden = false;
-    if (!context) {
-      panel.innerHTML = '<h3>历史背景</h3><p>此旅程暂无地点历史背景记录。画面为想象重建，具体建筑和土地用途尚未核实。</p>';
-      return;
-    }
-    const fallback = context.evidence_basis === 'fallback';
-    const date = /^(\d{4})-(\d{2})-(\d{2})$/.exec(context.reference_date || '');
-    const reference = date ? `${date[1]} 年 ${Number(date[2])} 月 ${Number(date[3])} 日` : `${context.target_year ?? yearOf(manifest) ?? '所选'} 年 7 月 1 日`;
-    const siteLabels = { undeveloped: '未开发', agricultural: '农业用地', built: '已建成', mixed: '混合用途', unknown: '尚未确认' };
-    const list = (heading, values) => Array.isArray(values) && values.length ? `<div class="history-section"><h4>${heading}</h4><ul>${values.map((value) => `<li>${escapeHTML(value)}</li>`).join('')}</ul></div>` : '';
-    panel.innerHTML = `<div class="history-heading"><h3>历史背景推测</h3><span>${escapeHTML(reference)} · 参考时点</span></div>`
-      + `<p class="history-status">${fallback ? '地点历史尚未确认 · 使用保守推测' : '基于模型知识的推测 · 未经史料核实'}</p>`
-      + `<p>${escapeHTML(context.period_summary || '该地点在目标年份的背景尚未确认。')}</p>`
-      + `<p><strong>推测土地用途：${escapeHTML(siteLabels[context.site_state] || siteLabels.unknown)}</strong>${context.site_history ? `<br>${escapeHTML(context.site_history)}` : ''}</p>`
-      + list('当地背景', context.local_context)
-      + list('画面重建依据', context.reconstruction_changes)
-      + list('仍待确认', context.uncertainties)
-      + '<p class="history-footnote">同一地点可能曾是荒地、农田，或存在不同建筑。当前全景不代表这些建筑在所选年份已经存在；影像与背景均需史料核实。</p>';
-  }
   function updateMetadata(manifest) {
     const demo = isDemo(manifest), replay = manifest.mode === 'replay' || state.viewingReplay;
-    const year = yearOf(manifest);
-    const unrecognizedCity = manifest.place?.source === 'manual' && manifest.place?.prompt_safe === false;
-    $('place-warning').hidden = !unrecognizedCity;
-    if (unrecognizedCity) {
-      const warning = '手填城市未识别，未用于历史推理，请补充州 / 国家或使用照片定位。';
-      text('place-warning', warning); text('location-note', warning);
-    }
-    text('result-place', placeName(manifest.place)); text('result-year', year ?? '—');
-    text('reveal-year', year ?? '—');
-    $('past-label').innerHTML = `${escapeHTML(year ?? '待确认')} 年 <span>REIMAGINED</span>`;
-    document.title = `${year ?? '年份待确认'} · ${placeName(manifest.place)} · CENTURY PANO`;
+    if (years[manifest.decade]) state.decade = manifest.decade;
+    if (state.receiptStatus !== manifest.status) { rememberJob(manifest); state.receiptStatus = manifest.status; }
+    text('result-place', placeName(manifest.place)); text('result-year', manifest.anchor_year || years[manifest.decade] || '1925');
+    text('reveal-year', manifest.anchor_year || years[manifest.decade] || '1925');
+    $('past-label').innerHTML = `${escapeHTML(manifest.decade?.slice(0, 4) || '1920')} 年代 <span>REIMAGINED</span>`;
     $('replay-badge').hidden = !replay;
     text('result-mode', demo ? '本地效果演示 · 未调用 AI' : replay ? '已存档旅程 · 无生成调用' : 'AI 想象重建');
-    text('result-note', demo ? '工程示例 / 本地调色用于验证交互与流程，不代表 AI 重建效果。' : '结合所选年份与拍摄地点推测历史场景，建筑和土地用途可能与今天不同。');
+    text('result-note', demo ? '工程示例 / 本地调色用于验证交互与流程，不代表 AI 重建效果。' : '以你拍摄的全景为起点，重新想象另一个年代。');
     const done = manifest.tiles?.filter((tile) => ['done', 'error'].includes(tile.status)).length || 0;
     const total = manifest.geometry?.n || manifest.tiles?.length || 0;
     $('progress-fill').style.width = `${total ? done / total * 100 : 0}%`;
     text('progress-count', `${done} / ${total || '—'} 个画面`);
     const stage = manifest.stage;
-    let progress = done ? '时光正在展开，已完成的区域可以拖动探索' : stage === 'history' ? '正在判断该年份的当地历史与地块变化' : manifest.anchor?.status === 'running' ? '正在建立统一的历史场景与环境' : stage === 'preprocess' ? '正在准备全景' : '正在理解拍摄场景与所选年份';
+    let progress = done ? '时光正在展开，已完成的区域可以拖动探索' : manifest.anchor?.status === 'running' ? '正在建立统一的年代色彩与天空' : stage === 'preprocess' ? '正在准备全景' : '正在理解场景与年代风格';
     if (manifest.status === 'done') progress = replay ? '已打开存档 · 数据来自原始运行' : '旅程已完成';
     if (manifest.status === 'done_partial') progress = '部分画面未生成，已保留对应原图';
     if (manifest.status === 'error') progress = '旅程暂时中断';
     text('progress-text', progress); text('generation-detail', progress);
-    if (done > 0) { $('generation-overlay').hidden = true; if (!state.finalLoaded && state.pastPercent === 0) setPastPercent(100); }
-    renderHistoricalContext(manifest);
+    if (done > 0) $('generation-overlay').hidden = true;
+    $('progress-strip').hidden = state.finalLoaded && ['done', 'done_partial'].includes(manifest.status);
+    syncChrome();
     renderMetrics(manifest);
   }
   async function applyManifest(manifest, generation) {
@@ -544,6 +636,7 @@
       } catch { /* Retry missing assets with the next manifest poll. */ }
     }));
     if (generation !== state.generation) return;
+    syncChrome();
     if (manifest.result?.status === 'done' && !state.finalLoaded) {
       try {
         const image = await loadImage(`/jobs/${encodeURIComponent(manifest.job_id)}/result`);
@@ -551,10 +644,12 @@
         const ctx = $('past-canvas').getContext('2d'); ctx.drawImage(image, 0, 0, geometry.W, geometry.H);
         duplicateCanvas($('past-canvas'), geometry.W, geometry.H);
         state.finalLoaded = true; $('generation-overlay').hidden = true;
+        $('progress-strip').hidden = true;
         $('download-button').href = `/jobs/${encodeURIComponent(manifest.job_id)}/result`;
         $('download-button').hidden = false;
         text('result-subtitle', isDemo(manifest) ? '工程示例。拖动圆点，探索今昔对比。' : '时间走了很远，视角始终在这里。');
         if (manifest.status === 'done_partial') showToast('部分区域未能完成重建，已保留原始画面。');
+        syncChrome();
         await reveal(generation);
         if (generation === state.generation) cacheJourney(manifest);
       } catch { text('progress-text', '结果正在保存，马上就好…'); }
@@ -568,13 +663,6 @@
       if (!response.ok) throw new Error(response.status === 404 ? '这个旅程不存在，或当前设备还没有保存它。' : '暂时无法连接服务');
       const manifest = await response.json();
       if (generation !== state.generation) return;
-      if (state.expectedYear !== null && yearOf(manifest) !== null && yearOf(manifest) !== state.expectedYear) {
-        $('generation-overlay').hidden = false;
-        text('generation-title', '返回的年份与选择不一致');
-        text('generation-detail', `你选择了 ${state.expectedYear} 年，请重新生成。`);
-        text('progress-text', '已停止加载，避免显示其他年份的结果');
-        return;
-      }
       await applyManifest(manifest, generation);
       if (generation !== state.generation) return;
       if (manifest.status === 'error') {
@@ -601,7 +689,10 @@
   }
   async function reveal(generation) {
     if (state.revealed || generation !== state.generation) return;
-    state.revealed = true; state.revealing = true; state.drag = null;
+    state.revealed = true;
+    if (state.viewMode !== 'past' || state.clean || state.drag) return;
+    const viewRevision = state.viewRevision;
+    state.revealing = true; state.drag = null;
     const center = (state.offset + $('pano-viewport').clientWidth / 2) / state.renderWidth;
     setPastPercent(0);
     document.body.classList.add('revealing'); resizeViewport();
@@ -613,7 +704,7 @@
     await new Promise((resolve) => {
       const start = performance.now();
       function animate(now) {
-        if (generation !== state.generation) { resolve(); return; }
+        if (generation !== state.generation || viewRevision !== state.viewRevision) { resolve(); return; }
         const t = duration ? Math.min(1, (now - start) / duration) : 1;
         setPastPercent((t < .5 ? 2 * t * t : 1 - ((-2 * t + 2) ** 2) / 2) * 100);
         if (t < 1) requestAnimationFrame(animate); else resolve();
@@ -624,14 +715,15 @@
     document.body.classList.remove('revealing'); state.revealing = false;
     resizeViewport(); state.offset = constrainOffset(center * state.renderWidth - $('pano-viewport').clientWidth / 2);
     state.gyroBase = state.offset; state.gyroTarget = state.offset; state.alpha0 = null;
-    setPastPercent(100);
+    if (viewRevision === state.viewRevision) setPastPercent(100);
+    syncChrome();
   }
 
   function metricNumber(value, suffix = ' s') { return typeof value === 'number' && Number.isFinite(value) ? value.toFixed(2) + suffix : '—'; }
   function renderMetrics(manifest) {
     const metrics = manifest.metrics || {}, seam = metrics.seam_err || {};
     const cells = [
-      ['首个可见画面', metricNumber(metrics.first_view_s), '首次完成的重建画面'],
+      ['首个可见画面', metricNumber(metrics.first_view_s), '首次完成调色的画面'],
       ['完整旅程', metricNumber(metrics.total_s), '本次运行实际用时'],
       ['接缝色差 · 调色前 / 后', `${metricNumber(seam.raw, '')} / ${metricNumber(seam.after_color_match, '')}`, `原图参考值 ${metricNumber(seam.originals_floor, '')}`],
       ['相对串行加速', metricNumber(metrics.speedup, '×'), metrics.serial_baseline_s == null ? '尚未测量串行基线' : `串行基线 ${metricNumber(metrics.serial_baseline_s)}`],
@@ -663,12 +755,14 @@
   }
   $('gyro-button').addEventListener('click', async () => {
     if (state.gyro) { disableGyro(); return; }
+    const generation = state.generation;
     try {
       if (!window.DeviceOrientationEvent) { gyroFallback(); return; }
       if (typeof window.DeviceOrientationEvent.requestPermission === 'function') {
         const permission = await window.DeviceOrientationEvent.requestPermission();
         if (permission !== 'granted') { gyroFallback(); return; }
       }
+      if (generation !== state.generation || state.screen !== 'result') return;
       state.gyro = true; state.alpha0 = null; state.gyroSeen = false; state.gyroBase = state.offset; state.gyroTarget = state.offset;
       window.addEventListener('deviceorientation', onOrientation);
       $('gyro-button').innerHTML = '<svg><use href="#i-check"/></svg>转动跟随已开启';
@@ -681,30 +775,58 @@
     showToast('已将当前视角设为中心。', 2200);
   });
 
-  function localReplays() { try { return JSON.parse(localStorage.getItem('century-replays') || '[]'); } catch { return []; } }
-  async function cacheJourney(manifest) {
-    if (state.offlineSaved || !navigator.serviceWorker) return;
-    state.offlineSaved = true;
+  function storedJourneys(key) {
     try {
-      const registration = await navigator.serviceWorker.ready;
+      const entries = JSON.parse(localStorage.getItem(key) || '[]');
+      return Array.isArray(entries) ? entries.filter((entry) => entry && typeof entry.job_id === 'string') : [];
+    } catch { return []; }
+  }
+  function localReplays() { return storedJourneys('century-replays'); }
+  function rememberJob(manifest) {
+    const entries = storedJourneys('century-recent-jobs');
+    const previous = entries.find((entry) => entry.job_id === manifest.job_id);
+    const entry = {
+      ...previous, job_id: manifest.job_id, place: manifest.place, decade: manifest.decade,
+      anchor_year: manifest.anchor_year, provider: manifest.provider, demo: isDemo(manifest),
+      status: manifest.status, metrics: manifest.metrics, saved_at: Date.now(),
+    };
+    try { localStorage.setItem('century-recent-jobs', JSON.stringify([entry, ...entries.filter((item) => item.job_id !== entry.job_id)].slice(0, 24))); }
+    catch { /* Storage restrictions do not interrupt the active journey. */ }
+  }
+  async function cacheJourney(manifest) {
+    if (state.offlineSaved || state.cachePending || !navigator.serviceWorker) return;
+    state.cachePending = true;
+    const jobId = manifest.job_id;
+    try {
+      const registration = await Promise.race([
+        navigator.serviceWorker.ready,
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Service worker unavailable')), 10000)),
+      ]);
       const urls = [
         `/jobs/${manifest.job_id}/manifest`, `/jobs/${manifest.job_id}/preview`,
         `/jobs/${manifest.job_id}/result`, `/jobs/${manifest.job_id}/audio`,
         ...(manifest.tiles || []).filter((tile) => tile.status === 'done').map((tile) => tile.path ? assetURL(tile.path) : `/jobs/${manifest.job_id}/tiles/${tile.i}`),
       ];
       const channel = new MessageChannel();
+      const timeout = setTimeout(() => { channel.port1.close(); if (state.jobId === jobId) state.cachePending = false; }, 15000);
       channel.port1.onmessage = (event) => {
+        clearTimeout(timeout); channel.port1.close();
+        if (state.jobId === jobId) state.cachePending = false;
         if (!event.data?.ok) return;
-        const entry = { job_id: manifest.job_id, place: manifest.place, target_year: manifest.target_year, decade: manifest.decade, anchor_year: manifest.anchor_year, metrics: manifest.metrics, provider: manifest.provider, demo: isDemo(manifest), mode: 'replay' };
+        const entry = { job_id: manifest.job_id, place: manifest.place, decade: manifest.decade, anchor_year: manifest.anchor_year, metrics: manifest.metrics, provider: manifest.provider, demo: isDemo(manifest), mode: 'replay' };
         const replays = localReplays().filter((replay) => replay.job_id !== entry.job_id);
         replays.unshift(entry);
         try { localStorage.setItem('century-replays', JSON.stringify(replays.slice(0, 12))); } catch { /* Quota restriction does not affect the current viewer. */ }
-        if (state.jobId === manifest.job_id) text('progress-text', '旅程已保存 · 断网后可从时光档案重访');
+        if (state.jobId === manifest.job_id) {
+          state.offlineSaved = true;
+          text('progress-text', '旅程已保存 · 断网后可从时光档案重访');
+        }
       };
       (navigator.serviceWorker.controller || registration.active)?.postMessage({ type: 'CACHE_JOURNEY', urls, jobId: manifest.job_id }, [channel.port2]);
-    } catch { /* Offline availability is only advertised after successful caching. */ }
+    } catch { if (state.jobId === jobId) state.cachePending = false; }
   }
   async function openReplays() {
+    closeOptions();
     const dialog = $('replay-dialog'); if (!dialog.open) dialog.showModal();
     $('replay-list').innerHTML = '<p class="empty-state">正在打开时光档案…</p>';
     let entries = [];
@@ -714,25 +836,30 @@
       const body = await response.json(); entries = Array.isArray(body) ? body : body.replays || [];
     } catch { /* Merge confirmed device caches below. */ }
     const device = localReplays();
-    const map = new Map([...device, ...entries].map((entry) => [entry.job_id, entry]));
+    const map = new Map([...storedJourneys('century-recent-jobs'), ...device, ...entries].map((entry) => [entry.job_id, entry]));
     entries = [...map.values()];
     if (!entries.length) { $('replay-list').innerHTML = '<p class="empty-state">还没有保存的旅程。<br>联网完成一次生成后，就能在这里离线重访。</p>'; return; }
     $('replay-list').innerHTML = '';
     entries.forEach((entry) => {
       const button = document.createElement('button'); button.className = 'replay-card';
       const demo = isDemo(entry), cached = device.some((item) => item.job_id === entry.job_id);
-      button.innerHTML = `<img src="/jobs/${encodeURIComponent(entry.job_id)}/result" alt="${escapeHTML(placeName(entry.place))}全景缩略图"><span class="replay-card-content"><strong>${escapeHTML(yearOf(entry) ?? '年份待确认')}</strong><span>${escapeHTML(placeName(entry.place))}</span><small>${demo ? '工程示例 · 本地调色' : '已完成的想象重建'}${cached ? ' · 已存本机' : ''}</small></span><span>↗</span>`;
-      button.addEventListener('click', () => { unlockAudio(); dialog.close(); startJob(entry.job_id, true, 0.5, yearOf(entry)); });
+      const pending = entry.status === 'running';
+      const status = pending ? '生成中的旅程 · 点击继续查看' : entry.status === 'error' ? '这次旅程未完成 · 查看详情' : demo ? '工程示例 · 本地调色' : '已完成的想象重建';
+      button.innerHTML = `<img src="/jobs/${encodeURIComponent(entry.job_id)}/${pending ? 'preview' : 'result'}" alt="${escapeHTML(placeName(entry.place))}全景缩略图"><span class="replay-card-content"><strong>${escapeHTML(entry.decade?.slice(0, 4) || entry.anchor_year || '旅程')}</strong><span>${escapeHTML(placeName(entry.place))}</span><small>${status}${cached ? ' · 已存本机' : ''}</small></span><span>↗</span>`;
+      button.querySelector('img').addEventListener('error', (event) => { event.target.hidden = true; }, { once: true });
+      button.addEventListener('click', () => { unlockAudio(); dialog.close(); state.decade = entry.decade || '1920s'; startJob(entry.job_id, true); });
       $('replay-list').appendChild(button);
     });
   }
   $('sample-button').addEventListener('click', openReplays); $('nav-replays').addEventListener('click', openReplays);
   $('close-replays').addEventListener('click', () => $('replay-dialog').close());
   $('replay-dialog').addEventListener('click', (event) => { if (event.target === $('replay-dialog')) { const rect = $('replay-dialog').getBoundingClientRect(); if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) $('replay-dialog').close(); } });
-  window.addEventListener('offline', connectionStatus); window.addEventListener('online', () => { checkHealth(); });
+  window.addEventListener('offline', connectionStatus);
+  window.addEventListener('online', () => { checkHealth(); if (state.finalLoaded && state.manifest) cacheJourney(state.manifest); });
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => { /* HTTPS or localhost is needed for offline mode. */ });
-  setTargetYear(state.targetYear);
   checkHealth();
+  showScreen('capture');
+  setTimeout(() => { $('gesture-hint').hidden = true; }, 5000);
   const replayId = new URLSearchParams(location.search).get('replay');
   if (replayId && /^[a-zA-Z0-9_-]{1,100}$/.test(replayId)) startJob(replayId, true);
 })();

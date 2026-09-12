@@ -1,7 +1,7 @@
 'use strict';
 const SHELL_CACHE = 'century-shell-v2';
 const JOURNEY_CACHE = 'century-journeys-v1';
-const SHELL = ['/', '/index.html', '/app.js', '/style.css', '/scene.svg'];
+const SHELL = ['/', '/index.html', '/app.js', '/style.css', '/window-scene.png'];
 
 async function cachedReplay(request) {
   const cached = await caches.match(request);
@@ -21,6 +21,8 @@ self.addEventListener('fetch', (event) => {
   if (event.request.method !== 'GET' || url.origin !== self.location.origin) return;
   if (url.pathname === '/health') return;
   if (event.request.mode === 'navigate') {
+    // Only the application entry points use the offline shell; demo routes stay network-only.
+    if (url.pathname !== '/' && url.pathname !== '/index.html') return;
     event.respondWith(fetch(event.request).then(async (response) => response.ok ? response : (await caches.match('/')) || response).catch(() => caches.match('/'))); return;
   }
   if (SHELL.includes(url.pathname)) {
