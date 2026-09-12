@@ -1,9 +1,11 @@
-"""Serve all four app modes behind an existing WORLD_ACCESS_TOKEN.
+"""Serve all four app modes through a gateway to the local backend.
 
 Run behind an HTTPS tunnel. Vercel rewrites the API paths to this gateway;
 --public-origin must include the Vercel site origin for cookie-authenticated
 mutations. Credentials stay in a Secure, HttpOnly cookie and are revalidated by
 the backend on every private request. This process never starts workers.
+With --public, visitors need no code: the gateway reads the upstream credential
+from its private environment file and uses it only on the loopback connection.
 """
 from __future__ import annotations
 
@@ -12,6 +14,7 @@ import base64
 import binascii
 from contextlib import asynccontextmanager
 import json
+from pathlib import Path
 import re
 from urllib.parse import urlsplit
 
@@ -114,9 +117,13 @@ async def read_body(request: Request, limit: int) -> bytes:
 
 def create_app(*, port: int = 8005, upstream: str = 'http://127.0.0.1:8001',
                public_origins: tuple[str, ...] = (),
+               public_access_token: str | None = None,
                transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
     upstream_url = validate_settings(port, upstream)
     origins = {normalize_origin(origin) for origin in public_origins}
+    public_access = public_access_token is not None
+    if public_access and not valid_token(public_access_token):
+        raise ValueError('Public access needs WORLD_ACCESS_TOKEN in the private backend environment.')
 
     @asynccontextmanager
     async def lifespan(app):
@@ -160,6 +167,8 @@ def create_app(*, port: int = 8005, upstream: str = 'http://127.0.0.1:8001',
             raise HTTPException(502, 'The application backend is unavailable.') from None
         try:
             if response.status_code in (401, 403):
+                if public_access:
+                    raise HTTPException(502, 'The application backend is unavailable.')
                 raise HTTPException(401, 'The application access code is not valid.')
             if response.status_code == 200 and response.json() == {'authenticated': True}:
                 return
@@ -175,6 +184,13 @@ def create_app(*, port: int = 8005, upstream: str = 'http://127.0.0.1:8001',
 
     @app.api_route('/app-session', methods=['GET', 'POST', 'DELETE'])
     async def session(request: Request):
+        if public_access:
+            if request.method != 'GET':
+                check_origin(request, required=True)
+            await validate_access(public_access_token)
+            # Clear any old private-session cookie; no credential is issued to
+            # visitors. Only the gateway authenticates to the local backend.
+            return clear_session(JSONResponse({'authenticated': True, 'access_mode': 'public'}))
         if request.method == 'DELETE':
             check_origin(request, required=True)
             return clear_session(JSONResponse({'authenticated': False}))
@@ -220,8 +236,8 @@ def create_app(*, port: int = 8005, upstream: str = 'http://127.0.0.1:8001',
             raise HTTPException(405, 'Method not allowed.', headers={'Allow': ', '.join(allowed)})
         token = None
         if not static and route != '/world-config':
-            token, from_cookie = request_credential(request)
-            if from_cookie and request.method not in READ:
+            token, from_cookie = ((public_access_token, False) if public_access else request_credential(request))
+            if (public_access or from_cookie) and request.method not in READ:
                 check_origin(request, required=True)
             await validate_access(token)
         body = await read_body(request, MAX_UPLOAD_BYTES if route in ('/preview', '/jobs') else MAX_JSON_BYTES)
@@ -259,9 +275,19 @@ def main():
     parser.add_argument('--port', type=int, default=8005)
     parser.add_argument('--upstream', default='http://127.0.0.1:8001')
     parser.add_argument('--public-origin', action='append', default=[])
+    parser.add_argument('--public', action='store_true', help='Open the app without a visitor access code.')
+    parser.add_argument('--env-file', type=Path, default=Path('.env'),
+                        help='Private backend environment file used with --public.')
     args = parser.parse_args()
     try:
-        app = create_app(port=args.port, upstream=args.upstream, public_origins=tuple(args.public_origin))
+        token = None
+        if args.public:
+            from dotenv import dotenv_values
+            token = dotenv_values(args.env_file).get('WORLD_ACCESS_TOKEN')
+            if not valid_token(token):
+                parser.error('Public access needs WORLD_ACCESS_TOKEN in --env-file.')
+        app = create_app(port=args.port, upstream=args.upstream, public_origins=tuple(args.public_origin),
+                         public_access_token=token)
     except ValueError as exc:
         parser.error(str(exc))
     uvicorn.run(app, host='127.0.0.1', port=args.port, access_log=False, proxy_headers=False)

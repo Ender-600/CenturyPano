@@ -17,10 +17,12 @@
       <p class="eyebrow">CENTURY PANO</p>
       <h1 id="app-access-title">A window onto time.</h1>
       <p>Camera, photo history, Street View and immersive worlds.</p>
-      <label for="app-access-code">Access code</label>
-      <input id="app-access-code" name="access_code" type="password" autocomplete="current-password" spellcheck="false" autocapitalize="none" maxlength="128" required disabled aria-describedby="app-access-status">
-      <button class="generate-button" id="app-access-submit" type="submit" disabled>Enter</button>
-      <p class="access-status" id="app-access-status" role="status" aria-live="polite">Checking your access…</p>
+      <div id="app-access-entry" hidden>
+        <label for="app-access-code">Access code</label>
+        <input id="app-access-code" name="access_code" type="password" autocomplete="current-password" spellcheck="false" autocapitalize="none" maxlength="128" required disabled aria-describedby="app-access-status">
+        <button class="generate-button" id="app-access-submit" type="submit" disabled>Enter</button>
+      </div>
+      <p class="access-status" id="app-access-status" role="status" aria-live="polite">Opening your window…</p>
       <button class="subtle-button" id="app-access-retry" type="button" hidden>Try again</button>
     </form>
   </section>

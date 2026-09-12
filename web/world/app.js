@@ -40,7 +40,7 @@ const STANDARD_REASONS = new Map([
 const state = {
   embedded: EMBEDDED, active: !EMBEDDED, mode: 'streetview', hostEpoch: 0,
   eventsBound: false, bootStarted: false, bootPromise: null, hostYear: null, sourceSelected: false, worldPose: null,
-  token: '', sessionAuthenticated: false, sessionMode: new URLSearchParams(location.search).get('session') === '1', config: null, plan: null, job: null, planBusy: false, generateBusy: false,
+  token: '', sessionAuthenticated: false, publicAccess: false, sessionMode: new URLSearchParams(location.search).get('session') === '1', config: null, plan: null, job: null, planBusy: false, generateBusy: false,
   model: 'marble-1.1',
   restoring: false, resumeBusy: false, submissionUnknown: false, planEpoch: 0, jobEpoch: 0, viewEpoch: 0,
   pollTimer: null, view: 'source', viewAbort: null, viewBusy: false, userViewLocked: false,
@@ -240,7 +240,9 @@ async function api(path, { method = 'GET', body, auth = true, signal, format = '
   if (typeof path !== 'string' || (path !== '/app-session' && !/^\/world-(?:config|session|plans|jobs|prefetch)(?:\/[^?#]*)?$/.test(path))) {
     throw new RequestError(0, 'Invalid service URL.');
   }
-  if (auth && !hasAccess()) throw new RequestError(401, 'Enter an access code and connect to the generation service first.');
+  if (auth && !hasAccess()) throw new RequestError(401, state.publicAccess
+    ? 'The service is unavailable. Reload this page to reconnect.'
+    : 'Enter an access code and connect to the generation service first.');
   const headers = new Headers();
   if (auth && state.token) headers.set('Authorization', `Bearer ${state.token}`);
   if (body !== undefined) headers.set('Content-Type', 'application/json');
@@ -258,7 +260,8 @@ async function api(path, { method = 'GET', body, auth = true, signal, format = '
     if (!response.ok) {
       if (response.status === 401 && (auth || path === '/app-session')) {
         state.token = ''; state.sessionAuthenticated = false; storageSet(TOKEN_KEY, null);
-        $('access-panel').hidden = false; $('connection').textContent = 'Access code required';
+        $('access-panel').hidden = state.publicAccess;
+        $('connection').textContent = state.publicAccess ? 'Service unavailable' : 'Access code required';
         syncUI();
       }
       let detail = '';
@@ -1701,23 +1704,30 @@ function canRequestLocalSession(hostname) {
 }
 
 async function initialiseAccess() {
-  if (state.sessionMode) {
-    state.token = ''; storageSet(TOKEN_KEY, null);
-    try {
-      const session = await api('/app-session', { auth: false });
-      if (session.authenticated !== true) throw new Error('Access code required');
-      state.sessionAuthenticated = true; connected(); return;
-    } catch {
-      state.sessionAuthenticated = false;
-      $('access-panel').hidden = false; $('connection').textContent = 'Access code required'; syncUI();
-      message('Open settings and enter your access code to reconnect.', true); return;
-    }
-  }
   const fragment = new URLSearchParams(location.hash.slice(1));
   const supplied = fragment.get('access');
   if (fragment.has('access')) {
     fragment.delete('access');
     history.replaceState(null, '', `${location.pathname}${location.search}${fragment.size ? `#${fragment}` : ''}`);
+  }
+  try {
+    const session = await api('/app-session', { auth: false });
+    if (session.authenticated !== true) throw new Error('Service unavailable');
+    state.sessionMode = true; state.publicAccess = session.access_mode === 'public';
+    state.token = ''; storageSet(TOKEN_KEY, null);
+    state.sessionAuthenticated = true; connected(); return;
+  } catch (error) {
+    // The local FastAPI app predates gateway sessions and keeps its own access flow.
+    if (error.status !== 404 || state.sessionMode) {
+      state.sessionMode = true; state.sessionAuthenticated = false;
+      state.token = ''; storageSet(TOKEN_KEY, null);
+      const needsCode = error.status === 401 && !state.publicAccess;
+      $('access-panel').hidden = !needsCode;
+      $('connection').textContent = needsCode ? 'Access code required' : 'Service unavailable'; syncUI();
+      message(needsCode ? 'Open settings and enter your access code to reconnect.'
+        : 'Unable to connect to the service. Reload this page to try again.', true);
+      return;
+    }
   }
   const saved = supplied ?? storageGet(TOKEN_KEY);
   if (validToken(saved)) {
@@ -1845,7 +1855,7 @@ function bindEvents() {
       if (state.sessionMode) {
         const session = await api('/app-session', { method: 'POST', body: { access_code: token }, auth: false });
         if (session.authenticated !== true) throw new Error('The access code was not accepted.');
-        state.token = ''; state.sessionAuthenticated = true; connected();
+        state.token = ''; state.publicAccess = session.access_mode === 'public'; state.sessionAuthenticated = true; connected();
       } else { state.token = token; await verifyAccess(); }
       if (!state.config) {
         try { await loadConfiguration(); }

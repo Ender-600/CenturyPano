@@ -6,7 +6,7 @@
 
 **想象重建，非历史影像。** HackCMU 2026 · Traveling。
 
-Vercel 四模式前端与认证后端的配置见 [Vercel 部署说明](docs/VERCEL_DEPLOYMENT.md)。模型密钥保留在 Python 后端，公网入口使用单独的应用访问码。
+Vercel 四模式网站打开即可使用，无需登录或访问码。配置见 [Vercel 部署说明](docs/VERCEL_DEPLOYMENT.md)，模型密钥保留在 Python 后端。
 
 ## 当前可运行版本
 

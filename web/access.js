@@ -20,11 +20,12 @@ export function createAccessGate({ window, document, fetch = window.fetch.bind(w
   clearOfflineCaches = () => removeGatewayOfflineCaches(window) }) {
   const $ = (id) => document.getElementById(id);
   let busy = false, started = false;
-  const state = { authenticated: false, sessionRequired: true };
+  const state = { authenticated: false, sessionRequired: true, accessMode: 'unknown' };
   window.CenturyAccess = state;
 
   function render(message, { entry = false, retry = false } = {}) {
     $('app-access-status').textContent = message;
+    $('app-access-entry').hidden = !entry;
     $('app-access-code').disabled = !entry || busy;
     $('app-access-submit').disabled = !entry || busy;
     $('app-access-submit').textContent = busy ? 'Connecting…' : 'Enter';
@@ -32,9 +33,10 @@ export function createAccessGate({ window, document, fetch = window.fetch.bind(w
     $('app-access-retry').disabled = busy;
   }
 
-  async function unlock(sessionRequired) {
+  async function unlock(sessionRequired, accessMode = sessionRequired ? 'private' : 'local') {
     state.authenticated = true;
     state.sessionRequired = sessionRequired;
+    state.accessMode = accessMode;
     $('app-access-code').value = '';
     render('Opening your window…');
     if (sessionRequired) await clearOfflineCaches();
@@ -49,7 +51,7 @@ export function createAccessGate({ window, document, fetch = window.fetch.bind(w
   async function request(method = 'GET', code) {
     if (busy || started) return;
     busy = true;
-    render(method === 'GET' ? 'Checking your access…' : 'Checking your access code…');
+    render(method === 'GET' ? 'Opening your window…' : 'Checking your access code…', { entry: method === 'POST' });
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 20000);
     try {
@@ -77,8 +79,10 @@ export function createAccessGate({ window, document, fetch = window.fetch.bind(w
         $('app-access-code').focus();
         return;
       }
-      if (!response.ok || (await response.json()).authenticated !== true) throw new Error('Session unavailable');
-      await unlock(true);
+      if (!response.ok) throw new Error('Session unavailable');
+      const session = await response.json();
+      if (session.authenticated !== true) throw new Error('Session unavailable');
+      await unlock(true, session.access_mode === 'public' ? 'public' : 'private');
     } catch {
       state.authenticated = false;
       busy = false;

@@ -123,6 +123,7 @@ function app(options = {}) {
         if (result !== undefined) return result;
       }
       if (url === '/world-config') return response({ configured: true, min_year: 1800, max_year: 2026 });
+      if (url === '/app-session') return response({ detail: 'Not found' }, 404);
       if (url === '/world-session') return response({ access_token: TOKEN });
       if (url === PROBE) return response({ detail: 'missing' }, 404);
       throw new Error('Unexpected fetch');
@@ -141,6 +142,45 @@ function app(options = {}) {
 }
 
 function authorised(view) { view.state.token = TOKEN; view.state.config = { configured: true }; }
+
+test('standalone world detects public access automatically without a code, bearer or saved credential', async () => {
+  const view = app({ storage: { 'century.world.access': TOKEN }, fetch: (url) => {
+    if (url === '/app-session') return response({ authenticated: true, access_mode: 'public' });
+    if (url === `/world-plans/${PLAN}`) return response(plan());
+  } });
+  await view.boot();
+  assert.equal(view.state.bootReady, true);
+  assert.equal(view.state.sessionMode, true);
+  assert.equal(view.state.sessionAuthenticated, true);
+  assert.equal(view.state.publicAccess, true);
+  assert.equal(view.state.token, '');
+  assert.equal(view.storage.has('century.world.access'), false);
+  assert.equal(view.elements.get('access-panel').hidden, true);
+  const loaded = await view.api(`/world-plans/${PLAN}`);
+  assert.equal(loaded.plan_id, PLAN);
+  assert.ok(view.requests.every((request) => request.method === 'GET' && !request.headers.has('Authorization')));
+  assert.ok(view.requests.every((request) => !request.url.includes(TOKEN) && request.body === undefined));
+  assert.equal(view.requests.some((request) => request.url === '/world-session'), false);
+});
+
+test('public service failures show retry guidance and do not fall back to an access-code form', async () => {
+  const unavailable = app({ storage: { 'century.world.access': TOKEN }, fetch: (url) => {
+    if (url === '/app-session') return response({ detail: 'Service unavailable' }, 502);
+  } });
+  await unavailable.initialiseAccess();
+  assert.equal(unavailable.state.sessionAuthenticated, false);
+  assert.equal(unavailable.state.token, '');
+  assert.equal(unavailable.elements.get('access-panel').hidden, true);
+  assert.match(unavailable.elements.get('message').textContent, /Reload this page/);
+
+  const revoked = app({ fetch: (url) => url === '/app-session'
+    ? response({ authenticated: true, access_mode: 'public' }) : response({ detail: 'Service unavailable' }, 401) });
+  await revoked.initialiseAccess();
+  await assert.rejects(revoked.api(`/world-plans/${PLAN}`));
+  assert.equal(revoked.state.sessionAuthenticated, false);
+  assert.equal(revoked.elements.get('access-panel').hidden, true);
+  await assert.rejects(revoked.api(`/world-plans/${PLAN}`), /service is unavailable/i);
+});
 
 test('gateway cookie session enables world controls without a bearer or stored access code', async () => {
   const view = app({ location: { search: '?session=1' }, storage: { 'century.world.access': TOKEN }, fetch: (url) => {
@@ -165,7 +205,7 @@ test('cookie session failure and expiration leave world APIs and generation lock
     const view = app({ location: { search: '?session=1' }, fetch: (url) => url === '/app-session' ? sessionReply : undefined });
     await view.initialiseAccess();
     assert.equal(view.state.sessionAuthenticated, false);
-    assert.equal(view.elements.get('access-panel').hidden, false);
+    assert.equal(view.elements.get('access-panel').hidden, sessionReply.status !== 401);
     const count = view.requests.length;
     await assert.rejects(view.api(`/world-plans/${PLAN}`), /access code/i);
     assert.equal(view.requests.length, count);
@@ -247,10 +287,12 @@ test('remote fragment access is removed from URL and sent only in protected head
   await view.initialiseAccess();
   assert.equal(view.state.token, TOKEN);
   assert.equal(view.rewrites[0][2], '/world');
-  assert.equal(view.requests.length, 1);
-  assert.equal(view.requests[0].url, PROBE);
-  assert.equal(view.requests[0].headers.get('Authorization'), `Bearer ${TOKEN}`);
-  assert.equal(view.requests[0].redirect, 'error');
+  assert.equal(view.requests.length, 2);
+  assert.equal(view.requests[0].url, '/app-session');
+  assert.equal(view.requests[0].headers.has('Authorization'), false);
+  assert.equal(view.requests[1].url, PROBE);
+  assert.equal(view.requests[1].headers.get('Authorization'), `Bearer ${TOKEN}`);
+  assert.equal(view.requests[1].redirect, 'error');
   assert.equal(view.storage.get('century.world.access'), TOKEN);
   assert.equal(view.gpsCalls(), 0);
 });
@@ -258,7 +300,7 @@ test('remote fragment access is removed from URL and sent only in protected head
 test('boot uses loopback session and requests a fresh device position automatically', async () => {
   const view = app({ location: { hostname: 'localhost' } });
   await view.boot();
-  assert.deepEqual(view.requests.map((request) => request.url).sort(), ['/world-config', '/world-session']);
+  assert.deepEqual(view.requests.map((request) => request.url).sort(), ['/app-session', '/world-config', '/world-session']);
   assert.ok(view.requests.every((request) => !request.headers.has('Authorization')));
   assert.equal(view.gpsCalls(), 1);
   assert.equal(view.elements.get('lat').readOnly, true);
@@ -1601,7 +1643,7 @@ test('an explicitly served LAN host obtains its own session without a pasted acc
     await view.initialiseAccess();
     assert.equal(view.state.token, TOKEN);
     assert.equal(view.elements.get('access-panel').hidden, true);
-    assert.deepEqual(view.requests.map((request) => request.url), ['/world-session']);
+    assert.deepEqual(view.requests.map((request) => request.url), ['/app-session', '/world-session']);
     assert.equal(view.requests[0].headers.has('Authorization'), false);
   }
 });
@@ -1610,18 +1652,18 @@ test('public and deceptive hostnames do not attempt LAN auto login; rejected LAN
   for (const hostname of ['example.test', '172.15.1.1', '172.32.1.1', '192.169.1.1', '10.256.0.1', '10.0.0.2.evil.test']) {
     const view = app({ location: { hostname } });
     await view.initialiseAccess();
-    assert.equal(view.state.token, ''); assert.equal(view.requests.length, 0);
+    assert.equal(view.state.token, ''); assert.deepEqual(view.requests.map((request) => request.url), ['/app-session']);
   }
   const view = app({ location: { hostname: '172.26.43.152' }, fetch: () => response({}, 403) });
   await view.initialiseAccess();
-  assert.equal(view.state.token, ''); assert.equal(view.elements.get('access-panel').hidden, false);
+  assert.equal(view.state.token, ''); assert.equal(view.elements.get('access-panel').hidden, true);
 });
 
 test('an explicit HTTPS viewer link opens the public viewer session without an access fragment', async () => {
   const view = app({ location: { hostname: 'viewer.example', search: '?viewer=1' } });
   await view.initialiseAccess();
   assert.equal(view.elements.get('access-panel').hidden, true);
-  assert.deepEqual(view.requests.map((request) => request.url), ['/world-session']);
+  assert.deepEqual(view.requests.map((request) => request.url), ['/app-session', '/world-session']);
   assert.equal(view.requests[0].headers.has('Authorization'), false);
   assert.equal(view.rewrites.length, 0);
 });

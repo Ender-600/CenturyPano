@@ -1,6 +1,6 @@
 # CENTURY PANO
 
-For the full four-mode frontend and authenticated backend, see [Vercel deployment](docs/VERCEL_DEPLOYMENT.md). Provider keys stay on the Python backend; the public site uses a separate application access code.
+The Vercel site opens all four modes without a login or access code. See [Vercel deployment](docs/VERCEL_DEPLOYMENT.md); provider keys remain on the Python backend.
 
 **Language / 语言:** [English](README.en.md) · [中文](README.md)
 

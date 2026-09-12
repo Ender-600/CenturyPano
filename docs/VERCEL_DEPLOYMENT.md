@@ -2,7 +2,8 @@
 
 The full four-mode frontend is served by Vercel. Camera and photo history use
 `/`; Street View and Marble worlds use the embedded viewer at `/world/`.
-FastAPI and generation workers run on a separate authenticated backend.
+FastAPI and generation workers run on a separate backend. The production site
+opens directly without a visitor account or access code.
 
 ## Project settings
 
@@ -27,9 +28,9 @@ public demo origin in `deploy/vercel-backend.json`. Use an HTTPS origin without
 a path, credentials, query string or fragment. Redeploy after a change: routing
 is generated during the build. This is a public server address, not a secret.
 
-The origin must point to the authenticated **full-app gateway**, not directly
-to Uvicorn and not to the older world-only gateway. It must expose `/app-session`
-and protect photo uploads, generated assets, archives and world APIs.
+The origin points to the **full-app gateway**, which runs with `--public` for
+this deployment. The gateway uses the private backend token only on its local
+connection to Uvicorn; browsers receive neither that token nor provider keys.
 
 The initial demo backend runs on the development computer through a temporary
 Cloudflare tunnel. The computer, FastAPI, gateway and tunnel must remain running.
@@ -49,31 +50,35 @@ Install Python dependencies with `uv sync` and frontend dependencies with
 
 ```bash
 uv run python scripts/serve_worlds.py --env-file .env --port 8010
-uv run python scripts/serve_app_access.py --port 8005 --upstream http://127.0.0.1:8010 --public-origin https://century-pano.vercel.app
+uv run python scripts/serve_app_access.py --port 8005 --upstream http://127.0.0.1:8010 --public-origin https://century-pano.vercel.app --public --env-file .env
 cloudflared tunnel --url http://127.0.0.1:8005 --protocol http2
 ```
 
 Use the tunnel's HTTPS origin as `WORLD_BACKEND_ORIGIN`. Preview deployments
 need their exact origin added to the gateway's allowed public origins before
-cookie-authenticated POST requests can work there.
+POST requests can work there.
 
-## Access code
+## Public access
 
-On the public site, enter the existing application access code. This is separate
-from all provider API keys. `/app-session` validates it against the backend's
-protected `/world-auth` endpoint and establishes an HttpOnly, Secure, SameSite
-session cookie. Browser requests and images then use the same session. Codes
-are not embedded in Vercel files or asset URLs.
+Production uses `--public --env-file .env`. Anyone can open all four modes,
+upload photos, read the shared archive and request image/world generation.
+Generation uses the configured OpenAI and World Labs accounts. This public mode
+was explicitly selected for the demo.
 
-The gateway verifies authentication before forwarding private requests and
-checks allowed origins for cookie-authenticated writes. `/world-session` remains
-blocked remotely; it never returns the development token. API responses use
-`Cache-Control: no-store`. Unknown routes do not fall through to arbitrary
-backend endpoints.
+`/app-session` returns `{"authenticated":true,"access_mode":"public"}` so both
+the full app and standalone world viewer open automatically. No visitor session
+cookie or access code is needed. The gateway reads `WORLD_ACCESS_TOKEN` from
+the private environment and sends it only to the local backend. Provider keys
+and that token are never included in frontend files, URLs or responses.
 
-Local loopback development can still run the full app without the public gate.
-Public offline caching is disabled so a later signed-out browser does not use
-previously saved private photo assets as an authenticated response.
+The gateway retains the explicit route allowlist, upload limits, browser-origin
+checks on writes and `Cache-Control: no-store` on API responses. `/world-session`
+remains blocked so it cannot disclose the local development token. A backend
+credential/configuration failure returns a service error, not a visitor login.
+
+Running the gateway without `--public` retains the optional private access-code
+mode. Local loopback/LAN development still works directly with FastAPI. Public
+offline caching remains disabled so API responses reflect the live backend.
 
 ## Verification
 
@@ -89,8 +94,8 @@ curl -i https://century-pano.vercel.app/replays
 curl -i https://century-pano.vercel.app/world-session
 ```
 
-Expect HTML and JavaScript, an unauthenticated session state before login, and
-rejection of private API access without a session. A successful build or `Ready`
+Expect HTML and JavaScript, a public session state, and working API reads
+without cookies or Authorization. `/world-session` must still return 403. A successful build or `Ready`
 status alone is not application verification. Read-only checks and photo
 previews do not submit a paid generation request; real generation and physical
 phone camera/GPS/motion checks remain separate acceptance tests.

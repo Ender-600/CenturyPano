@@ -29,6 +29,7 @@ test('entry HTML loads only the access gate before authentication', () => {
   assert.deepEqual([...html.matchAll(/<script\b[^>]*src="([^"]+)"/g)].map((match) => match[1]), ['/access.js']);
   assert.match(html, /data-access="locked"/);
   assert.match(html, /type="password"/);
+  assert.match(html, /id="app-access-entry" hidden/);
 });
 
 test('unauthenticated visitors cannot start camera, location, world or photo code', async () => {
@@ -46,13 +47,27 @@ test('a session unlocks once, clears old offline data, and passes no token to ap
   f.element('app-access-code').value = 'old-code';
   await f.gate.check(); await f.gate.check();
   assert.deepEqual(f.actions, ['clear', 'app']);
-  assert.deepEqual(f.gate.state, { authenticated: true, sessionRequired: true });
+  assert.deepEqual(f.gate.state, { authenticated: true, sessionRequired: true, accessMode: 'private' });
   assert.equal(f.document.body.dataset.access, 'ready');
   assert.equal(f.element('app-access-code').value, '');
   assert.equal(f.element('app-access').hidden, true);
   assert.equal(f.calls[0].credentials, 'same-origin');
   assert.equal(f.calls[0].redirect, 'error');
   assert.equal(f.calls[0].cache, 'no-store');
+});
+
+test('public availability opens the four-mode app without displaying a code form or submitting credentials', async () => {
+  const f = fixture([response(200, { authenticated: true, access_mode: 'public' })]);
+  await f.gate.check();
+  assert.deepEqual(f.actions, ['clear', 'app']);
+  assert.equal(f.gate.state.accessMode, 'public');
+  assert.equal(f.gate.state.authenticated, true);
+  assert.equal(f.element('app-access-entry').hidden, true);
+  assert.equal(f.element('app-access').hidden, true);
+  assert.equal(f.calls.length, 1);
+  assert.equal(f.calls[0].method, 'GET');
+  assert.equal(f.calls[0].body, undefined);
+  assert.equal(f.calls[0].headers, undefined);
 });
 
 test('a rejected code stays locked and valid retry sends it only as JSON', async () => {

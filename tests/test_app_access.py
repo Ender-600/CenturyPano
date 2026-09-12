@@ -29,7 +29,7 @@ class Chunks(httpx.AsyncByteStream):
 
 
 @pytest.fixture
-def gateway():
+def gateway(request):
     calls, streams = [], []
     state = {'token': TOKEN, 'auth_status': 200}
     binary = b'glTF' + bytes(range(256)) * 1000
@@ -66,7 +66,9 @@ def gateway():
         streams.append(stream)
         return httpx.Response(status, headers=headers, stream=stream)
 
-    return create_app(public_origins=(ORIGIN,), transport=httpx.MockTransport(backend)), calls, streams, binary, state
+    return create_app(public_origins=(ORIGIN,),
+                      public_access_token=TOKEN if getattr(request, 'param', False) else None,
+                      transport=httpx.MockTransport(backend)), calls, streams, binary, state
 
 
 def login(client):
@@ -289,3 +291,59 @@ def test_invalid_public_origins(origin):
 
 def test_origin_default_port_is_normalized():
     assert normalize_origin('https://SITE.example:443/') == 'https://site.example'
+
+
+@pytest.mark.parametrize('gateway', [True], indirect=True)
+def test_public_visitors_use_all_app_routes_without_credentials(gateway):
+    app, calls, _, _, _ = gateway
+    with TestClient(app, base_url=ORIGIN) as client:
+        session = client.get('/app-session')
+        assert session.status_code == 200
+        assert session.json() == {'authenticated': True, 'access_mode': 'public'}
+        assert TOKEN not in session.text and TOKEN not in session.headers.get('set-cookie', '')
+        assert SESSION_COOKIE not in client.cookies
+        for method, route in PRIVATE_ROUTES:
+            response = client.request(method, route, headers={'origin': ORIGIN}, content=b'{}')
+            assert response.status_code == 200, route
+            assert calls[-1].headers['authorization'] == AUTH['authorization']
+            assert 'cookie' not in calls[-1].headers
+            assert TOKEN not in response.text
+            assert not {'authorization', 'set-cookie', 'x-private'}.intersection(response.headers)
+        # A cookie or bearer left over from the private deployment is irrelevant.
+        assert client.get('/health', headers={'authorization': 'Bearer expired',
+                                             'cookie': SESSION_COOKIE + '=expired'}).status_code == 200
+        assert calls[-1].headers['authorization'] == AUTH['authorization']
+
+
+@pytest.mark.parametrize('gateway', [True], indirect=True)
+def test_public_mode_retains_origin_body_and_route_boundaries(gateway):
+    app, calls, _, _, _ = gateway
+    with TestClient(app, base_url=ORIGIN) as client:
+        for headers in ({}, {'origin': 'https://evil.example'},
+                        {'origin': ORIGIN, 'sec-fetch-site': 'cross-site'}):
+            assert client.post('/jobs', headers=headers).status_code == 403
+        assert calls == []
+        assert client.post('/preview', content=b'', headers={
+            'origin': ORIGIN, 'content-length': str(MAX_UPLOAD_BYTES + 1)}).status_code == 413
+        assert client.get('/world-session').status_code == 403
+        assert client.get('/.env').status_code == 404
+        assert client.get('/openapi.json').status_code == 404
+        assert client.get('/world-jobs-evil').status_code == 404
+
+
+@pytest.mark.parametrize('gateway', [True], indirect=True)
+def test_public_backend_failure_never_asks_visitor_for_a_code(gateway):
+    app, _, _, _, state = gateway
+    state['token'] = 'different-backend-code'
+    with TestClient(app, base_url=ORIGIN) as client:
+        for route in ('/app-session', '/health'):
+            response = client.get(route)
+            assert response.status_code == 502
+            assert 'access code' not in response.text
+            assert TOKEN not in response.text
+
+
+@pytest.mark.parametrize('token', ['', 'bad\r\nvalue', 'x' * 1025])
+def test_public_mode_requires_a_valid_server_side_credential(token):
+    with pytest.raises(ValueError, match='WORLD_ACCESS_TOKEN'):
+        create_app(public_access_token=token)
