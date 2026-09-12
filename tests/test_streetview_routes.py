@@ -1,5 +1,6 @@
 """Photo plans use live fixes and actual capture points; tests never fetch Google."""
 import io
+import json
 import time
 
 from fastapi.testclient import TestClient
@@ -18,6 +19,21 @@ PHONE = {'lat': 40.4433, 'lon': -79.9436, 'year': 1925,
 
 def fresh(**updates):
     return {**PHONE, 'location_timestamp_ms': time.time() * 1000, **updates}
+
+
+@pytest.mark.parametrize('key,code', [('', 'missing_key'), ('not.a.maps.key', 'invalid_key')])
+def test_invalid_streetview_configuration_is_unavailable_before_preparing(client, monkeypatch, key, code):
+    monkeypatch.setattr(settings, 'google_maps_api_key', key)
+    config = client.get('/world-config').json()
+    assert config['streetview']['configured'] is False
+    assert config['streetview']['available'] is False
+    assert config['streetview']['error_code'] == code
+    assert config['prefetch']['available'] is False
+    response = client.post('/world-plans', headers=AUTH, json=fresh())
+    assert response.status_code == 503
+    assert client.map_calls == []
+    if key:
+        assert key not in response.text and key not in json.dumps(config)
 
 
 def jpg():

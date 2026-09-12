@@ -8,7 +8,9 @@ from dotenv import load_dotenv
 from .temporal import DECADE_ANCHOR as DECADE_ANCHOR
 
 ROOT = Path(__file__).resolve().parent.parent
-load_dotenv(ROOT / '.env', override=True)
+# Launcher/environment settings (including --env-file and --data-dir) take
+# precedence. The checkout's dotenv only supplies otherwise missing values.
+load_dotenv(ROOT / '.env')
 
 TILE = H = 1024
 STEP_TARGET = 870

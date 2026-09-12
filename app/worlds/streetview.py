@@ -189,6 +189,17 @@ def _metadata(data: dict, lat: float, lon: float, radius: float) -> dict:
     return result
 
 
+def configuration_error(api_key: str | None, *, ai_authorized: bool = False) -> str | None:
+    """Local preflight shared by status, request handling and the HTTP client."""
+    if not isinstance(api_key, str) or not api_key.strip():
+        return "missing_key"
+    if _ID.fullmatch(api_key.strip()) is None:
+        return "invalid_key"
+    if ai_authorized is not True:
+        return "ai_use_not_authorized"
+    return None
+
+
 class GoogleStreetViewClient:
     """One complete RGB panorama per call, with no retries or persistent cache."""
 
@@ -196,12 +207,9 @@ class GoogleStreetViewClient:
         self, api_key: str | None, *, ai_authorized: bool = False,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
-        if not isinstance(api_key, str) or not api_key.strip():
-            raise _error("missing_key")
-        if _ID.fullmatch(api_key.strip()) is None:
-            raise _error("invalid_key")
-        if ai_authorized is not True:
-            raise _error("ai_use_not_authorized")
+        error = configuration_error(api_key, ai_authorized=ai_authorized)
+        if error:
+            raise _error(error)
         self._key = api_key.strip()
         self._client = httpx.AsyncClient(
             base_url=_BASE, timeout=httpx.Timeout(30, connect=10),
