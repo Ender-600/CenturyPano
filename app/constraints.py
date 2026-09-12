@@ -294,7 +294,7 @@ async def build_constraints(place: dict, decade: str | int, scene: dict, *, prov
         prompt_global=_prompt(year, {**context, "present_day_scene": _scene_data(scene)}, facts,
                               structure_lock=structure_lock, is_outdoor=is_outdoor),
         negative=f"objects or buildings introduced locally after {year}-07-01, unsupported landmark substitutions, "
-                 "anachronistic technology, invented battle damage, labels, borders"
+                 "anachronistic technology, invented battle damage, any text label, date stamp, watermark, caption or border"
                  + (", moved or resized buildings, added or removed structures, changed skyline, changed road "
                     "geometry, cropped or re-framed image" if structure_lock else ""),
         historical_context=context, fallback=fallback, _tokens=tokens,
