@@ -6,9 +6,11 @@ import pytest
 from fastapi.testclient import TestClient
 from PIL import Image
 
+from app import main
 from app.config import settings
 from app.main import app
 from app.manifest import read_manifest, update_manifest
+from app.temporal import DEFAULT_YEAR, MAX_YEAR, MIN_YEAR, decade_for_year, manifest_year, resolve_year
 
 
 @pytest.fixture
@@ -77,6 +79,43 @@ def test_server_preview_strips_metadata(client):
     image = Image.open(io.BytesIO(response.content))
     assert image.size == (1600, 400)
     assert not image.getexif()
+
+
+@pytest.mark.parametrize('year', [1800, 1944, 1945, 1946, 1950, MAX_YEAR])
+def test_exact_year_is_authoritative_and_not_rounded(client, monkeypatch, year):
+    async def uploaded(job_id):
+        main._tasks.pop(job_id, None)
+    monkeypatch.setattr(main, '_run', uploaded)
+    response = client.post('/jobs', files={'image': ('pano.jpg', panorama(), 'image/jpeg')},
+                           data={'target_year': str(year), 'decade': 'ignored legacy value'})
+    assert response.status_code == 201, response.text
+    manifest = client.get(f"/jobs/{response.json()['job_id']}/manifest").json()
+    assert manifest['target_year'] == manifest['anchor_year'] == year
+    assert manifest['decade'] == decade_for_year(year)
+    assert client.get(f"/jobs/{manifest['job_id']}/audio").status_code == 200
+
+
+@pytest.mark.parametrize('value', ['1799', str(MAX_YEAR + 1), '1945.0', '1945.5', '1.945e3', '1940s', 'true', '-1945'])
+def test_exact_year_rejects_invalid_values(client, value):
+    response = client.post('/jobs', files={'image': ('pano.jpg', panorama(), 'image/jpeg')},
+                           data={'target_year': value})
+    assert response.status_code == 422
+
+
+def test_health_and_legacy_manifest_years(client):
+    health = client.get('/health').json()
+    assert (health['min_year'], health['max_year'], health['default_year']) == (MIN_YEAR, MAX_YEAR, DEFAULT_YEAR)
+    assert resolve_year('1920s') == 1925
+    assert resolve_year('1945') == 1945
+    assert manifest_year({'target_year': 1945, 'anchor_year': 1955, 'decade': '1970s'}) == 1945
+    assert manifest_year({'anchor_year': 1950, 'decade': '1950s'}) == 1950
+    assert manifest_year({'decade': '1920s'}) == 1925
+    for invalid in (True, 1945.0, None, '1945.0'):
+        with pytest.raises(ValueError):
+            resolve_year(invalid)
+    update_manifest('old-replay', lambda m: m.update(job_id='old-replay', mode='replay', status='done', decade='1920s'))
+    entries = client.get('/replays').json()['replays']
+    assert next(entry for entry in entries if entry['job_id'] == 'old-replay')['target_year'] == 1925
 
 
 def test_atomic_manifest_concurrent_updates(client):

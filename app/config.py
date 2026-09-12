@@ -4,6 +4,8 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from .temporal import DECADE_ANCHOR as DECADE_ANCHOR
+
 ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(ROOT / '.env')
 
@@ -19,7 +21,6 @@ WIPE_MS = 1500
 GYRO_SMOOTH = 0.15
 PANO_FOV_PHONE_DEG = 120
 MAX_UPLOAD_MB = 40
-DECADE_ANCHOR = {'1900s': 1905, '1920s': 1925, '1950s': 1955, '1970s': 1975}
 DEFAULT_DECADE = '1920s'
 
 

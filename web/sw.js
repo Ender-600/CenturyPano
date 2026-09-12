@@ -1,5 +1,5 @@
 'use strict';
-const SHELL_CACHE = 'century-shell-v1';
+const SHELL_CACHE = 'century-shell-v2';
 const JOURNEY_CACHE = 'century-journeys-v1';
 const SHELL = ['/', '/index.html', '/app.js', '/style.css', '/scene.svg'];
 

@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 from .config import DECADE_ANCHOR, DEFAULT_DECADE, MAX_UPLOAD_MB, ROOT, settings
 from .location import exif_gps, resolve_place, city_from_latlon
 from .manifest import create_manifest, job_dir, read_manifest, update_manifest
+from .temporal import DEFAULT_YEAR, MAX_YEAR, MIN_YEAR, decade_for_year, manifest_year, resolve_year
 
 register_heif_opener()
 Image.MAX_IMAGE_PIXELS = 100_000_000
@@ -75,11 +76,12 @@ def get_manifest(job_id):
         raise HTTPException(404, '找不到这个任务。') from None
 
 
-def initial_manifest(job_id, source, decade, place, heading=0.5):
+def initial_manifest(job_id, source, decade, place, heading=0.5, *, target_year=None):
+    year = resolve_year(decade if target_year is None else target_year)
     return {
         'job_id': job_id, 'status': 'running', 'mode': 'live', 'provider': settings.provider,
         'demo': settings.provider == 'demo', 'source': source, 'place': place,
-        'decade': decade, 'anchor_year': DECADE_ANCHOR[decade], 'heading': heading,
+        'decade': decade_for_year(year), 'target_year': year, 'anchor_year': year, 'heading': heading,
         'job_seed': int(uuid.UUID(job_id)) % (2**31), 'geometry': None, 'scene': {}, 'constraints': {},
         'anchor': {'status': 'pending', 'path': None, 'ms': None}, 'tiles': [],
         'result': {'path': None, 'status': 'pending'},
@@ -149,12 +151,23 @@ async def _run(job_id):
 @app.post('/jobs', status_code=201)
 async def create_job(
     image: UploadFile = File(...), decade: str = Form(DEFAULT_DECADE),
+    target_year: str | None = Form(None),
     lat: float | None = Form(None, ge=-90, le=90), lon: float | None = Form(None, ge=-180, le=180),
     place: str = Form('', max_length=160), heading: float = Form(0.5, ge=0, le=1),
     is_360: bool | None = Form(None),
 ):
-    if decade not in DECADE_ANCHOR:
-        raise HTTPException(422, '请选择 1900s、1920s、1950s 或 1970s。')
+    try:
+        if target_year is None and decade not in DECADE_ANCHOR:
+            raise ValueError('Unsupported legacy era')
+        # Validate the raw form value so 1945.0, scientific notation and era
+        # aliases cannot be silently coerced into an exact calendar year.
+        if target_year is not None and not target_year.strip().isascii():
+            raise ValueError('Expected an integer year')
+        if target_year is not None and not target_year.strip().isdigit():
+            raise ValueError('Expected an integer year')
+        year = resolve_year(decade if target_year is None else target_year)
+    except ValueError:
+        raise HTTPException(422, f'请选择 {MIN_YEAR} 至 {MAX_YEAR} 之间的整数年份。') from None
     if (lat is None) != (lon is None):
         raise HTTPException(422, 'Latitude and longitude must be supplied together.')
     if len(_tasks) >= 4:
@@ -175,7 +188,7 @@ async def create_job(
     input_path.write_bytes(raw)
     source = {'path': f'in/{input_path.name}', 'w': w, 'h': h,
               'is_360': abs(w / h - 2.0) < 0.1 if is_360 is None else is_360}
-    manifest = initial_manifest(job_id, source, decade, location, heading)
+    manifest = initial_manifest(job_id, source, decade, location, heading, target_year=year)
     if w / h < 2:
         manifest['warnings'] = ['这张图片看起来较窄，使用手机全景模式会得到更好的效果。']
     create_manifest(job_id, manifest)
@@ -225,7 +238,9 @@ async def generated_asset(job_id: str, filename: str):
 @app.get('/jobs/{job_id}/audio')
 async def audio(job_id: str):
     m = get_manifest(job_id)
-    path = ROOT / 'web/audio' / f'{m["decade"]}.wav'
+    year = manifest_year(m)
+    audio_era = min(DECADE_ANCHOR, key=lambda era: abs(DECADE_ANCHOR[era] - year))
+    path = ROOT / 'web/audio' / f'{audio_era}.wav'
     if not path.is_file():
         raise HTTPException(404, 'Audio unavailable')
     return FileResponse(path, media_type='audio/wav')
@@ -260,7 +275,9 @@ async def replays():
         with contextlib.suppress(OSError, ValueError):
             m = read_manifest(file.parent.name)
             if m.get('mode') == 'replay' and m.get('status') in ('done', 'done_partial') and not m.get('baseline_of'):
-                result.append({k: m.get(k) for k in ('job_id', 'place', 'decade', 'anchor_year', 'metrics', 'provider', 'demo', 'title', 'source')})
+                entry = {k: m.get(k) for k in ('job_id', 'place', 'decade', 'anchor_year', 'metrics', 'provider', 'demo', 'title', 'source')}
+                entry['target_year'] = manifest_year(m)
+                result.append(entry)
     return {'replays': result}
 
 
@@ -277,7 +294,8 @@ async def resolve(coords: Coordinates):
 @app.get('/health')
 async def health():
     configured = settings.provider_configured()
-    return {'status': 'ok', 'provider': settings.provider, 'configured': configured, 'version': '0.1.0'}
+    return {'status': 'ok', 'provider': settings.provider, 'configured': configured, 'version': '0.1.0',
+            'min_year': MIN_YEAR, 'max_year': MAX_YEAR, 'default_year': DEFAULT_YEAR}
 
 
 app.mount('/', StaticFiles(directory=ROOT / 'web', html=True), name='web')
