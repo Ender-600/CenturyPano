@@ -30,6 +30,22 @@ svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width:
 #viewport canvas { display: block; position: absolute; inset: 0; width: 100%; height: 100%; touch-action: none; }
 #flat-preview { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; background: #333a31; z-index: 1; }
 .window-shade { position: absolute; z-index: 2; inset: 0; background: linear-gradient(180deg, #0e171959, #0e171912 23%, transparent 40%, #101d191a 57%, #0b181aa1 100%); pointer-events: none; }
+.street-hotspot-layer { position: absolute; inset: 0; z-index: 3; pointer-events: none; }
+.street-hotspot { position: absolute; width: 44px; height: 44px; padding: 0; transform: translate(-50%, -50%); border: 0; border-radius: 50%; background: transparent; pointer-events: auto; cursor: pointer; touch-action: manipulation; }
+.street-hotspot::before { content: ''; position: absolute; inset: 16px; border-radius: 50%; background: #fff; box-shadow: 0 0 0 5px #ffffff2e, 0 2px 10px #0008; }
+.street-hotspot[aria-pressed="true"]::before, .street-hotspot:hover::before { box-shadow: 0 0 0 8px #ffffff50, 0 2px 12px #0008; }
+.street-hotspot > span { position: absolute; left: 50%; bottom: 42px; transform: translateX(-50%); width: max-content; max-width: 180px; padding: 5px 9px; border-radius: 6px; background: #20332dea; color: #fff; font-size: 11px; opacity: 0; pointer-events: none; }
+.street-hotspot:hover > span, .street-hotspot:focus-visible > span, .street-hotspot[aria-pressed="true"] > span { opacity: 1; }
+.street-hotspot-hint { position: absolute; z-index: 4; top: calc(110px + env(safe-area-inset-top)); left: 50%; transform: translateX(-50%); max-width: calc(100% - 48px); padding: 7px 12px; border: 0; border-radius: 14px; background: #20332dbd; color: #f5f4ed; font-size: 10px; line-height: 1.6; }
+.street-hotspot-card { position: absolute; z-index: 7; top: 50%; right: max(20px, env(safe-area-inset-right)); transform: translateY(-50%); width: min(340px, calc(100% - 40px)); max-height: min(420px, 52dvh); overflow-y: auto; overscroll-behavior: contain; padding: 22px; border: 1px solid #ffffff30; border-radius: 18px; background: #20332df5; color: #f5f4ed; box-shadow: 0 12px 48px #0004; }
+.street-hotspot-close { position: absolute; top: 5px; right: 5px; width: 44px; height: 44px; padding: 0; border: 0; background: transparent; font-size: 25px; color: #f5f4ed; }
+.street-hotspot-kicker { margin: 0 34px 8px 0; font-size: 10px; letter-spacing: 1.2px; color: #f5f4ed99; }
+.street-hotspot-card h2 { margin: 0 25px 16px 0; color: #f5f4ed; font-size: 20px; font-weight: 400; }
+#street-hotspot-body { font-size: 12px; line-height: 1.8; overflow-wrap: anywhere; }
+#street-hotspot-body p { margin: 0 0 13px; }
+#street-hotspot-body strong { display: block; margin-bottom: 3px; font-size: 10px; color: #e3d2ab; }
+.street-hotspot-note { margin: 16px 0 0; font-size: 10px; line-height: 1.7; color: #f5f4ed99; }
+.embedded-world .street-hotspot-hint { top: calc(var(--mode-tabs-top) + var(--mode-tabs-height) + 104px); }
 #empty { position: absolute; inset: 0 24px 155px; display: flex; align-items: center; justify-content: center; flex-direction: column; text-align: center; pointer-events: none; }
 #empty svg { width: 34px; height: 34px; stroke-width: .85; opacity: .5; }
 #empty p { margin: 25px 0 12px; font-size: 20px; font-weight: 300; letter-spacing: 2px; }
@@ -217,6 +233,7 @@ details > label, details > nav { margin-top: 18px; }
 .embedded-world .scene-progress { top: calc(var(--mode-tabs-top) + var(--mode-tabs-height) + 70px); }
 .embedded-world #message { top: calc(var(--mode-tabs-top) + var(--mode-tabs-height) + 102px); bottom: auto; }
 .embedded-world .window { height: 100%; }
+.embedded-world .options-sheet { max-height: calc(100vh - var(--mode-tabs-top) - var(--mode-tabs-height) - 16px); max-height: calc(100dvh - var(--mode-tabs-top) - var(--mode-tabs-height) - 16px); }
 @media (max-width: 600px) {
   .embedded-world { --mode-tabs-height: 54px; }
 }

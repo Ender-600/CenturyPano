@@ -10,6 +10,7 @@ import { createMotionController } from './motion.js';
 import { createGPSWalkingController } from './gps-walking.js';
 import { createScaleCalibration } from './scale.js';
 import { createPanoramaPrefetch } from './prefetch.js';
+import { createPanoramaHotspots } from './hotspots.js';
 
 const $ = (id) => document.getElementById(id);
 const TOKEN_KEY = 'century.world.access';
@@ -45,6 +46,7 @@ const state = {
   restoring: false, resumeBusy: false, submissionUnknown: false, planEpoch: 0, jobEpoch: 0, viewEpoch: 0,
   pollTimer: null, view: 'source', viewAbort: null, viewBusy: false, userViewLocked: false,
   imageURL: null, engine: null, keys: new Set(), touchMoves: new Set(),
+  hotspots: null,
   locationMode: 'device', locationFix: null, locationEpoch: 0, locationBusy: false, locationError: '',
   viewingSavedPlan: false, streetViewBusy: false,
   locationErrorCode: 0, locationPermissionState: 'unknown', locationPermissionStatus: null,
@@ -61,6 +63,20 @@ const state = {
 
 function viewerActive() { return !state.embedded || state.active; }
 function foreground() { return viewerActive() && document.visibilityState !== 'hidden'; }
+function bindPanoramaHotspots(mesh, plan, job) {
+  if (plan?.input_kind !== 'streetview_panorama' || !job) return;
+  mesh.userData.hotspotScene = { jobId: job.job_id || job.id, planId: plan.plan_id,
+    year: plan.target_year, metadata: plan.source_panorama?.metadata || {} };
+}
+function syncWhiteDots() {
+  const mesh = state.engine?.current, scene = mesh?.userData.hotspotScene;
+  const show = foreground() && !state.viewBusy && state.view === 'pano' && !state.config?.viewer_only
+    && (!state.embedded || state.mode === 'streetview') && scene
+    && scene.planId === state.plan?.plan_id && scene.jobId === (state.job?.job_id || state.job?.id);
+  if (!show) { state.hotspots?.setScene(null); return; }
+  state.hotspots ||= createPanoramaHotspots({ document, api, schedule: setTimeout, cancel: clearTimeout });
+  state.hotspots.setScene({ ...scene, key: `${scene.jobId}:${mesh.uuid}`, camera: state.engine.camera });
+}
 function postHost(payload) {
   if (state.embedded) window.parent?.postMessage(payload, location.origin);
 }
@@ -74,6 +90,7 @@ function requestHostMode(mode) {
   postHost({ type: 'century:request-mode', mode });
 }
 function pauseEmbeddedViewer() {
+  state.hotspots?.clear();
   ++state.locationEpoch; ++state.prefetchStartEpoch;
   state.locationBusy = false; state.keys.clear(); state.touchMoves.clear();
   stopLiveLocation(); stopTravelTracking(); stopWalking('paused');
@@ -375,8 +392,16 @@ function syncUI() {
     button.disabled = !availableView(view);
     button.hidden = (!state.plan || state.plan.input_kind === 'streetview_panorama') && ['historical', 'modern', 'depth'].includes(view);
   }
+  // The host tabs own mode navigation. Keep original/history comparison local
+  // to Street View, while the standalone viewer retains its mode chooser.
+  $('view-tabs').hidden = state.embedded;
+  $('viewer-heading').textContent = state.embedded ? 'Look around' : 'View';
+  $('source-toggle').hidden = !panoramaOnly || !availableView('source') || !availableView('pano');
+  $('source-toggle').disabled = !viewerActive() || state.viewBusy;
+  $('source-toggle').textContent = state.view === 'source' ? 'Return to historical panorama' : 'Show original Street View';
   updateMotionUI();
   syncPrefetch();
+  syncWhiteDots();
 }
 
 function assetFor(view) {
@@ -529,6 +554,7 @@ async function activatePreparedPanorama({ plan, job, resource }) {
     state.userViewLocked = true; state.viewingSavedPlan = false; state.submissionUnknown = false;
     renderPlan(plan, { preserveDirection: true });
     engine.current = resource.mesh; state.imageURL = resource.imageURL; resource.transferred = true;
+    bindPanoramaHotspots(engine.current, plan, job);
     const next = engine.current;
     next.material.transparent = true; next.material.opacity = 0; next.material.depthTest = false; next.renderOrder = 1;
     engine.scene.add(next);
@@ -1468,6 +1494,7 @@ function ensureEngine() {
     }
     if (now - state.motionFrameAt > 250) { state.motionFrameAt = now; updateMotionUI(); }
     advancePanoramaTransition(dt);
+    state.hotspots?.update();
     try { renderer.render(scene, camera); }
     catch { message('This device cannot render the current 3D asset. Panoramas and downloads are still available.', true); renderer.setAnimationLoop(null); }
   };
@@ -1579,6 +1606,7 @@ async function showView(view, { automatic = false } = {}) {
       const sourceMetadata = state.plan?.source_panorama?.metadata || {};
       const engine = ensureEngine();
       pendingObject = createPanoramaMesh(photograph, sourceMetadata);
+      if (view === 'pano') bindPanoramaHotspots(pendingObject, state.plan, state.job);
       engine.camera.position.set(0, 0, 0); engine.camera.fov = 65; engine.camera.updateProjectionMatrix();
       const phoneView = state.orientation?.getQuaternion();
       if (phoneView) engine.camera.quaternion.copy(phoneView);
@@ -1683,7 +1711,7 @@ async function showView(view, { automatic = false } = {}) {
   } finally {
     if (pendingURL) URL.revokeObjectURL(pendingURL);
     if (epoch === state.viewEpoch) {
-      state.viewBusy = false; syncPrefetch();
+      state.viewBusy = false; syncUI();
       if (canFollowView()) { startAutomaticMotion(); startTravelTracking(); maybeStartWalking(); }
     }
   }
@@ -1779,6 +1807,13 @@ function bindEvents() {
   } });
   $('settings-open').addEventListener('click', () => { cancelScaleCalibration(); openSettings(); });
   $('settings-close').addEventListener('click', closeSettings);
+  $('source-toggle').addEventListener('click', async () => {
+    if (!state.embedded || state.mode !== 'streetview' || !viewerActive() || state.viewBusy
+        || !availableView('source') || !availableView('pano')) return;
+    state.sourceSelected = state.view !== 'source';
+    closeSettings();
+    await showView(state.sourceSelected ? 'source' : 'pano');
+  });
   $('settings-dialog').addEventListener('click', (event) => {
     if (event.target === $('settings-dialog')) closeSettings();
   });
@@ -1837,6 +1872,7 @@ function bindEvents() {
   $('retry-location').addEventListener('click', retryLocation);
   $('copy-location-link').addEventListener('click', copyLocationLink);
   const revisitLocationPermission = () => {
+    syncWhiteDots();
     if (document.visibilityState !== 'visible') { stopLiveLocation(); syncPrefetch(); return; }
     // Re-read the live PermissionStatus when Safari resumes from Settings;
     // the browser may defer its change event while the page is backgrounded.
@@ -1894,6 +1930,7 @@ function bindEvents() {
     }
   }
   window.addEventListener('pagehide', (event) => {
+    state.hotspots?.clear();
     clearTimeout(state.pollTimer); state.pollTimer = null; ++state.jobEpoch;
     state.viewAbort?.abort(); releaseMoves();
     stopLiveLocation();
@@ -1911,6 +1948,7 @@ function bindEvents() {
   });
   window.addEventListener('pageshow', (event) => {
     if (!event.persisted) return;
+    syncWhiteDots();
     startLiveLocation(); startAutomaticMotion(); maybeStartWalking(); syncPrefetch(); void maybePrepareCurrent();
     if (state.engine) state.engine.previousTime = 0;
     schedulePoll(state.jobEpoch);

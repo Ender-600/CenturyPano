@@ -22,6 +22,7 @@ from app.worlds.profiles import DEFAULT_WORLD_MODEL, WORLD_MODELS, WorldModel
 
 router = APIRouter()
 _manager = None
+_hotspots = None
 _plan_lock = asyncio.Lock()
 _prefetch_requests: dict[str, asyncio.Task] = {}
 _prefetch_preparations: dict[str, asyncio.Task] = {}
@@ -30,20 +31,25 @@ _PLAN_FILES = {'modern.glb', 'historical.glb', 'depth.png', 'depth_preview.png',
 
 
 async def startup():
-    global _manager
+    global _manager, _hotspots
     from app.worlds.jobs import WorldJobManager
+    from app.worlds.hotspots import WorldHotspots
     _manager = WorldJobManager(settings.world_dir / 'jobs', settings.worldlab_api_key)
+    _hotspots = WorldHotspots(_manager)
     await _manager.resume_all()
 
 
 async def shutdown():
-    global _manager
+    global _manager, _hotspots
     pending = set(_prefetch_requests.values()) | set(_prefetch_preparations.values())
     for task in pending:
         task.cancel()
     await asyncio.gather(*pending, return_exceptions=True)
     _prefetch_requests.clear()
     _prefetch_preparations.clear()
+    if _hotspots is not None:
+        await _hotspots.aclose()
+    _hotspots = None
     if _manager is not None:
         await _manager.aclose()
     _manager = None
@@ -412,6 +418,26 @@ async def get_job(job_id: str):
     if job is None:
         raise HTTPException(404, 'World job not found.')
     return job
+
+
+class WorldExplainRequest(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    hotspot_id: str = Field(pattern=r'^h[0-9]{1,2}$')
+    revision: str = Field(pattern=r'^[a-f0-9]{64}$')
+
+
+@router.get('/world-jobs/{job_id}/hotspots', dependencies=[Depends(require_access)])
+@router.post('/world-jobs/{job_id}/hotspots', dependencies=[Depends(require_access)])
+async def world_hotspots(job_id: str, request: Request):
+    manager()
+    return JSONResponse(_hotspots.get(job_id, refine=request.method == 'POST'),
+                        headers={'Cache-Control': 'private, no-store'})
+
+
+@router.post('/world-jobs/{job_id}/explain', dependencies=[Depends(require_access)])
+async def explain_world_hotspot(job_id: str, body: WorldExplainRequest):
+    manager()
+    return await _hotspots.explain(job_id, body.hotspot_id, body.revision)
 
 
 @router.post('/world-jobs/{job_id}/cancel', dependencies=[Depends(require_access)])

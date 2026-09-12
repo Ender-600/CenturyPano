@@ -11,6 +11,7 @@ import { createMotionController } from '../web/world/motion.js';
 import { createGPSWalkingController } from '../web/world/gps-walking.js';
 import { createScaleCalibration } from '../web/world/scale.js';
 import { createPanoramaPrefetch } from '../web/world/prefetch.js';
+import { createPanoramaHotspots } from '../web/world/hotspots.js';
 
 const source = readFileSync(new URL('../web/world/app.js', import.meta.url), 'utf8');
 const html = readFileSync(new URL('../web/world/index.html', import.meta.url), 'utf8');
@@ -90,7 +91,7 @@ function app(options = {}) {
   const context = vm.createContext({
     THREE, createPanoramaMesh, PanoramaLookControls, panoramaHeading, setCameraBearing, cameraBearing,
     createOrientationController, headingFromQuaternion, createGPSWalkingController, createLiveLocation, positionFix, locationDistance, createYearWheel,
-    createMotionController, createScaleCalibration, createPanoramaPrefetch, SplatMesh: SplatStub, SparkRenderer: class {},
+    createMotionController, createScaleCalibration, createPanoramaPrefetch, createPanoramaHotspots, SplatMesh: SplatStub, SparkRenderer: class {},
     GLTFLoader: class { async parseAsync() { return { scene: options.gltf || new THREE.Group() }; } },
     document, window: { DeviceOrientationEvent: options.orientation, CenturyMotion: options.nativeBridge,
       crypto: { randomUUID: () => `native-session-${++objectId}-00000000` },
@@ -354,7 +355,9 @@ test('prepared panorama is decoded and uploaded before an atomic switch that pre
   assert.equal(uploaded, 1); assert.equal(view.state.engine.current, old);
   assert.equal(view.requests.length, 1);
   assert.equal(await view.activatePreparedPanorama({ plan: next, job, resource }), true);
-  assert.equal(view.requests.length, 1, 'Switching an already decoded panorama does not fetch again');
+  assert.equal(view.requests.filter((request) => request.url.includes('/assets/')).length, 1,
+    'Switching an already decoded panorama does not fetch its image again');
+  assert.equal(view.requests.at(-1).url, `/world-jobs/${JOB}/hotspots`);
   assert.equal(view.state.engine.current, resource.mesh);
   assert.deepEqual(view.state.engine.camera.quaternion.toArray(), orientation.toArray());
   assert.equal(view.state.plan.plan_id, next.plan_id); assert.equal(view.state.job.id, JOB);
@@ -1613,6 +1616,9 @@ test('view and sensor controls belong to settings and GPS is selected without a 
   assert.match(dialog, /class="view-tabs"[\s\S]*?data-view="source"[\s\S]*?data-view="pano"[\s\S]*?data-view="world"/);
   assert.match(dialog, /value="gps" selected/);
   assert.doesNotMatch(dialog, /Pause motion|Set up walking|Walking is off/);
+  const standalone = app(); standalone.bindEvents(); standalone.renderPlan(plan());
+  assert.equal(standalone.elements.get('view-tabs').hidden, false);
+  assert.equal(standalone.elements.get('source-toggle').hidden, true);
 });
 
 test('an east-facing source panorama rotates provider world axes into real east and north', async () => {
@@ -1854,6 +1860,8 @@ test('embedded generation settings describe image-only Street View and restore w
   authorised(view); view.state.active = true;
   const sourcePlan = plan({ target_year: 1926, input_kind: 'streetview_panorama' });
   view.renderPlan(sourcePlan);
+  assert.equal(view.elements.get('view-tabs').hidden, true);
+  assert.equal(view.elements.get('source-toggle').hidden, true);
   assert.equal(view.elements.get('world-model-control').hidden, true);
   assert.match(view.elements.get('generation-quality').textContent, /Image editing.*no World Labs world-generation credits.*Immersive World tab/);
   assert.doesNotMatch(view.elements.get('generation-quality').textContent, /1,500|1,500 credits|quality selected above/);
@@ -1864,12 +1872,134 @@ test('embedded generation settings describe image-only Street View and restore w
   assert.match(view.elements.get('job-quality').textContent, /Existing world job.*Quick draft/);
   assert.equal(view.elements.get('world-model-control').hidden, true);
   view.state.mode = 'world'; view.renderPlan(sourcePlan);
+  assert.equal(view.elements.get('view-tabs').hidden, true);
+  assert.equal(view.elements.get('source-toggle').hidden, true);
   assert.equal(view.elements.get('world-model-control').hidden, false);
   assert.match(view.elements.get('generation-quality').textContent, /Current job: Quick draft/);
   assert.match(view.elements.get('generation-description').textContent, /then World Labs generates a 3D world/);
   assert.doesNotMatch(view.elements.get('job-quality').textContent, /Existing world job/);
   view.state.job = null; view.renderPlan(sourcePlan);
   assert.match(view.elements.get('generation-quality').textContent, /1,500 credits/);
+});
+
+test('Street View original comparison preserves its tab and heading without generating', async () => {
+  const view = app({ visibility: 'visible', location: { search: '?embedded=1' }, fetch: () => response('asset') });
+  authorised(view); view.state.active = true; view.bindEvents(); view.state.engine = fakeEngine();
+  view.renderPlan(plan({ input_kind: 'streetview_panorama', source_panorama: { metadata: { heading: 90 } },
+    assets: { 'source_panorama.jpg': `/world-plans/${PLAN}/assets/source_panorama.jpg` },
+  }));
+  view.state.job = { id: JOB, stage: 'ready', assets: [
+    { kind: 'historical_pano', url: `/world-jobs/${JOB}/assets/historical_panorama.jpg` },
+  ] };
+  await view.showView('pano');
+  const toggle = view.elements.get('source-toggle');
+  assert.equal(toggle.hidden, false);
+  assert.equal(toggle.disabled, false);
+  assert.equal(toggle.textContent, 'Show original Street View');
+  setCameraBearing(view.state.engine.camera, 137);
+  await toggle.emit('click');
+  assert.equal(view.state.view, 'source');
+  assert.equal(view.state.sourceSelected, true);
+  assert.ok(Math.abs(cameraBearing(view.state.engine.camera).heading - 137) < 1e-6);
+  assert.equal(toggle.textContent, 'Return to historical panorama');
+  assert.equal(toggle.disabled, false);
+  await toggle.emit('click');
+  assert.equal(view.state.view, 'pano');
+  assert.equal(view.state.sourceSelected, false);
+  assert.ok(Math.abs(cameraBearing(view.state.engine.camera).heading - 137) < 1e-6);
+  assert.equal(view.state.mode, 'streetview');
+  assert.equal(view.parentMessages.length, 0);
+  assert.equal(view.requests.filter((request) => request.method === 'POST' && request.url === '/world-jobs').length, 0);
+});
+
+const WHITE_DOTS = { revision: 'a'.repeat(64), provisional: false, fallback: false, items: [
+  { id: 'h0', label: 'Stone facade', point: [.5, .5], bbox: [.45, .4, .55, .6] },
+] };
+
+async function streetDots(options = {}) {
+  const view = app({ visibility: 'visible', location: { search: '?embedded=1' },
+    fetch: (url, init) => options.fetch?.(url, init) ?? response(url.endsWith('/hotspots') ? WHITE_DOTS : 'asset'),
+  });
+  authorised(view); view.state.active = true; view.bindEvents(); view.state.engine = fakeEngine();
+  view.renderPlan(plan({ input_kind: 'streetview_panorama', source_panorama: { metadata: { heading: 90 } },
+    assets: { 'source_panorama.jpg': `/world-plans/${PLAN}/assets/source_panorama.jpg` } }));
+  view.state.job = { id: JOB, plan_id: PLAN, assets: [
+    { kind: 'historical_pano', url: `/world-jobs/${JOB}/assets/historical_panorama.jpg` } ] };
+  await view.showView('pano'); await new Promise(setImmediate);
+  return view;
+}
+
+test('Street View dots project on the panorama and explain its saved year with authenticated text-only content', async () => {
+  const view = await streetDots({ fetch: (url) => url.endsWith('/explain') ? response({
+    label: '<img onerror=alert(1)>', distinctive: 'Cut stone', past: 'A classroom facade', uncertainty: 'Identity unverified',
+  }) : undefined });
+  const layer = view.elements.get('street-hotspot-layer'), dot = layer.children[0];
+  assert.equal(layer.hidden, false); assert.equal(dot.hidden, false);
+  assert.ok(Math.abs(parseFloat(dot.style.left) - 50) < 1e-6);
+  view.elements.get('year').value = '2026';
+  await dot.emit('click'); await new Promise(setImmediate);
+  assert.equal(view.elements.get('street-hotspot-kicker').textContent, 'Around 1925');
+  assert.equal(view.elements.get('street-hotspot-title').textContent, '<img onerror=alert(1)>');
+  assert.equal(view.elements.get('street-hotspot-body').children.length, 2);
+  const request = view.requests.find((request) => request.url.endsWith('/explain'));
+  assert.equal(request.headers.get('Authorization'), `Bearer ${TOKEN}`);
+  assert.deepEqual(JSON.parse(request.body), { hotspot_id: 'h0', revision: WHITE_DOTS.revision });
+  setCameraBearing(view.state.engine.camera, 270); view.state.hotspots.update();
+  assert.equal(dot.hidden, true);
+  await view.elements.get('street-hotspot-close').emit('click');
+  assert.equal(view.elements.get('street-hotspot-card').hidden, true);
+});
+
+test('original comparison and a new location clear dots and discard late explanations', async () => {
+  let release;
+  const view = await streetDots({ fetch: (url) => url.endsWith('/explain')
+    ? new Promise((resolve) => { release = () => resolve(response({ label: 'Old place' })); }) : undefined });
+  await view.elements.get('street-hotspot-layer').children[0].emit('click');
+  await view.showView('source');
+  assert.equal(view.elements.get('street-hotspot-layer').hidden, true);
+  assert.equal(view.elements.get('street-hotspot-card').hidden, true);
+  const pending = view.requests.find((request) => request.url.endsWith('/explain'));
+  assert.equal(pending.signal.aborted, true);
+  release(); await new Promise(setImmediate);
+  assert.notEqual(view.elements.get('street-hotspot-title').textContent, 'Old place');
+  await view.showView('pano'); await new Promise(setImmediate);
+  assert.equal(view.elements.get('street-hotspot-layer').hidden, false);
+  view.renderPlan(plan({ plan_id: '33333333-3333-3333-3333-333333333333', input_kind: 'streetview_panorama' }));
+  assert.equal(view.elements.get('street-hotspot-layer').hidden, true);
+});
+
+test('late detection cannot add dots to a hidden tab, and refinement polls stop in the background', async () => {
+  let release;
+  const view = await streetDots({ fetch: (url) => url.endsWith('/hotspots')
+    ? new Promise((resolve) => { release = () => resolve(response({ ...WHITE_DOTS, provisional: true })); }) : undefined });
+  await view.receiveHostState({ source: view.parent, origin: 'https://example.test', data: {
+    type: 'century:host-state', active: false, mode: 'photo', year: 1925,
+  } });
+  release(); await new Promise(setImmediate);
+  assert.equal(view.elements.get('street-hotspot-layer').hidden, true);
+  assert.equal([...view.timers.values()].some((timer) => timer.milliseconds === 1500), false);
+
+  const refining = await streetDots({ fetch: (url) => url.endsWith('/hotspots')
+    ? response({ ...WHITE_DOTS, provisional: true }) : undefined });
+  assert.equal([...refining.timers.values()].some((timer) => timer.milliseconds === 1500), true);
+  refining.document.visibilityState = 'hidden'; await refining.emitDocument('visibilitychange');
+  assert.equal(refining.elements.get('street-hotspot-layer').hidden, true);
+  assert.equal([...refining.timers.values()].some((timer) => timer.milliseconds === 1500), false);
+});
+
+test('white dot requests can be retried after failure and refinement replaces provisional regions', async () => {
+  let attempts = 0;
+  const view = await streetDots({ fetch: (url, init) => {
+    if (!url.endsWith('/hotspots')) return;
+    if (++attempts === 1) return response({ detail: 'Unavailable' }, 503);
+    if (init.method === 'POST') return response({ ...WHITE_DOTS, provisional: true });
+    return response({ ...WHITE_DOTS, revision: 'b'.repeat(64), items: [{ ...WHITE_DOTS.items[0], label: 'Updated detail' }] });
+  } });
+  assert.match(view.elements.get('street-hotspot-hint').textContent, /retry/);
+  await view.elements.get('street-hotspot-hint').emit('click'); await new Promise(setImmediate);
+  const timer = [...view.timers.values()].find((timer) => timer.milliseconds === 1500);
+  timer.callback(); await new Promise(setImmediate);
+  assert.equal(view.elements.get('street-hotspot-layer').children[0].children[0].textContent, 'Updated detail');
 });
 
 
