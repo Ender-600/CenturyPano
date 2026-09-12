@@ -1550,7 +1550,7 @@
       archiveLeaflet = L.map('archive-leaflet', {
         zoomControl: false, attributionControl: true, scrollWheelZoom: false,
       }).setView([20, 0], 1);
-      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
         maxZoom: 18,
         attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
       }).addTo(archiveLeaflet);
