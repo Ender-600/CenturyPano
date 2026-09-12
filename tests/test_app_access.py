@@ -150,6 +150,8 @@ PRIVATE_ROUTES = (
     ('GET', '/world-plans/example/assets/depth.png'), ('POST', '/world-jobs'),
     ('GET', '/world-jobs/example'), ('POST', '/world-jobs/example/cancel'),
     ('POST', '/world-jobs/example/resume'), ('GET', '/world-jobs/example/assets/world.glb'),
+    ('GET', '/world-jobs/example/hotspots'), ('POST', '/world-jobs/example/hotspots'),
+    ('POST', '/world-jobs/example/explain'),
 )
 
 
@@ -214,7 +216,7 @@ def test_public_static_allowlist_does_not_expose_backend_or_credential_routes(ga
     app, calls, _, _, _ = gateway
     with TestClient(app, base_url=ORIGIN, follow_redirects=False) as client:
         for route in ('/', '/index.html', '/app.js', '/access.js', '/mode-tabs.js', '/world/', '/world-config',
-                      '/world/app.js', '/world/year-wheel.js', '/vendor/leaflet/leaflet.js',
+                      '/world/app.js', '/world/year-wheel.js', '/world/hotspots.js', '/vendor/leaflet/leaflet.js',
                       '/world-vendor/three/build/three.module.js',
                       '/world-vendor/@sparkjsdev/spark/dist/spark.module.js'):
             assert client.get(route, headers=AUTH).status_code == 200

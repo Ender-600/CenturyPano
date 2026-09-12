@@ -28,6 +28,15 @@
       <p id="message" role="status" aria-live="polite"></p>
     </div>
     <div class="window-shade" aria-hidden="true"></div>
+    <div id="street-hotspot-layer" class="street-hotspot-layer" aria-label="Historical scene details" hidden></div>
+    <button id="street-hotspot-hint" class="street-hotspot-hint" type="button" hidden>Tap a white dot to ask about that place.</button>
+    <aside id="street-hotspot-card" class="street-hotspot-card" aria-labelledby="street-hotspot-title" hidden>
+      <button id="street-hotspot-close" class="street-hotspot-close" type="button" aria-label="Close explanation">×</button>
+      <p id="street-hotspot-kicker" class="street-hotspot-kicker">This place</p>
+      <h2 id="street-hotspot-title">Looking closer</h2>
+      <div id="street-hotspot-body" aria-live="polite"></div>
+      <p id="street-hotspot-note" class="street-hotspot-note" hidden></p>
+    </aside>
     <header class="site-header">
       <a class="brand" href="/" target="_top" aria-label="CENTURY PANO home"><svg aria-hidden="true"><use href="#i-window"/></svg><span>CENTURY<span class="brand-light"> PANO</span></span></a>
       <div class="window-place"><svg aria-hidden="true"><use href="#i-location"/></svg><span id="window-location">Locating…</span></div>
@@ -53,18 +62,19 @@
     <div class="sheet-handle" aria-hidden="true"></div>
     <div class="sheet-heading"><div><p class="eyebrow">CENTURY PANO</p><h1 id="settings-title">Your time window</h1></div><button id="settings-close" class="round-button sheet-close" type="button" aria-label="Close viewer settings"><svg aria-hidden="true"><use href="#i-close"/></svg></button></div>
     <section class="sheet-section viewer-section" aria-label="View and phone orientation">
-      <h2>View</h2>
-      <nav class="view-tabs" aria-label="Choose a view">
+      <h2 id="viewer-heading">View</h2>
+      <nav class="view-tabs" id="view-tabs" aria-label="Choose a view">
         <button type="button" data-view="source" class="active" aria-pressed="true">Street View</button>
         <button type="button" data-view="pano" aria-pressed="false" disabled>Historical panorama</button>
         <button type="button" data-view="world" aria-pressed="false" disabled>Generated world</button>
       </nav>
+      <button id="source-toggle" class="text-button" type="button" hidden>Show original Street View</button>
       <div class="direction-controls" aria-label="Phone orientation and view alignment">
         <div class="direction-row"><button id="motion-toggle" class="secondary" type="button" aria-pressed="false" disabled>Allow phone motion</button><button id="align-view" class="secondary" type="button" disabled>Align with compass</button><output id="heading-readout" aria-label="Current heading">Heading —</output></div>
         <p id="motion-status" class="small" role="status">Phone motion starts after permission is granted.</p>
       </div>
       <p class="small">The compass aligns the panorama with your real direction at the start. Then your phone’s gyroscope follows each turn. Use Align with compass to restore that alignment.</p>
-      <p class="small" id="view-details">Look around a 360° panorama from one position, or explore the generated 3D world. You can also drag to look around.</p>
+      <p class="small" id="view-details">Look around the scene by turning your phone, or drag to adjust the view.</p>
       <button id="reset-view" class="text-button" type="button">Reset view ↺</button>
     </section>
     <section class="sheet-section location-section" aria-label="Current location">

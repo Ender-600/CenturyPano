@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import * as THREE from 'three';
+import { panoramaPoint, projectHotspot } from '../web/world/hotspots.js';
 import {
   cameraBearing, createPanoramaMesh, normalizeHeading, panoramaHeading,
   PanoramaLookControls, setCameraBearing,
@@ -82,6 +83,32 @@ test('source panorama centre faces its heading, pixels to the right turn clockwi
   near(upper.y, Math.SQRT1_2); near(lower.y, -Math.SQRT1_2);
   headingNear(compassOf(upper), sourceHeading);
   near(directionAtUV(mesh, 0.5, 0.5).y, 0);
+});
+
+test('white dot directions match actual sphere UVs across the seam, elevations and source headings', (t) => {
+  for (const heading of [0, 91, 264.05194]) {
+    const mesh = createPanoramaMesh({ width: 2048, height: 1024 }, { heading });
+    t.after(() => disposeMesh(mesh));
+    for (const [x, y] of [[0, .5], [1, .5], [.25, .25], [.5, .5], [.75, .75]]) {
+      const expected = directionAtUV(mesh, x, 1 - y);
+      assert.ok(panoramaPoint([x, y], { heading }).normalize().distanceTo(expected) < 1e-6);
+    }
+  }
+});
+
+test('white dots follow camera yaw, pitch, roll and zoom and hide behind the camera', () => {
+  const camera = new THREE.PerspectiveCamera(65, 2, .05, 2000);
+  setCameraBearing(camera, 90, 30); camera.rotateZ(.35); camera.updateMatrixWorld(true);
+  const centre = panoramaPoint([.5, 1 / 3], { heading: 90 });
+  let dot = projectHotspot(centre, camera);
+  near(dot.x, 50); near(dot.y, 50);
+  assert.equal(projectHotspot(centre.clone().negate(), camera), null);
+  const right = new THREE.Vector3(5, 0, -50).applyQuaternion(camera.quaternion);
+  dot = projectHotspot(right, camera); assert.ok(dot.x > 50); near(dot.y, 50);
+  camera.fov = 35; camera.updateProjectionMatrix();
+  assert.ok(projectHotspot(right, camera).x > dot.x);
+  setCameraBearing(camera, 270); camera.updateMatrixWorld(true);
+  assert.equal(projectHotspot(centre, camera), null);
 });
 
 test('missing or nonnumeric source heading defaults to north; valid headings wrap', (t) => {

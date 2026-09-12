@@ -40,7 +40,7 @@ STATIC_PATHS = {
     '/world/', '/world/index.html', '/world/app.js', '/world/prefetch.js',
     '/world/location.js', '/world/motion.js', '/world/gps-walking.js', '/world/scale.js',
     '/world/style.css', '/world/panorama.js', '/world/orientation.js',
-    '/world/year-wheel.js', '/world/edits-example.json',
+    '/world/year-wheel.js', '/world/hotspots.js', '/world/edits-example.json',
     '/vendor/leaflet/leaflet.js', '/vendor/leaflet/leaflet.css',
     '/vendor/leaflet/images/marker-shadow.png', '/vendor/leaflet/images/marker-icon.png',
     '/vendor/leaflet/images/marker-icon-2x.png',
@@ -55,7 +55,8 @@ API_ROUTES = (
     (re.compile(r'/out/[^/]+/.+'), READ),
     (re.compile(r'/world-(plans|jobs)/[^/]+(/assets/[^/]+)?'), READ),
     (re.compile(r'/world-plans/[^/]+/edits'), ('POST',)),
-    (re.compile(r'/world-jobs/[^/]+/(cancel|resume)'), ('POST',)),
+    (re.compile(r'/world-jobs/[^/]+/(cancel|resume|explain)'), ('POST',)),
+    (re.compile(r'/world-jobs/[^/]+/hotspots'), (*READ, 'POST')),
 )
 
 
