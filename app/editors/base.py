@@ -104,6 +104,12 @@ def get_editor(name: str) -> ImageEditor:
     raise ValueError("PROVIDER must be demo, gemini, grok, or fal")
 
 
+def _configured(editor: ImageEditor) -> bool:
+    """Whether an editor could possibly succeed. Unknown editors are trusted."""
+    key = getattr(editor, "api_key", "")
+    return bool(key) if hasattr(editor, "api_key") else True
+
+
 class EditorPool:
     """Share one instance across the anchor and tiles of one job.
 
@@ -126,8 +132,13 @@ class EditorPool:
         self.fallback = get_editor(fallback) if isinstance(fallback, str) and fallback else fallback
         if self.fallback and (
             self.fallback.name == self.primary.name or self.primary.name == "demo"
-            or self.fallback.name == "demo"
+            or self.fallback.name == "demo" or not _configured(self.fallback)
         ):
+            # An unconfigured fallback is worse than no fallback: it cannot
+            # succeed, and its "KEY is not configured" becomes the error the
+            # manifest records, throwing away the primary's real status code.
+            # A 429 from the primary then reads as a missing key for a provider
+            # nobody was using. Drop it here so the diagnosis survives.
             self.fallback = None
         self.max_attempts = max(1, max_attempts)
         self.backoff = backoff

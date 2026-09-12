@@ -129,3 +129,48 @@ test('a capture needs getUserMedia, orientation and a secure context', () => {
   delete global.window.DeviceOrientationEvent;
   assert.equal(capture.supported(), false, 'without orientation there is no heading to place strips by');
 });
+
+
+test('coverage never recedes, but the cursor does', () => {
+  const { video } = stubDocument(1240, 620);
+  const session = capture.start({ video, heading: (r) => r.alpha, fovDegrees: 62 });
+  session.accept({ alpha: 0 });
+  for (let alpha = 1; alpha <= 120; alpha += 1) session.accept({ alpha });
+  const swept = session.progress().degrees;
+  assert.ok(swept > 140, `expected a wide sweep, got ${swept}`);
+  assert.equal(Math.round(session.progress().cursor * 100), 100, 'pointing at the leading edge');
+
+  for (let alpha = 119; alpha >= 0; alpha -= 1) session.accept({ alpha });
+  const after = session.progress();
+  assert.equal(after.degrees, swept, 'turning back must not un-capture anything');
+  assert.ok(after.cursor < 0.3, `the cursor should retreat, got ${after.cursor}`);
+});
+
+test('the opening frame covers a field of view, and the cursor is what moves first', () => {
+  const { video } = stubDocument(1240, 620);
+  const session = capture.start({ video, heading: (r) => r.alpha, fovDegrees: 62 });
+  session.accept({ alpha: 0 });
+  const start = session.progress();
+  assert.equal(Math.round(start.degrees), 62, 'one frame is one field of view');
+  assert.equal(Math.round(start.cursor * 100), 50, 'and the lens points at its middle');
+
+  // Within the opening frame, coverage cannot grow -- the pixels are already
+  // there. A single readout looks frozen here, which is what the cursor fixes.
+  session.accept({ alpha: 20 });
+  const inside = session.progress();
+  assert.equal(Math.round(inside.degrees), 62, 'still inside the first frame');
+  assert.ok(inside.cursor > start.cursor, 'but the cursor has moved');
+  assert.equal(inside.edge, null, 'and it is not at an edge yet');
+});
+
+test('an edge is reported only when a turn would actually add coverage', () => {
+  const { video } = stubDocument(1240, 620);
+  const session = capture.start({ video, heading: (r) => r.alpha, fovDegrees: 62 });
+  session.accept({ alpha: 0 });
+  for (let alpha = 1; alpha <= 60; alpha += 1) session.accept({ alpha });
+  assert.equal(session.progress().edge, 'right', 'at the leading edge after turning right');
+  for (let alpha = 59; alpha >= -60; alpha -= 1) session.accept({ alpha: (alpha + 360) % 360 });
+  assert.equal(session.progress().edge, 'left', 'and at the other edge after turning back past the start');
+  for (let alpha = -59; alpha <= -30; alpha += 1) session.accept({ alpha: (alpha + 360) % 360 });
+  assert.equal(session.progress().edge, null, 'in the middle, a turn adds nothing');
+});

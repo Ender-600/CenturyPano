@@ -85,9 +85,10 @@
         <button data-year="1970" aria-pressed="false">1970<span class="era-dot" aria-hidden="true"></span></button>
         <button id="present-button" aria-pressed="false">Today<span class="era-dot" aria-hidden="true"></span></button>
       </div>
+      <button class="generate-button shoot-button" id="shoot-button" hidden><svg><use href="#i-camera"/></svg>Capture this place<svg><use href="#i-arrow"/></svg></button>
       <button class="generate-button" id="generate-button" hidden>Step into 1925<svg><use href="#i-arrow"/></svg></button>
       <div class="action-row">
-        <button class="subtle-button" id="album-button"><svg><use href="#i-image"/></svg><span>Another panorama</span></button>
+        <button class="subtle-button" id="album-button"><svg><use href="#i-image"/></svg><span id="album-button-label">Another panorama</span></button>
         <button class="quiet-button" id="clean-button" aria-label="Enter clean mode and hide the interface" title="Clean mode"><svg><use href="#i-window"/></svg></button>
         <button class="subtle-button" id="compare-button" aria-pressed="false"><svg><use href="#i-compare"/></svg><span>Then and now</span></button>
       </div>
@@ -169,8 +170,8 @@
       <p class="eyebrow">CAPTURE</p>
       <h2 id="capture-overlay-title">Turn slowly on the spot</h2>
       <p class="capture-hint" id="capture-hint">Hold the phone upright and sweep steadily in one direction.</p>
-      <div class="capture-progress" role="progressbar" aria-labelledby="capture-overlay-title" aria-valuemin="0" aria-valuemax="360" aria-valuenow="0" id="capture-progress"><i id="capture-progress-fill"></i></div>
-      <p class="capture-readout"><strong id="capture-degrees">0°</strong><span id="capture-target">keep going to about 120°</span></p>
+      <div class="capture-progress" role="progressbar" aria-labelledby="capture-overlay-title" aria-valuemin="0" aria-valuemax="360" aria-valuenow="0" id="capture-progress"><i id="capture-progress-fill"></i><b id="capture-cursor" aria-hidden="true"></b></div>
+      <p class="capture-readout"><strong id="capture-degrees">0°</strong><span id="capture-facing">facing the start</span><span id="capture-target">keep going to about 120°</span></p>
     </div>
     <div class="capture-actions">
       <button class="button" id="capture-done" disabled>Use this panorama</button>

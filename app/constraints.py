@@ -86,7 +86,7 @@ HISTORY_SYSTEM = (
     "local_context (1 to 8 strings describing locally relevant events and conditions), "
     "site_state (undeveloped, agricultural, built, mixed or unknown), site_history (a short account "
     "of land use and development at the actual site), reconstruction_changes (1 to 8 concrete "
-    "changes to the present-day scene), uncertainties (1 to 8 strings). Each string <= 600 characters; "
+    "changes to the present-day scene), uncertainties (1 to 8 strings), name_dates. Each string <= 600 characters; "
     "each era_fact <= 240 characters. Write user-facing descriptions in English. "
     "Reason for the exact year, never a fixed decade or twenty-year cycle. Use July 1 of the selected "
     "year as the explicit snapshot date because only a year was supplied. When events change the "
@@ -106,7 +106,15 @@ HISTORY_SYSTEM = (
     "always include the need to verify site-specific changes against historical maps/photos in "
     "uncertainties. Do not claim archival verification or fabricate citations. "
     "Only introduce transport, clothing, materials and signage available locally by the reference "
-    "date. Camera framing and projection remain fixed, but the built environment may change."
+    "date. Camera framing and projection remain fixed, but the built environment may change. "
+    "name_dates dates every name in visible_names, which are wordmarks legible in the photograph. "
+    "Return one object per supplied name with fields name (copied exactly), earliest_year (the first year "
+    "that name could have appeared at this location as an integer, or null when unknown) and note (at most "
+    "200 characters saying what the name refers to and when it came into use). A name is anachronistic when "
+    "its earliest_year is later than the reference date, and a renaming counts: a school or building carrying "
+    "a donor or founder name adopted in 2004 did not carry it in 1950 even if the institution existed. Use "
+    "null for earliest_year when you do not know, rather than guessing a year. Return an empty list when "
+    "visible_names is empty."
 )
 
 
@@ -146,10 +154,42 @@ def _strings(value, *, minimum=1, maximum=8, limit=600) -> list[str]:
     return [item.strip() for item in value]
 
 
-def validate_history(value: dict) -> dict:
+def _name_dates(value, year: int) -> list[dict]:
+    """Dated wordmarks, with anachronism decided here rather than by the model."""
+    if not isinstance(value, list) or len(value) > 12:
+        raise ValueError("Invalid name dates")
+    result = []
+    for item in value:
+        if not isinstance(item, dict) or set(item) - {"name", "earliest_year", "note"}:
+            raise ValueError("Invalid name date fields")
+        name = item.get("name")
+        if not isinstance(name, str) or not name.strip() or len(name) > 80:
+            raise ValueError("Invalid dated name")
+        earliest = item.get("earliest_year")
+        if isinstance(earliest, bool) or earliest is not None and (
+            not isinstance(earliest, int) or not 1000 <= earliest <= 2100
+        ):
+            raise ValueError("Invalid earliest year")
+        note = item.get("note")
+        if note is not None and (not isinstance(note, str) or len(note) > 200):
+            raise ValueError("Invalid name note")
+        result.append({
+            "name": " ".join(name.split()),
+            "earliest_year": earliest,
+            "note": " ".join(note.split()) if isinstance(note, str) and note.strip() else None,
+            # Unknown is not treated as anachronistic: removing a name we cannot
+            # date would be as unfounded as keeping one we know is too new.
+            "anachronistic": earliest is not None and earliest > year,
+        })
+    return result
+
+
+def validate_history(value: dict, year: int | None = None) -> dict:
     fields = {"era_facts", "period_summary", "local_context", "site_state", "site_history",
               "reconstruction_changes", "uncertainties"}
-    if not isinstance(value, dict) or set(value) != fields:
+    # name_dates is optional: a model that omits it should lose the signage check,
+    # not the entire history, and older manifests never carried it.
+    if not isinstance(value, dict) or set(value) - {"name_dates"} != fields:
         raise ValueError("Invalid historical context fields")
     result = {"era_facts": _strings(value["era_facts"], minimum=4, limit=240)}
     for key in ("period_summary", "site_history"):
@@ -161,6 +201,7 @@ def validate_history(value: dict) -> dict:
     if not isinstance(value["site_state"], str) or value["site_state"] not in SITE_STATES:
         raise ValueError("Invalid site state")
     result["site_state"] = value["site_state"]
+    result["name_dates"] = _name_dates(value.get("name_dates", []), year) if year is not None else []
     return result
 
 
@@ -174,6 +215,8 @@ def _scene_data(scene: dict) -> dict:
         if isinstance(modern, list) else DEFAULT_SCENE_SPEC["modern_elements"],
         "fixed_geometry": ["camera position", "viewing direction", "projection", "complete image frame"],
         "environment": "outdoor" if scene.get("is_outdoor", True) else "indoor",
+        "visible_names": [item for item in scene.get("visible_names", [])
+                          if isinstance(item, str) and len(item) <= 80][:12],
         "scene_understanding_fallback": bool(scene.get("fallback", False)),
     }
 
@@ -197,6 +240,7 @@ def _fallback_history(year: int) -> dict:
             "If the site can be confirmed as undeveloped or agricultural, show the matching terrain, vegetation "
             "or fields; where evidence is insufficient, do not invent a specific predecessor building.",
         ],
+        "name_dates": [],
         "uncertainties": ["The history reasoning service is unavailable or demo mode is active; only generic "
                           "year constraints are applied.",
                           "Site use and building changes must be verified against historical maps, photos or archives."],
@@ -222,11 +266,30 @@ def _lean_context(context: dict) -> dict:
     return {key: value for key, value in context.items() if key not in REDRAW_LICENCE_KEYS}
 
 
+def _name_policy(names: list[dict], year: int) -> str:
+    """Name the text to remove. A wordmark is only removed when it is spelled out."""
+    if not names:
+        return ""
+    listed = "; ".join(
+        f"\"{item['name']}\" (not in use here before {item['earliest_year']})"
+        for item in names if item.get("name")
+    )
+    return (
+        " ANACHRONISTIC SIGNAGE: the photograph carries lettering that did not exist at this location by "
+        f"{year}-07-01: {listed}. Remove that lettering completely. Do not reproduce, abbreviate, translate, "
+        "partially spell or stylise any of it, and do not substitute a similar modern name. Where a sign, "
+        "carved inscription, banner or awning carried it, show blank stonework, plain glass, an empty sign "
+        "board, or period-appropriate lettering that suits the reference date instead."
+    )
+
+
 def _prompt(year: int, context: dict, facts: list[str], *, structure_lock: bool = True,
-            is_outdoor: bool = True, lean: bool = False) -> str:
+            is_outdoor: bool = True, lean: bool = False,
+            anachronistic_names: list[dict] | None = None) -> str:
     policy = STRUCTURE_LOCK_POLICY if structure_lock else GEOMETRY_POLICY
     if not is_outdoor:
         policy = policy + " " + INDOOR_POLICY
+    policy = policy + _name_policy(anachronistic_names or [], year)
     if structure_lock and lean:
         context = _lean_context(context)
     return (
@@ -299,7 +362,7 @@ async def _request_facts(location: dict, year: int, scene: dict) -> tuple[dict, 
         raw = "".join(part.get("text", "") for part in data["candidates"][0]["content"]["parts"]
                       if not part.get("thought"))
         tokens = int(data.get("usageMetadata", {}).get("totalTokenCount", 0))
-    return validate_history(parse_json_object(raw)), tokens
+    return validate_history(parse_json_object(raw), year), tokens
 
 
 async def build_constraints(place: dict, decade: str | int, scene: dict, *, provider: str | None = None,
@@ -319,11 +382,17 @@ async def build_constraints(place: dict, decade: str | int, scene: dict, *, prov
         try:
             result, tokens = await asyncio.wait_for(
                 _request_facts(location, year, {**scene, "_structure_lock": structure_lock}), timeout=25.0)
-            history = validate_history(result)
+            history = validate_history(result, year)
             fallback = False
         except Exception:
             tokens = 0
     facts = history.pop("era_facts")
+    # A wordmark is copied straight out of the photograph unless the prompt says
+    # otherwise: the editor reads "TEPPER" off the facade and paints it back into
+    # 1920. Naming the offending text explicitly is the only instruction that
+    # reliably removes it, so the dated names become a positive instruction and a
+    # negative one.
+    anachronistic = [item for item in history.get("name_dates", []) if item.get("anachronistic")]
     if location.get("precision") != "coordinates":
         # City-wide context cannot justify a particular parcel or predecessor.
         # Discard model site edits as well as its state to avoid contradictory
@@ -349,9 +418,11 @@ async def build_constraints(place: dict, decade: str | int, scene: dict, *, prov
         decade=decade_for_year(year), anchor_year=year, target_year=year, era_facts=tuple(facts),
         prompt_global=_prompt(year, {**context, "present_day_scene": _scene_data(scene)}, facts,
                               structure_lock=structure_lock, is_outdoor=is_outdoor,
-                              lean=settings.lean_locked_prompt),
+                              lean=settings.lean_locked_prompt, anachronistic_names=anachronistic),
         negative=f"objects or buildings introduced locally after {year}-07-01, unsupported landmark substitutions, "
                  "anachronistic technology, invented battle damage, any text label, date stamp, watermark, caption or border"
+                 + ("".join(f", the words \"{item['name']}\" anywhere in the image" for item in anachronistic)
+                    if anachronistic else "")
                  + (", moved or resized buildings, added or removed structures, changed skyline, changed road "
                     "geometry, cropped or re-framed image" if structure_lock else ""),
         historical_context=context, fallback=fallback, _tokens=tokens,

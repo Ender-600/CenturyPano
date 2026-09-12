@@ -99,6 +99,12 @@
     $('generate-button').innerHTML = `${failed ? 'Preview this photo again' : state.submitting ? 'Submitting…' : `Step into ${state.targetYear}`}<svg><use href="#i-arrow"/></svg>`;
     $('album-button').disabled = busy;
     $('capture-button').disabled = busy;
+    // Shooting a panorama is the product; it belongs on the first screen rather
+    // than behind a menu. Once a photo is loaded, Generate takes the same slot.
+    const landing = state.screen === 'capture';
+    $('shoot-button').hidden = !landing;
+    $('shoot-button').disabled = busy;
+    text('album-button-label', landing ? 'Use a photo instead' : 'Another panorama');
     $('photo-settings').hidden = !preview;
     $('result-actions').hidden = !result;
     $('journey-info').hidden = !result;
@@ -112,7 +118,7 @@
       original ? 'This is now.' : state.viewMode === 'compare' ? 'One swipe, between then and now.' :
         preview ? 'Keep the view, choose a year.' : result ? 'The same place, another year.' : 'Your phone, as a window onto time.';
     text('window-caption', caption);
-    text('provider-note', state.screen === 'capture' ? 'Concept image · not a historical photo' : preview ?
+    text('provider-note', state.screen === 'capture' ? 'Concept image · capture this place to begin' : preview ?
       'Original preview · generate to begin' : isDemo(state.manifest || {}) ? 'Engineering sample · local grading' : 'Imagined reconstruction · not a historical photo');
     const filter = state.targetYear < 1920 ? 'sepia(.95) saturate(.4)' : state.targetYear < 1950 ? 'sepia(.58) saturate(.65)' : state.targetYear < 1970 ? 'sepia(.22) saturate(.82)' : 'sepia(.16) saturate(.9) contrast(.92)';
     $('hero-past').style.setProperty('--hero-filter', filter);
@@ -170,10 +176,19 @@
 
   function captureProgress(progress) {
     const degrees = Math.round(progress.degrees);
-    text('capture-degrees', `${degrees}°`);
+    text('capture-degrees', `${degrees}° captured`);
     $('capture-progress-fill').style.width = `${Math.round(progress.fraction * 100)}%`;
     $('capture-progress').setAttribute('aria-valuenow', String(degrees));
-    text('capture-target', progress.useful ? 'wide enough — keep going for more' : `keep going to about ${capture.target}°`);
+    // The cursor sits inside the coverage earned so far. At an edge, turning that
+    // way is the only thing that adds to the panorama; in the middle, you are
+    // looking back over ground already captured.
+    $('capture-cursor').style.left = `${(progress.cursor * 100).toFixed(1)}%`;
+    $('capture-progress').classList.toggle('capture-cursor-live', progress.edge !== null);
+    text('capture-facing', progress.edge === 'right' ? 'at the leading edge — keep turning'
+      : progress.edge === 'left' ? 'at the other edge — keep turning this way'
+      : 'looking back over what you have');
+    text('capture-target', progress.useful ? 'wide enough — turn further for more'
+      : `keep going to about ${capture.target}°`);
     $('capture-done').disabled = !progress.useful;
   }
 
@@ -253,6 +268,7 @@
   }
 
   $('capture-button').addEventListener('click', () => { closeOptions(); startCapture(); });
+  $('shoot-button').addEventListener('click', () => { closeOptions(); startCapture(); });
   $('capture-done').addEventListener('click', finishCapture);
   $('capture-cancel').addEventListener('click', () => { closeCapture(); showToast('Capture cancelled.', 1800); });
   $('album-button').addEventListener('click', () => { closeOptions(); $('album-input').click(); });
@@ -801,6 +817,7 @@
       + `<p><strong>Estimated land use: ${escapeHTML(siteLabels[context.site_state] || siteLabels.unknown)}</strong>${context.site_history ? `<br>${escapeHTML(context.site_history)}` : ''}</p>`
       + list('Local context', context.local_context)
       + list('Basis for the reconstruction', context.reconstruction_changes)
+      + namesList(context.name_dates)
       + list('Still unverified', context.uncertainties)
       + '<p class="history-footnote">The same site may once have been open land, farmland, or held different buildings. This panorama is not evidence that today\'s buildings stood in the chosen year; both the image and the context need checking against historical records.</p>';
   }
@@ -963,6 +980,21 @@
     resetMotionOrigin();
     if (viewRevision === state.viewRevision) setPastPercent(100);
     syncChrome();
+  }
+
+  // Dated wordmarks. The removed ones are the checkable claim in the whole
+  // reconstruction: a name carries a date, and the date decides whether the
+  // lettering belongs in the chosen year.
+  function namesList(entries) {
+    if (!Array.isArray(entries) || !entries.length) return '';
+    const rows = entries.map((entry) => {
+      const year = Number.isFinite(entry?.earliest_year) ? entry.earliest_year : null;
+      const status = entry?.anachronistic ? `removed \u2014 not in use here before ${year}`
+        : year ? `kept \u2014 in use by ${year}` : 'kept \u2014 date unknown';
+      return `<li><strong>${escapeHTML(entry?.name ?? '')}</strong> \u00b7 ${escapeHTML(status)}`
+        + (entry?.note ? `<br><small>${escapeHTML(entry.note)}</small>` : '') + '</li>';
+    }).join('');
+    return `<h4>Signage checked against the year</h4><ul>${rows}</ul>`;
   }
 
   function metricNumber(value, suffix = ' s') { return typeof value === 'number' && Number.isFinite(value) ? value.toFixed(2) + suffix : '—'; }

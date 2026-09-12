@@ -65,3 +65,42 @@ def test_server_error_still_fails_over_to_the_second_provider():
     result = asyncio.run(pool.edit(b"image", "prompt"))
     assert result.provider == "fal" and fallback.calls == 1
     assert primary.calls > 1, "a transient outage should be retried before failing over"
+
+
+class _Unconfigured:
+    """A fallback that can only ever fail, the way fal does with no FAL_KEY."""
+    name = "fal"
+    api_key = ""
+
+    def __init__(self):
+        self.calls = 0
+
+    async def edit(self, image, prompt, **kwargs):
+        self.calls += 1
+        raise ProviderError("FAL_KEY is not configured", provider=self.name, retryable=False)
+
+
+def test_an_unconfigured_fallback_never_masks_the_primary_error():
+    """A rate-limited primary must not be reported as a missing key.
+
+    With PROVIDER_FALLBACK=fal and FAL_KEY empty, a 429 from the primary used to
+    fail over, and the fallback's "FAL_KEY is not configured" became the error the
+    manifest kept -- naming a provider nobody was using and hiding the quota.
+    """
+    primary, fallback = _Failing("gemini", 429), _Unconfigured()
+    pool = EditorPool(primary=primary, fallback=fallback, backoff=())
+    assert pool.fallback is None, "a fallback that cannot succeed must be dropped"
+    with pytest.raises(ProviderError) as raised:
+        asyncio.run(pool.edit(b"image", "prompt"))
+    assert raised.value.provider == "gemini" and raised.value.status == 429
+    assert raised.value.rate_limited is True
+    assert "FAL_KEY" not in str(raised.value)
+    assert fallback.calls == 0, "an unconfigured provider must never be called"
+
+
+def test_a_configured_fallback_is_still_used():
+    primary, fallback = _Failing("gemini", 503), _Working()
+    fallback.api_key = "present"
+    pool = EditorPool(primary=primary, fallback=fallback, backoff=())
+    assert pool.fallback is not None
+    assert asyncio.run(pool.edit(b"image", "prompt")).provider == "fal"

@@ -719,3 +719,19 @@ body.clean .slider-handle { visibility: hidden; }
 }
 .capture-actions .text-button { color: #f4f1eacc; justify-content: center; }
 .capture-actions .button[disabled] { opacity: .45; }
+
+/* The landing screen's primary action is the camera, not a menu item. */
+.shoot-button svg:first-child { width: 20px; height: 20px; }
+
+/* Coverage only grows, so the fill never recedes. The cursor is where the lens
+   points right now and moves both ways inside the coverage it has earned. */
+.capture-progress { position: relative; }
+.capture-progress i { background: #f4f1ea66; }
+.capture-cursor-live i { background: #f4f1ea; }
+.capture-progress b {
+  position: absolute; top: -4px; bottom: -4px; width: 2px; left: 50%;
+  margin-left: -1px; border-radius: 2px; background: #f4f1ea;
+  box-shadow: 0 0 0 2px #0b0f0d66; transition: left .12s linear;
+}
+.capture-readout { flex-wrap: wrap; }
+.capture-readout #capture-facing { color: #f4f1ea99; }

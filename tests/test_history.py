@@ -284,3 +284,94 @@ def test_locked_tile_prompt_carries_no_licence_to_redraw():
         assert key in lean
     # The open policy needs the site history: there, structures may legitimately change.
     assert "site_history" in payload(_prompt(1900, context, facts, structure_lock=False, lean=True))
+
+
+TEPPER_HISTORY = {
+    "era_facts": ["Use only transport available locally by the reference date.",
+                  "Use locally appropriate clothing and materials.",
+                  "Choose street furniture suited to the reference date.",
+                  "Date every visible structure before keeping it."],
+    "period_summary": "A university campus edge in the selected year.",
+    "local_context": ["The institution existed but under an earlier name."],
+    "site_state": "built",
+    "site_history": "A campus block developed in stages through the twentieth century.",
+    "reconstruction_changes": ["Re-dress facades and paving for the reference date."],
+    "uncertainties": ["Exact signage history needs archival photographs."],
+    "name_dates": [
+        {"name": "Tepper School of Business", "earliest_year": 2004,
+         "note": "Named for David Tepper in 2004; the Tepper Quad opened in 2018."},
+        {"name": "Hamerschlag Hall", "earliest_year": 1912, "note": "Completed 1912."},
+        {"name": "Corner Cafe", "earliest_year": None, "note": None},
+    ],
+}
+
+
+def _tepper_spec(year, monkeypatch, **kwargs):
+    async def facts(*args):
+        return copy.deepcopy(TEPPER_HISTORY), 31
+
+    monkeypatch.setattr(constraints, "_request_facts", facts)
+    spec = {**scene.DEFAULT_SCENE_SPEC,
+            "visible_names": ["Tepper School of Business", "Hamerschlag Hall", "Corner Cafe"]}
+    return asyncio.run(constraints.build_constraints(PLACE, year, spec, **kwargs))
+
+
+def test_a_name_too_new_for_the_year_is_named_and_forbidden(live_history, monkeypatch):
+    """The editor copies lettering straight off the facade unless told not to.
+
+    A 1920 reconstruction kept reading "Tepper" off the building, because nothing
+    in the prompt said that name postdates the year. Naming the exact text is the
+    only instruction that removes it.
+    """
+    result = _tepper_spec(1920, monkeypatch)
+    dated = {item["name"]: item for item in result.to_dict()["historical_context"]["name_dates"]}
+    assert dated["Tepper School of Business"]["anachronistic"] is True
+    assert dated["Hamerschlag Hall"]["anachronistic"] is False, "a name older than the year stays"
+    assert dated["Corner Cafe"]["anachronistic"] is False, "an undatable name is not removed on a guess"
+
+    # Spelled out in the prompt, with the year it dates from.
+    assert "Tepper School of Business" in result.prompt_global
+    assert "2004" in result.prompt_global
+    assert "ANACHRONISTIC SIGNAGE" in result.prompt_global
+    # And forbidden in the negative, which is what the image editor is given.
+    assert 'the words "Tepper School of Business" anywhere in the image' in result.negative
+    # Names that belong in the year are never suppressed.
+    assert "Hamerschlag Hall" not in result.negative
+    assert "Corner Cafe" not in result.negative
+
+
+def test_the_same_name_is_kept_once_the_year_is_late_enough(live_history, monkeypatch):
+    result = _tepper_spec(2020, monkeypatch)
+    dated = {item["name"]: item for item in result.to_dict()["historical_context"]["name_dates"]}
+    assert dated["Tepper School of Business"]["anachronistic"] is False
+    assert "ANACHRONISTIC SIGNAGE" not in result.prompt_global
+    assert "Tepper" not in result.negative
+
+
+def test_visible_names_reach_the_historian_but_addresses_never_do(live_history, monkeypatch):
+    captured = {}
+
+    async def facts(location, year, supplied):
+        captured.update(supplied)
+        return copy.deepcopy(TEPPER_HISTORY), 7
+
+    monkeypatch.setattr(constraints, "_request_facts", facts)
+    spec = {**scene.DEFAULT_SCENE_SPEC,
+            "visible_names": ["Tepper School of Business", "x" * 200, "Posner Center"]}
+    asyncio.run(constraints.build_constraints(PLACE, 1950, spec))
+    sent = constraints._scene_data(spec)["visible_names"]
+    assert "Tepper School of Business" in sent and "Posner Center" in sent
+    assert not any(len(name) > 80 for name in sent), "an over-long string is not a wordmark"
+
+
+def test_a_history_without_name_dates_still_works(live_history, monkeypatch):
+    """A model that omits the field loses the signage check, not the history."""
+    async def facts(*args):
+        without = {k: v for k, v in copy.deepcopy(TEPPER_HISTORY).items() if k != "name_dates"}
+        return without, 5
+
+    monkeypatch.setattr(constraints, "_request_facts", facts)
+    result = asyncio.run(constraints.build_constraints(PLACE, 1920, scene.DEFAULT_SCENE_SPEC))
+    assert not result.fallback, "a missing optional field must not discard the whole history"
+    assert result.to_dict()["historical_context"]["name_dates"] == []
+    assert "ANACHRONISTIC SIGNAGE" not in result.prompt_global

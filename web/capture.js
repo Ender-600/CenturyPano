@@ -126,11 +126,27 @@
       return painted ? (filledMax - filledMin) / pixelsPerDegree : 0;
     }
 
+    // Coverage and position are different quantities and a single number cannot
+    // carry both. Coverage only ever grows: turning back does not un-capture
+    // pixels, so a bar that receded would claim a loss that did not happen. But
+    // coverage alone looks broken at the start, because the opening frame already
+    // covers a whole field of view -- the first half of that, the reading does
+    // not move however far you turn. Position is what moves then, and it is also
+    // what says which way extends the shot: only a turn at an edge adds anything.
     function progress() {
       const swept = sweptDegrees();
+      const position = painted
+        ? (origin + sweep * pixelsPerDegree - filledMin) / pixelsPerDegree : 0;
+      const margin = 2;
+      const edge = !painted || swept <= 0 ? null
+        : position <= margin ? "left"
+        : position >= swept - margin ? "right" : null;
       return {
         degrees: swept,
+        position,
+        edge,
         fraction: Math.max(0, Math.min(1, swept / maxSweepDegrees)),
+        cursor: swept > 0 ? Math.max(0, Math.min(1, position / swept)) : 0.5,
         useful: swept >= USEFUL_SWEEP_DEGREES,
       };
     }

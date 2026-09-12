@@ -20,6 +20,7 @@ DEFAULT_SCENE_SPEC = {
     "keep_structure": ["camera position", "viewing direction", "image projection", "complete frame"],
     "sky_fraction": 0.35,
     "is_outdoor": True,
+    "visible_names": [],
 }
 
 SCENE_SCHEMA = {
@@ -30,8 +31,10 @@ SCENE_SCHEMA = {
         "keep_structure": {"type": "ARRAY", "items": {"type": "STRING"}},
         "sky_fraction": {"type": "NUMBER"},
         "is_outdoor": {"type": "BOOLEAN"},
+        "visible_names": {"type": "ARRAY", "items": {"type": "STRING"}},
     },
-    "required": ["summary", "modern_elements", "keep_structure", "sky_fraction", "is_outdoor"],
+    "required": ["summary", "modern_elements", "keep_structure", "sky_fraction", "is_outdoor",
+                 "visible_names"],
 }
 
 
@@ -50,8 +53,10 @@ def parse_json_object(text: str) -> dict:
 
 
 def validate_scene(value: dict) -> dict:
-    # is_outdoor is optional for backwards compatibility with older manifests and tests.
-    if set(value) - {"is_outdoor"} != set(DEFAULT_SCENE_SPEC) - {"is_outdoor"}:
+    # is_outdoor and visible_names are optional for backwards compatibility with
+    # older manifests and tests.
+    optional = {"is_outdoor", "visible_names"}
+    if set(value) - optional != set(DEFAULT_SCENE_SPEC) - optional:
         raise ValueError("Invalid scene fields")
     summary = value["summary"]
     if not isinstance(summary, str) or not summary.strip() or len(summary.split()) > 60 or len(summary) > 600:
@@ -72,6 +77,20 @@ def validate_scene(value: dict) -> dict:
     if not isinstance(outdoor, bool):
         raise ValueError("Invalid is_outdoor flag")
     result["is_outdoor"] = outdoor
+    names = value.get("visible_names", [])
+    if not isinstance(names, list) or len(names) > 12 or any(
+        not isinstance(item, str) or not item.strip() or len(item) > 80 for item in names
+    ):
+        raise ValueError("Invalid visible names")
+    # Deduplicated case-insensitively, order preserved: the same wordmark often
+    # appears on a facade, a banner and a sign within one panorama.
+    seen, unique = set(), []
+    for item in names:
+        cleaned = " ".join(item.split())
+        if cleaned.casefold() not in seen:
+            seen.add(cleaned.casefold())
+            unique.append(cleaned)
+    result["visible_names"] = unique
     return result
 
 
@@ -89,9 +108,16 @@ async def _request_scene(image: bytes) -> tuple[dict, int]:
         "(a list of visible objects/materials and built structures whose age must be assessed), "
         "keep_structure (camera position, viewing direction, projection and frame only), "
         "sky_fraction (a number 0 through 1), is_outdoor (true when the viewpoint is outside; false for "
-        "rooms, halls, corridors, lobbies and other interiors). Describe visible architecture, roads, terrain and "
+        "rooms, halls, corridors, lobbies and other interiors), visible_names (see below). "
+        "Describe visible architecture, roads, terrain and "
         "land use in summary without assuming they existed in the past. "
-        "Use generic visual descriptions only. Do not transcribe signs, addresses, license plates or names. "
+        "Use generic visual descriptions only in summary and modern_elements. "
+        "visible_names is the one exception, and it exists so that a name too new for the target year can "
+        "be removed rather than copied: list the institution, school, company, building and shop names "
+        "legible on facades, signs, banners and awnings, exactly as written, at most 12. "
+        "Include nothing else there: no street addresses, no house or unit numbers, no licence plates, "
+        "no personal names, no phone numbers, and no text from posters or vehicles. Return an empty list "
+        "when no such name is legible; never guess at blurred or partial lettering. "
         "Do not infer location or construction dates. Preserve camera geometry only. Buildings, "
         "roads, land use and the built skyline may need replacement or removal during reconstruction."
     )
