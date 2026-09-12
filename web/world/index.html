@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="referrer" content="no-referrer"><title>Century Pano · 历史区块</title>
+  <link rel="stylesheet" href="/world/style.css">
+  <script type="importmap">{"imports":{"three":"/world-vendor/three/build/three.module.js","three/addons/":"/world-vendor/three/examples/jsm/","@sparkjsdev/spark":"/world-vendor/@sparkjsdev/spark/dist/spark.module.js"}}</script>
+</head>
+<body>
+  <header><a class="brand" href="/">CENTURY <i>PANO</i></a><span class="section-label">WORLD STUDY / 01</span><span class="connection" id="connection">连接中</span></header>
+  <main>
+    <aside>
+      <p class="eyebrow">A PLACE, THROUGH TIME</p>
+      <h1>同一片土地，<br><em>另一种过去。</em></h1>
+      <p class="intro">先看见建筑如何改变，再走进生成的世界。</p>
+      <form id="plan-form">
+        <div class="form-title"><span>01</span><h2>选择一个区块</h2></div>
+        <div class="location-title">区块位置<button id="gps" type="button">使用手机位置 ↗</button></div>
+        <div class="field-grid"><label>纬度<input id="lat" type="number" step="any" min="-85" max="85" value="40.4433" required></label><label>经度<input id="lon" type="number" step="any" min="-180" max="180" value="-79.9436" required></label></div>
+        <div class="field-grid"><label>目标年份<input id="year" type="number" min="1800" value="1925" required></label><label>范围半径<select id="radius"><option value="50">50 米</option><option value="100" selected>100 米</option><option value="150">150 米</option></select></label></div>
+        <button class="primary" id="prepare" type="submit">准备历史区块 <span>→</span></button>
+        <button class="secondary" id="snapshot" type="button" style="margin-top:10px;width:100%">载入 CMU 地图快照 · 2026-09-12</button>
+        <p class="small">当前建筑轮廓来自 OpenStreetMap；历史变化按来源逐项记录。</p>
+      </form>
+      <section id="access-panel" hidden><label>开发访问码<input id="access" type="password" autocomplete="off"></label><button class="secondary" id="connect">连接生成服务</button><p class="small">远程访问使用独立访问码，不需要输入 World Labs 密钥。</p></section>
+      <section id="plan-panel" hidden>
+        <div class="form-title"><span>02</span><h2>审视结构变化</h2></div>
+        <div class="stats"><div><strong id="modern-count">—</strong><span>现代建筑</span></div><div><strong id="removed-count">—</strong><span>依据年份移除</span></div><div><strong id="historic-count">—</strong><span>保留的粗体块</span></div></div>
+        <div id="changes" class="changes"></div>
+        <details><summary>资料来源与不确定性</summary><div id="sources"></div><ul id="uncertainties"></ul></details>
+        <details><summary>补充旧建筑与结构变化</summary><p class="small">导入包含旧建筑轮廓、高度、来源与变化说明的 JSON。新增和替换的几何会立即重新计算；用户补充资料会标为未核实。</p><label>变化清单 JSON<input id="edits-file" type="file" accept=".json,application/json"></label><a class="small" href="/world/edits-example.json" download>下载格式示例（演示坐标，不代表 CMU 历史）</a></details>
+        <div class="form-title"><span>03</span><h2>生成历史世界</h2></div>
+        <p class="small">World Labs 将依次生成历史全景与 Draft 三维世界，消耗服务器账户积分。相同区块任务会复用已有结果。</p>
+        <button class="primary" id="generate">生成历史世界 <span>→</span></button>
+      </section>
+      <section id="job-panel" hidden><div class="job-title"><span class="pulse"></span><strong id="job-stage">等待生成</strong></div><p id="job-detail" class="small"></p><div id="job-assets" class="asset-buttons"></div><p id="cost" class="small"></p></section>
+      <p class="notice">想象重建，非历史影像。未核实的地块用途与建筑外观仍属推测。</p>
+    </aside>
+    <section class="workspace" aria-label="三维区块查看器">
+      <nav class="view-tabs" aria-label="选择预览"><button data-view="historical" class="active">历史粗模型</button><button data-view="modern">现代粗模型</button><button data-view="depth">深度全景</button><button data-view="pano" disabled>历史全景</button><button data-view="world" disabled>生成世界</button></nav>
+      <div id="viewport"><div id="empty"><span class="compass">N<br>✣</span><p>一个区块，一次时间旅行。</p><small>准备区块后，可以在这里对比真实发生的几何变化。</small></div><img id="flat-preview" alt="生成资产预览" hidden>
+        <div class="move-pad" id="move-pad" hidden aria-label="虚拟移动控制"><button data-move="forward" aria-label="向前">↑</button><div><button data-move="left" aria-label="向左">←</button><button data-move="back" aria-label="向后">↓</button><button data-move="right" aria-label="向右">→</button></div></div>
+        <p id="message" role="status" aria-live="polite"></p>
+      </div>
+      <div class="viewer-bottom"><span id="view-caption">等待加载建筑轮廓</span><button id="reset-view" class="secondary">重置视角</button></div>
+      <p class="viewer-note" id="viewer-note">粗模型使用简化体量和平坦地面。这里提供虚拟相机浏览，尚未与手机真实空间对齐。</p>
+    </section>
+  </main>
+  <script type="module" src="/world/app.js"></script>
+</body></html>

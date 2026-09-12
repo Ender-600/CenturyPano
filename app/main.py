@@ -16,6 +16,7 @@ from .config import DECADE_ANCHOR, DEFAULT_DECADE, MAX_UPLOAD_MB, ROOT, settings
 from .location import exif_gps, resolve_place, city_from_latlon
 from .manifest import create_manifest, job_dir, read_manifest, update_manifest
 from .temporal import DEFAULT_YEAR, MAX_YEAR, MIN_YEAR, decade_for_year, manifest_year, resolve_year
+from .worlds.router import router as world_router
 
 register_heif_opener()
 Image.MAX_IMAGE_PIXELS = 100_000_000
@@ -36,11 +37,16 @@ async def lifespan(app):
                 update_manifest(path.parent.name, lambda m: m.update(baseline_status='error'))
         except (OSError, ValueError):
             continue
-    yield
-    pending = list(_tasks.values()) + list(_baselines.values())
-    for task in pending:
-        task.cancel()
-    await asyncio.gather(*pending, return_exceptions=True)
+    from .worlds import router as world_routes
+    await world_routes.startup()
+    try:
+        yield
+    finally:
+        await world_routes.shutdown()
+        pending = list(_tasks.values()) + list(_baselines.values())
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
 
 
 app = FastAPI(title='Century Pano', version='0.1.0', lifespan=lifespan)
@@ -49,6 +55,13 @@ app = FastAPI(title='Century Pano', version='0.1.0', lifespan=lifespan)
 @app.middleware('http')
 async def security_headers(request, call_next):
     length = request.headers.get('content-length')
+    if request.url.path.startswith(('/world-plans', '/world-jobs')) and request.method in ('POST', 'PATCH'):
+        body = bytearray()
+        async for chunk in request.stream():
+            body.extend(chunk)
+            if len(body) > 256 * 1024:
+                return PlainTextResponse('区块请求过大。', status_code=413)
+        request._body = bytes(body)
     if request.url.path in ('/jobs', '/preview') and length:
         try:
             if int(length) > (MAX_UPLOAD_MB + 1) * 1024 * 1024:
@@ -59,7 +72,8 @@ async def security_headers(request, call_next):
     response.headers['X-Content-Type-Options'] = 'nosniff'
     response.headers['Referrer-Policy'] = 'same-origin'
     response.headers['Permissions-Policy'] = 'geolocation=(self), accelerometer=(self), gyroscope=(self), magnetometer=(self)'
-    if request.url.path in ('/sw.js', '/health', '/replays') or request.url.path.endswith('/manifest'):
+    if (request.url.path in ('/sw.js', '/health', '/replays') or request.url.path.endswith('/manifest')
+            or request.url.path.startswith(('/world-session', '/world-plans', '/world-jobs', '/world-config'))):
         response.headers['Cache-Control'] = 'no-store'
     return response
 
@@ -298,4 +312,6 @@ async def health():
             'min_year': MIN_YEAR, 'max_year': MAX_YEAR, 'default_year': DEFAULT_YEAR}
 
 
+app.include_router(world_router)
+app.mount('/world-vendor', StaticFiles(directory=ROOT / 'node_modules', check_dir=False), name='world-vendor')
 app.mount('/', StaticFiles(directory=ROOT / 'web', html=True), name='web')

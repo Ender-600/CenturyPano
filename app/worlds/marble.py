@@ -224,6 +224,39 @@ class MarbleClient:
         result = await self._request("POST", "/marble/v1/worlds:generate", payload=payload, submission=True)
         return _operation(result, submission=True)
 
+    async def generate_depth(
+        self, depth_png: bytes, prompt: str, *, z_min: float, z_max: float,
+    ) -> dict[str, Any]:
+        """Generate RGB appearance from an encoded spherical PNG depth map.
+
+        PNG values must use the encoding accompanying z_min/z_max in World Labs'
+        official depth example. The response is a panorama operation, not a world.
+        """
+        if not isinstance(depth_png, bytes) or not 0 < len(depth_png) <= _MAX_INLINE_BYTES:
+            raise MarbleError("Marble requires a PNG depth panorama of at most 10 MiB", code="invalid_input")
+        if not _finite_number(z_min) or not _finite_number(z_max) or not 0 < z_min < z_max:
+            raise MarbleError("Marble depth bounds must satisfy 0 < z_min < z_max", code="invalid_input")
+        if not _valid_text(prompt, 2000):
+            raise MarbleError("Marble prompt must contain 1 to 2000 characters", code="invalid_input")
+        try:
+            with Image.open(io.BytesIO(depth_png)) as source:
+                if source.format != "PNG" or source.width != 2 * source.height:
+                    raise ValueError("Invalid depth panorama")
+                source.verify()
+        except (UnidentifiedImageError, OSError, ValueError, Image.DecompressionBombError):
+            raise MarbleError("Invalid PNG depth panorama for Marble", code="invalid_input") from None
+        payload = {
+            "depth_pano_image": {
+                "source": "data_base64", "extension": "png",
+                "data_base64": base64.b64encode(depth_png).decode("ascii"),
+            },
+            "text_prompt": prompt,
+            "z_min": z_min,
+            "z_max": z_max,
+        }
+        result = await self._request("POST", "/marble/v1/pano:depth_to_rgb", payload=payload, submission=True)
+        return _operation(result, submission=True)
+
     async def operation(self, operation_id: str) -> dict[str, Any]:
         operation_id = _checked_id(operation_id)
         result = await self._request("GET", f"/marble/v1/operations/{operation_id}")

@@ -8,11 +8,33 @@
 
 已实现移动端页面、FastAPI 图像流水线、GPT Image 2.5 Sunburst / Gemini 图像编辑、fal 回退、Gemini 场景识别、精确年份与地点历史背景推理、磁盘缓存、渐进瓦片、前后对比、陀螺仪与拖动、音频揭幕、离线回放和串行基线。
 
+新增 **单街区历史世界工作台**：OSM 真实建筑轮廓与 CMU 官方建筑年代资料 → 可审阅的实体变化与 JSON 编辑 → 历史几何深度 → World Labs `depth_to_rgb` → Marble Draft → Spark 三维查看。它是独立实验入口，具体启动、资料依据、编辑格式与恢复机制见 [当前实现说明](docs/MARBLE_IMPLEMENTATION.md)。
+
 仓库自带的是 **工程示例**：程序绘制的街景插画经过本地色调变换，没有调用 AI，不是实拍照片，不代表历史重建画质。真实模型效果、真实模型性能、iPhone 的实体传感器验收需在配置密钥后完成，不能把下方本地数值作为真实模型的结果。
 
-## 本地启动
+## 历史街区工作台启动
 
-需要 Python 3.11+，推荐 `uv`。前端没有构建步骤和 CDN 依赖。
+需要 Python 3.11+、`uv`、Node.js 和 npm。在项目根目录运行：
+
+```bash
+uv sync --python 3.11
+npm ci
+uv run python scripts/serve_worlds.py --env-file .env --port 8001
+```
+
+打开 [http://127.0.0.1:8001/world/](http://127.0.0.1:8001/world/)。独立工作目录可用 `--env-file /Users/maxwell/hackcmu/.env` 显式读取原项目配置。`.env` 中的 `WORLDLAB_API_KEY` 只供服务器使用；本机自动获得开发访问码，远程访问需要单独设置并输入 `WORLD_ACCESS_TOKEN`。`npm ci` 安装本地 Three.js/Spark，不需要前端打包。
+
+先查看默认 CMU 1925 年区块，或点击明确标注日期的 OSM 快照按钮：当前快照为 5 个现代体块、4 个有年代依据的移除项、1 个未核实的保留项。可以导入旧建筑轮廓进行新增、替换、移除或恢复；用户来源仍标为未核实。审阅后再点击生成，深度转 RGB 和 Draft 都使用账户积分。已受理阶段依 operation ID 恢复，不重复付费提交。
+
+该入口提供浏览器虚拟相机查看，尚非手机 AR，也不保证历史准确、实际米制对齐或生成世界能延伸到很远。旧 M0 单图实验的费用和时长不代表此链路；当前记录见 [实现与验收说明](docs/MARBLE_IMPLEMENTATION.md)。
+
+2026-09-12 的一次 CMU 1925 真实运行完成了深度转 RGB、Draft 和资产保存，两个阶段各提交 1 次，共扣 230 credits。端到端约 **2 分 29 秒**，包含中途兼容修复和重启等待；两段生成合计约 37 秒不能当成全链路耗时。粗模型的四项建筑移除检查通过，但生成全景仍有现代多车道道路、广告及街区外观，**历史视觉验收未通过**。
+
+实际 SPZ 已在 Chrome WebGL2 / ANGLE Metal 的 **Apple M1 Pro GPU** 上显示，并检查了虚拟移动、1280×900 桌面及 390×844 移动视口；画面仍模糊，这不是实体手机 GPU 或 AR 验收。失败记录和页面警告保留。随后完成的 `depth-history-v2` 提示词修复已进入计划缓存与生成版本，但**尚未追加付费验证**，旧任务不会自动重跑。代码验证：374 项 Python 测试、27 项前端测试与 Ruff 通过。
+
+## 全景图像页面启动
+
+需要 Python 3.11+，推荐 `uv`。这个原有全景图像页面没有构建步骤和 CDN 依赖；上述三维入口另需 `npm ci`。
 
 ```bash
 uv sync --python 3.11
@@ -32,7 +54,7 @@ PROVIDER=demo uv run python scripts/seed_demo.py
 
 ## 连接真实模型
 
-Marble 按需历史三维世界的实现、延迟实验与手机 AR 方案见 [实施计划](docs/MARBLE_IMPLEMENTATION_PLAN.md)。该方案目前处于规划阶段，下面仍是已有全景图像流程的配置。
+Marble 当前街区链路见 [实现说明](docs/MARBLE_IMPLEMENTATION.md)，早期 M0 探针与未来手机 AR 路线保留在 [实施计划](docs/MARBLE_IMPLEMENTATION_PLAN.md)。下面的 OpenAI/Gemini/fal 配置用于原有全景图像流程。
 
 把密钥写入本地 `.env`，不要写入前端或提交到 Git。变更配置后重启服务器。
 
@@ -106,6 +128,7 @@ docker run --rm -p 8000:8000 --env-file .env -v "$PWD/data:/data" century-pano
 - `app/pipeline.py`：并行流水线、磁盘缓存、隔离基线任务。
 - `app/geometry.py`、`consistency.py`、`stitch.py`、`metrics.py`：图像与指标。
 - `app/editors/`、`scene.py`、`constraints.py`：模型适配与故障恢复。
+- `app/worlds/`：OSM/CMU 证据计划、实体编辑、米制深度渲染、World Labs 任务与资产；`web/world/` 提供工作台和 Spark 查看器。
 - `web/`：无构建的移动端界面与 Service Worker。
 - `data/in/`：原始上传，保留原文件与 EXIF，不通过 HTTP 提供。
 - `data/out/JOB_ID/`：原子 manifest、band、anchor、`tN_raw.jpg`、`tN.jpg`、result。
@@ -119,7 +142,7 @@ docker run --rm -p 8000:8000 --env-file .env -v "$PWD/data:/data" century-pano
 
 历史模型接收具体年份、拍摄位置和当前场景，返回当地历史时期、事件背景、地块是否已开发、建筑更替建议与不确定性。相机位置、方向和投影固定，建筑高度、轮廓、道路和土地用途允许按历史背景改变；尚未开发的地块可以呈现自然地貌或农田。锚点与全部瓦片使用同一份提示词。
 
-当前推理使用模型知识，**未接入历史地图、地籍或档案检索**。界面会展示推测依据与待核实事项；城市级位置不能证明具体地块的历史。Demo 模式仍仅模拟色调，不代表建筑重建。完整契约见 [历史背景说明](docs/HISTORICAL_CONTEXT.md)。
+原有全景图像推理使用模型知识，**未接入历史地图、地籍或档案检索**。新增街区工作台已加入有限的 CMU 官方建筑年代资料库与用户来源编辑，仍不等于通用历史地籍检索。界面会展示推测依据与待核实事项；城市级位置不能证明具体地块的历史。Demo 模式仍仅模拟色调，不代表建筑重建。原图像流程契约见 [历史背景说明](docs/HISTORICAL_CONTEXT.md)。
 
 ## API
 

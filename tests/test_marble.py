@@ -322,3 +322,52 @@ async def test_context_manager_closes_transport_after_failure():
         async with MarbleClient(KEY, transport=transport) as client:
             await client.credits()
     assert transport.closed
+
+
+@pytest.mark.asyncio
+async def test_depth_generation_uses_official_png_schema_and_fixed_endpoint():
+    output = io.BytesIO()
+    Image.new("L", (128, 64), 90).save(output, "PNG")
+    data = output.getvalue()
+    requests = []
+
+    def respond(request):
+        requests.append(request)
+        return httpx.Response(200, json=accepted())
+
+    async with MarbleClient(KEY, transport=httpx.MockTransport(respond)) as client:
+        await client.generate_depth(data, "A street in 1925", z_min=.1, z_max=80)
+    assert len(requests) == 1
+    request = requests[0]
+    assert str(request.url) == "https://api.worldlabs.ai/marble/v1/pano:depth_to_rgb"
+    assert request.headers["WLT-Api-Key"] == KEY
+    assert json.loads(request.content) == {
+        "depth_pano_image": {"source": "data_base64", "extension": "png",
+                             "data_base64": base64.b64encode(data).decode()},
+        "text_prompt": "A street in 1925", "z_min": .1, "z_max": 80,
+    }
+
+
+@pytest.mark.asyncio
+async def test_depth_rejects_invalid_inputs_before_charging_and_never_retries_unknown():
+    output = io.BytesIO()
+    Image.new("L", (128, 64), 90).save(output, "PNG")
+    data = output.getvalue()
+    requests = []
+
+    def respond(request):
+        requests.append(request)
+        return httpx.Response(200, text=PRIVATE + KEY)
+
+    async with MarbleClient(KEY, transport=httpx.MockTransport(respond)) as client:
+        for z_min, z_max in [(0, 80), (80, 80), (90, 80), (.1, float("inf"))]:
+            with pytest.raises(MarbleError) as caught:
+                await client.generate_depth(data, "Era", z_min=z_min, z_max=z_max)
+            assert caught.value.code == "invalid_input"
+        with pytest.raises(MarbleError):
+            await client.generate_depth(jpeg(), "Era", z_min=.1, z_max=80)
+        assert not requests
+        with pytest.raises(SubmissionUnknown) as caught:
+            await client.generate_depth(data, "Era", z_min=.1, z_max=80)
+    assert len(requests) == 1
+    assert_safe(caught.value)

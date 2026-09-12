@@ -1,0 +1,10 @@
+{
+  "name": "centurypano-world-viewer",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "dependencies": {
+    "three": "0.180.0",
+    "@sparkjsdev/spark": "2.1.0"
+  }
+}

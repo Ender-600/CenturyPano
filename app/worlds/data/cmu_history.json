@@ -1,0 +1,20 @@
+{
+  "scope": {"south": 40.439, "west": -79.951, "north": 40.450, "east": -79.935},
+  "reviewed_on": "2026-09-12",
+  "sources": [
+    {"id": "cmu-gates-2009", "title": "CMU Facilities: Gates and Hillman Centers", "url": "https://www.cmu.edu/cdfd/buildings/gates-hillman/index.html", "kind": "university_facilities", "evidence_basis": "primary_source_completion_date", "claim": "The combined Gates and Hillman Centers project was completed in summer 2009."},
+    {"id": "cmu-tepper-2018", "title": "CMU: Carnegie Mellon Community Celebrates Opening of Tepper Quad", "url": "https://www.cmu.edu/news/stories/archives/2018/september/tepper-quad-opening.html", "kind": "university_news", "evidence_basis": "primary_source_opening_date", "claim": "The new David A. Tepper Quadrangle opened in September 2018 after three years of construction. The site's use in 1925 is not established by this article."},
+    {"id": "cmu-facilities-2001", "title": "CMU Facilities Listing, updated November 11, 2001", "url": "https://www.cmu.edu/fms/files/BuildingPictures/BuildingPictures/BuildingListing.htm", "kind": "university_facilities", "evidence_basis": "primary_source_completion_dates", "claim": "The listing gives Wean 1971, Cyert 1983, Doherty 1908, Newell-Simon 1918/1934/1999 and Purnell 2000. Multiple dates do not identify the footprints of individual additions."},
+    {"id": "cmu-projects", "title": "CMU Campus Design: Joe Greenaway project chronology", "url": "https://www.cmu.edu/cdfd/greenaway/index.html", "kind": "university_facilities", "evidence_basis": "primary_source_project_chronology", "claim": "The project chronology dates Purnell to 1999; the separate facilities listing gives 2000. Boundary-year reconstructions require further review."}
+  ],
+  "buildings": [
+    {"aliases": ["Gates and Hillman Centers", "Gates Hillman Centers", "Gates Center for Computer Science", "Gates Center", "Hillman Center for Future-Generation Technologies", "Hillman Center"], "completion_years": [2009], "evidence_ids": ["cmu-gates-2009"]},
+    {"aliases": ["Tepper Quad", "David A. Tepper Quadrangle", "David A Tepper Quadrangle"], "completion_years": [2018], "construction_start_year": 2015, "evidence_ids": ["cmu-tepper-2018"]},
+    {"aliases": ["Wean Hall"], "completion_years": [1971], "evidence_ids": ["cmu-facilities-2001"]},
+    {"aliases": ["Purnell Center for the Arts", "Purnell Center"], "completion_years": [1999, 2000], "evidence_ids": ["cmu-facilities-2001", "cmu-projects"]},
+    {"aliases": ["Cyert Hall", "Richard M. Cyert Hall"], "completion_years": [1983], "evidence_ids": ["cmu-facilities-2001"]},
+    {"aliases": ["Doherty Hall"], "completion_years": [1908, 2002, 2008], "mixed_phases": true, "evidence_ids": ["cmu-facilities-2001", "cmu-projects"]},
+    {"aliases": ["Warner Hall"], "completion_years": [1966, 1996], "evidence_ids": ["cmu-facilities-2001"]},
+    {"aliases": ["Newell-Simon Hall", "Newell Simon Hall"], "completion_years": [1918, 1934, 1999], "mixed_phases": true, "evidence_ids": ["cmu-facilities-2001"]}
+  ]
+}
