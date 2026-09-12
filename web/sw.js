@@ -1,7 +1,10 @@
 'use strict';
-const SHELL_CACHE = 'century-shell-v4';
+const SHELL_CACHE = 'century-shell-v6';
 const JOURNEY_CACHE = 'century-journeys-v1';
-const SHELL = ['/', '/index.html', '/capture.js', '/motion.js', '/app.js', '/style.css', '/window-scene.png'];
+const SHELL = [
+  '/', '/index.html', '/capture.js', '/motion.js', '/app.js', '/style.css', '/window-scene.png',
+  '/vendor/leaflet/leaflet.css', '/vendor/leaflet/leaflet.js',
+];
 
 async function cachedReplay(request) {
   const cached = await caches.match(request);

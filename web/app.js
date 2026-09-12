@@ -1093,13 +1093,131 @@
   function rememberJob(manifest) {
     const entries = storedJourneys('century-recent-jobs');
     const previous = entries.find((entry) => entry.job_id === manifest.job_id);
+    const coords = entryCoords(manifest);
     const entry = {
       ...previous, job_id: manifest.job_id, place: manifest.place, decade: manifest.decade,
       target_year: yearOf(manifest), anchor_year: manifest.anchor_year, provider: manifest.provider, demo: isDemo(manifest),
       status: manifest.status, metrics: manifest.metrics, saved_at: Date.now(),
+      ...(coords ? { lat: coords.lat, lon: coords.lon } : {}),
     };
     try { localStorage.setItem('century-recent-jobs', JSON.stringify([entry, ...entries.filter((item) => item.job_id !== entry.job_id)].slice(0, 24))); }
     catch { /* Storage restrictions do not interrupt the active journey. */ }
+  }
+  function entryCoords(entry) {
+    if (!entry) return null;
+    if (Number.isFinite(entry.lat) && Number.isFinite(entry.lon)) return { lat: Number(entry.lat), lon: Number(entry.lon) };
+    const place = entry.place;
+    if (place && Number.isFinite(place.lat) && Number.isFinite(place.lon)) return { lat: Number(place.lat), lon: Number(place.lon) };
+    return null;
+  }
+  function clusterArchivePlaces(entries) {
+    const groups = new Map();
+    entries.forEach((entry) => {
+      const coords = entryCoords(entry);
+      if (!coords) return;
+      const label = placeName(entry.place);
+      const key = label.casefold ? label.casefold() : String(label).toLowerCase();
+      const group = groups.get(key) || { key, label, lat: 0, lon: 0, trips: [] };
+      group.trips.push(entry);
+      const n = group.trips.length;
+      group.lat += (coords.lat - group.lat) / n;
+      group.lon += (coords.lon - group.lon) / n;
+      groups.set(key, group);
+    });
+    return [...groups.values()];
+  }
+  let archiveLeaflet = null;
+  const archiveMarkers = new Map();
+  function destroyArchiveLeaflet() {
+    archiveMarkers.clear();
+    if (archiveLeaflet) {
+      archiveLeaflet.remove();
+      archiveLeaflet = null;
+    }
+    const host = $('archive-leaflet');
+    if (host) host.innerHTML = '';
+  }
+  function closeArchivePlace() {
+    const panel = $('archive-place-panel');
+    panel.hidden = true;
+    $('archive-place-trips').innerHTML = '';
+    archiveMarkers.forEach((marker) => {
+      const el = marker.getElement?.();
+      el?.classList.remove('is-active');
+    });
+  }
+  function openArchivePlace(group, dialog) {
+    const panel = $('archive-place-panel');
+    panel.hidden = false;
+    text('archive-place-title', group.label);
+    const trips = $('archive-place-trips');
+    trips.innerHTML = '';
+    group.trips.forEach((entry) => {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'archive-place-trip';
+      const pending = entry.status === 'running';
+      const year = yearOf(entry) ?? 'Journey';
+      button.innerHTML = `<img src="/jobs/${encodeURIComponent(entry.job_id)}/${pending ? 'preview' : 'result'}" alt=""><span><strong>${escapeHTML(year)}</strong><small>${pending ? 'In progress' : 'Open this scene'}</small></span>`;
+      button.querySelector('img')?.addEventListener('error', (event) => { event.target.hidden = true; }, { once: true });
+      button.addEventListener('click', () => { dialog.close(); startJob(entry.job_id, true); });
+      trips.appendChild(button);
+    });
+    archiveMarkers.forEach((marker, key) => {
+      const el = marker.getElement?.();
+      if (!el) return;
+      el.classList.toggle('is-active', key === group.key);
+    });
+  }
+  function renderArchiveMap(entries, dialog) {
+    const section = $('archive-map');
+    const empty = $('archive-map-empty');
+    const places = clusterArchivePlaces(entries);
+    section.hidden = false;
+    closeArchivePlace();
+    empty.hidden = places.length > 0;
+    if (typeof L === 'undefined') {
+      empty.hidden = false;
+      text('archive-map-empty', 'Map library unavailable. Use the journey list below.');
+      destroyArchiveLeaflet();
+      return;
+    }
+    if (!archiveLeaflet) {
+      archiveLeaflet = L.map('archive-leaflet', {
+        zoomControl: false, attributionControl: true, scrollWheelZoom: false,
+      }).setView([20, 0], 1);
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        maxZoom: 18,
+        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+      }).addTo(archiveLeaflet);
+      L.control.zoom({ position: 'topright' }).addTo(archiveLeaflet);
+    } else {
+      archiveMarkers.forEach((marker) => archiveLeaflet.removeLayer(marker));
+      archiveMarkers.clear();
+    }
+    if (!places.length) {
+      archiveLeaflet.setView([20, 0], 1);
+      setTimeout(() => archiveLeaflet.invalidateSize(), 50);
+      return;
+    }
+    const bounds = L.latLngBounds([]);
+    places.forEach((group) => {
+      const mark = group.trips.length > 1 ? String(group.trips.length) : String(yearOf(group.trips[0]) ?? '·').slice(-2);
+      const icon = L.divIcon({
+        className: 'archive-pin-icon',
+        html: `<span>${escapeHTML(mark)}</span>`,
+        iconSize: [28, 28],
+        iconAnchor: [14, 28],
+      });
+      const marker = L.marker([group.lat, group.lon], { icon, keyboard: true, title: group.label });
+      marker.on('click', () => openArchivePlace(group, dialog));
+      marker.addTo(archiveLeaflet);
+      archiveMarkers.set(group.key, marker);
+      bounds.extend([group.lat, group.lon]);
+    });
+    if (places.length === 1) archiveLeaflet.setView([places[0].lat, places[0].lon], 5);
+    else archiveLeaflet.fitBounds(bounds.pad(0.35), { maxZoom: 5 });
+    setTimeout(() => archiveLeaflet.invalidateSize(), 50);
   }
   async function cacheJourney(manifest) {
     if (state.offlineSaved || state.cachePending || !navigator.serviceWorker) return;
@@ -1121,7 +1239,12 @@
         clearTimeout(timeout); channel.port1.close();
         if (state.jobId === jobId) state.cachePending = false;
         if (!event.data?.ok) return;
-        const entry = { job_id: manifest.job_id, place: manifest.place, target_year: yearOf(manifest), decade: manifest.decade, anchor_year: manifest.anchor_year, metrics: manifest.metrics, provider: manifest.provider, demo: isDemo(manifest), mode: 'replay' };
+        const coords = entryCoords(manifest);
+        const entry = {
+          job_id: manifest.job_id, place: manifest.place, target_year: yearOf(manifest), decade: manifest.decade,
+          anchor_year: manifest.anchor_year, metrics: manifest.metrics, provider: manifest.provider, demo: isDemo(manifest), mode: 'replay',
+          ...(coords ? { lat: coords.lat, lon: coords.lon } : {}),
+        };
         const replays = localReplays().filter((replay) => replay.job_id !== entry.job_id);
         replays.unshift(entry);
         try { localStorage.setItem('century-replays', JSON.stringify(replays.slice(0, 12))); } catch { /* Quota restriction does not affect the current viewer. */ }
@@ -1137,6 +1260,9 @@
     closeOptions();
     const dialog = $('replay-dialog'); if (!dialog.open) dialog.showModal();
     $('replay-list').innerHTML = '<p class="empty-state">Opening the archive…</p>';
+    $('archive-map').hidden = true;
+    destroyArchiveLeaflet();
+    closeArchivePlace();
     let entries = [];
     try {
       const response = await fetch('/replays');
@@ -1146,7 +1272,13 @@
     const device = localReplays();
     const map = new Map([...storedJourneys('century-recent-jobs'), ...device, ...entries].map((entry) => [entry.job_id, entry]));
     entries = [...map.values()];
-    if (!entries.length) { $('replay-list').innerHTML = '<p class="empty-state">No saved journeys yet.<br>Finish one online and you can revisit it here offline.</p>'; return; }
+    if (!entries.length) {
+      $('archive-map').hidden = true;
+      destroyArchiveLeaflet();
+      $('replay-list').innerHTML = '<p class="empty-state">No saved journeys yet.<br>Finish one online and you can revisit it here offline.</p>';
+      return;
+    }
+    renderArchiveMap(entries, dialog);
     $('replay-list').innerHTML = '';
     entries.forEach((entry) => {
       const button = document.createElement('button'); button.className = 'replay-card';
@@ -1160,8 +1292,9 @@
     });
   }
   $('sample-button').addEventListener('click', openReplays); $('nav-replays').addEventListener('click', openReplays);
-  $('close-replays').addEventListener('click', () => $('replay-dialog').close());
-  $('replay-dialog').addEventListener('click', (event) => { if (event.target === $('replay-dialog')) { const rect = $('replay-dialog').getBoundingClientRect(); if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) $('replay-dialog').close(); } });
+  $('close-replays').addEventListener('click', () => { closeArchivePlace(); $('replay-dialog').close(); });
+  $('archive-place-close').addEventListener('click', closeArchivePlace);
+  $('replay-dialog').addEventListener('click', (event) => { if (event.target === $('replay-dialog')) { const rect = $('replay-dialog').getBoundingClientRect(); if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) { closeArchivePlace(); $('replay-dialog').close(); } } });
   window.addEventListener('offline', connectionStatus);
   window.addEventListener('online', () => { checkHealth(); if (state.finalLoaded && state.manifest) cacheJourney(state.manifest); });
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => { /* HTTPS or localhost is needed for offline mode. */ });

@@ -13,7 +13,7 @@ from pillow_heif import register_heif_opener
 from pydantic import BaseModel, Field
 
 from .config import DECADE_ANCHOR, DEFAULT_DECADE, MAX_UPLOAD_MB, ROOT, settings
-from .location import exif_gps, resolve_place, city_from_latlon
+from .location import city_from_latlon, coords_for_place, exif_gps, resolve_place
 from .manifest import create_manifest, job_dir, read_manifest, update_manifest
 from .temporal import DEFAULT_YEAR, MAX_YEAR, MIN_YEAR, decade_for_year, manifest_year, resolve_year
 
@@ -270,6 +270,9 @@ async def replays():
             if m.get('mode') == 'replay' and m.get('status') in ('done', 'done_partial') and not m.get('baseline_of'):
                 entry = {k: m.get(k) for k in ('job_id', 'place', 'decade', 'anchor_year', 'metrics', 'provider', 'demo', 'title', 'source')}
                 entry['target_year'] = manifest_year(m)
+                coords = coords_for_place(m.get('place'))
+                if coords:
+                    entry['lat'], entry['lon'] = coords
                 result.append(entry)
     return {'replays': result}
 

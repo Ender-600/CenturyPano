@@ -8,6 +8,8 @@
   <title>CENTURY PANO · A Window Onto Time</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%2332372f'/%3E%3Cpath d='M7 13V7h6m6 0h6v6M7 19v6h6m6 0h6v-6' stroke='white' stroke-width='1.5' fill='none'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="/vendor/leaflet/leaflet.css">
+  <script src="/vendor/leaflet/leaflet.js" defer></script>
   <script src="/capture.js" defer></script>
   <script src="/motion.js" defer></script>
   <script src="/app.js" defer></script>
@@ -159,6 +161,22 @@
     <div class="sheet-handle" aria-hidden="true"></div>
     <div class="sheet-heading dialog-header"><div><p class="eyebrow">THE TIME ARCHIVE</p><h2 id="replays-title">The Archive</h2></div><button class="sheet-close icon-button" id="close-replays" aria-label="Close the archive"><svg><use href="#i-close"/></svg></button></div>
     <p class="dialog-intro">Finished journeys, to revisit as often as you like.<br>A replay uses results already saved and calls no generation service.</p>
+    <section id="archive-map" class="archive-map" aria-label="World map of visited places" hidden>
+      <div class="archive-map-stage">
+        <div id="archive-leaflet" class="archive-leaflet" role="application" aria-label="OpenStreetMap of visited places"></div>
+      </div>
+      <p id="archive-map-empty" class="archive-map-empty" hidden>No mappable places yet. Finish a journey with photo GPS or a city name to plant a pin.</p>
+      <div id="archive-place-panel" class="archive-place-panel" hidden>
+        <div class="archive-place-heading">
+          <div>
+            <p class="eyebrow">PLACE</p>
+            <h3 id="archive-place-title">Place</h3>
+          </div>
+          <button type="button" class="text-button" id="archive-place-close" aria-label="Close place details">Close</button>
+        </div>
+        <div id="archive-place-trips" class="archive-place-trips"></div>
+      </div>
+    </section>
     <div id="replay-list" class="replay-list"></div>
     <p class="dialog-footnote">The engineering sample is a drawn fictional scene with local colour grading. It does not represent AI reconstruction.</p>
   </dialog>

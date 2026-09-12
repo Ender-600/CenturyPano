@@ -590,6 +590,38 @@ body.clean .slider-handle { visibility: hidden; }
 .connection.offline i { background: #be9d68; }
 .dialog-intro { margin: 0 0 22px; color: #7a887b; font-size: 11px; line-height: 1.9; }
 .replay-list { display: flex; flex-direction: column; gap: 12px; min-height: 80px; }
+.archive-map { margin: 0 0 18px; }
+.archive-map-stage {
+  position: relative; overflow: hidden; border-radius: 16px;
+  border: 1px solid #24403414; background: #d8e2d6;
+  aspect-ratio: 2 / 1;
+}
+.archive-leaflet { width: 100%; height: 100%; min-height: 180px; }
+.archive-leaflet .leaflet-control-attribution { font-size: 9px; background: #f7f4eccc; }
+.archive-pin-icon {
+  width: 28px; height: 28px; margin-left: -14px; margin-top: -28px;
+  border: 0; border-radius: 50% 50% 50% 0; background: #3f5f4c; color: #f4f1e8;
+  box-shadow: 0 6px 14px #1c2f241f; font: 600 10px/28px 'Helvetica Neue', Arial, sans-serif;
+  text-align: center; letter-spacing: 0.02em; rotate: -45deg; cursor: pointer;
+}
+.archive-pin-icon > span { display: inline-block; rotate: 45deg; }
+.archive-pin-icon.is-active { background: #1f3a2c; outline: 2px solid #f4f1e8; outline-offset: 2px; }
+.archive-map-empty { margin: 10px 2px 0; color: #82907f; font-size: 11px; line-height: 1.6; }
+.archive-place-panel {
+  margin-top: 12px; padding: 12px 14px 14px; border-radius: 14px;
+  border: 1px solid #24403412; background: #536e4908;
+}
+.archive-place-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
+.archive-place-heading h3 { margin: 2px 0 0; color: #495f4f; font-family: 'Helvetica Neue', Arial, sans-serif; font-size: 20px; font-weight: 300; }
+.archive-place-trips { display: flex; flex-direction: column; gap: 8px; }
+.archive-place-trip {
+  display: flex; align-items: center; gap: 12px; width: 100%; padding: 0;
+  border: 1px solid #24403412; border-radius: 12px; background: #fffdf8; text-align: left; overflow: hidden;
+}
+.archive-place-trip:hover { background: #536e490a; }
+.archive-place-trip img { width: 72px; height: 56px; object-fit: cover; flex-shrink: 0; }
+.archive-place-trip strong { display: block; color: #495f4f; font-size: 18px; font-weight: 300; }
+.archive-place-trip small { display: block; margin-top: 3px; color: #82907f; font-size: 10px; }
 .replay-card { width: 100%; display: flex; align-items: center; gap: 15px; padding: 0; border: 1px solid #24403412; border-radius: 13px; background: #536e4906; overflow: hidden; text-align: left; }
 .replay-card:hover { background: #536e4910; }
 .replay-card img { width: 104px; height: 109px; object-fit: cover; flex-shrink: 0; }

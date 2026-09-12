@@ -37,6 +37,16 @@ class Element {
   }
   closest(selector) { return this.matches(selector) ? this : null; }
   querySelector(selector) { return this.children.find((element) => element.matches(selector)) || null; }
+  querySelectorAll(selector) { return this.children.filter((element) => element.matches(selector)); }
+  set className(value) {
+    this.attributes.class = String(value || '');
+    const classes = new Set(this.attributes.class.split(/\s+/).filter(Boolean));
+    this.classList = {
+      contains: (name) => classes.has(name), add: (name) => classes.add(name), remove: (name) => classes.delete(name),
+      toggle: (name, active = !classes.has(name)) => { if (active) classes.add(name); else classes.remove(name); },
+    };
+  }
+  get className() { return this.attributes.class || ''; }
   set innerHTML(value) { this._html = value; this.children = /<img\b/.test(value) ? [new Element('img')] : []; }
   get innerHTML() { return this._html || ''; }
   insertAdjacentHTML(_position, value) { this.innerHTML = (this.innerHTML || '') + value; }
@@ -88,6 +98,7 @@ function app(options = {}) {
     Image: class { constructor() { this.naturalWidth = 3000; this.naturalHeight = 750; } set src(_value) { queueMicrotask(() => this.onload?.()); } },
     ResizeObserver: class { observe() {} },
     localStorage: { getItem: (key) => storage.get(key), setItem: (key, value) => storage.set(key, value) },
+    L: globalThis.L,
   });
   const instrumented = source.replace(/\}\)\(\);\s*$/, 'globalThis.hooks = { state, setTargetYear, yearOf, locate, updateMetadata, pollManifest };\n})();');
   vm.runInContext(readFileSync(new URL('../web/motion.js', import.meta.url), 'utf8'), context);
@@ -246,4 +257,65 @@ test('unrecognized manual cities are explicitly excluded and history progress ex
   view.updateMetadata({ target_year: 1945, place: { name: 'Pittsburgh', source: 'manual', prompt_safe: true } });
   assert.equal(view.elements.get('place-warning').hidden, true);
   assert.match(html, /placeholder="City, for example Pittsburgh, PA, US"/);
+});
+
+test('archive world map clusters pins and opens place trips for replay', async () => {
+  assert.match(html, /id="archive-map"/);
+  assert.match(html, /id="archive-leaflet"/);
+  assert.match(html, /vendor\/leaflet\/leaflet\.js/);
+  const clicks = [];
+  const marker = {
+    on(event, callback) { if (event === 'click') this._click = callback; return this; },
+    addTo() { return this; },
+    getElement() { return { classList: { toggle() {}, remove() {} } }; },
+  };
+  const map = {
+    setView() { return this; },
+    fitBounds() { return this; },
+    removeLayer() {},
+    invalidateSize() {},
+    remove() {},
+    addLayer() {},
+  };
+  globalThis.L = {
+    map() { return map; },
+    tileLayer() { return { addTo() { return this; } }; },
+    control: { zoom() { return { addTo() { return this; } }; } },
+    divIcon(options) { return options; },
+    marker(latlng, options) {
+      clicks.push({ latlng, options });
+      return marker;
+    },
+    latLngBounds() {
+      return { extend() { return this; }, pad() { return this; }, isValid() { return true; } };
+    },
+  };
+  const view = app({
+    fetch: async (url) => {
+      if (url === '/replays') {
+        return {
+          ok: true,
+          json: async () => ({
+            replays: [
+              { job_id: 'trip-a', place: { name: 'Pittsburgh', lat: 40.44, lon: -79.99 }, target_year: 1925, status: 'done' },
+              { job_id: 'trip-b', place: { name: 'Pittsburgh', lat: 40.45, lon: -80.0 }, target_year: 1945, status: 'done' },
+              { job_id: 'trip-c', place: { name: 'Unplottable Somewhere' }, target_year: 1900, status: 'done' },
+            ],
+          }),
+        };
+      }
+      return null;
+    },
+  });
+  await view.elements.get('nav-replays').emit('click');
+  for (let n = 0; n < 12; n++) await Promise.resolve();
+  assert.equal(view.elements.get('archive-map').hidden, false);
+  assert.equal(view.elements.get('archive-map-empty').hidden, true);
+  assert.equal(clicks.length, 1);
+  assert.match(clicks[0].options.title || '', /Pittsburgh/);
+  marker._click();
+  assert.equal(view.elements.get('archive-place-panel').hidden, false);
+  assert.match(view.elements.get('archive-place-title').textContent, /Pittsburgh/);
+  assert.equal(view.elements.get('archive-place-trips').children.length, 2);
+  assert.equal(view.elements.get('replay-list').children.length, 3);
 });
