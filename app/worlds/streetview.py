@@ -251,7 +251,7 @@ class GoogleStreetViewClient:
     async def _fetch(self, lat, lon, radius):
         budget = {"requests": 0, "bytes": 0}
         session_data = await self._download("POST", "/v1/createSession", budget, payload={
-            "mapType": "streetview", "language": "en-US", "region": "US", "imageFormat": "jpeg",
+            "mapType": "streetview", "language": "en-US", "region": "US",
         })
         session = session_data.get("session")
         if not isinstance(session, str) or _ID.fullmatch(session) is None:

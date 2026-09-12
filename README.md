@@ -26,7 +26,7 @@ uv run python scripts/serve_worlds.py --env-file .env --port 8001
 
 首次打开即请求定位，每次准备重新取得手机位置。拒绝或超时不会回退到 CMU、旧任务或默认坐标；手工点位需要明确切换到测试模式。回放旧世界不会覆盖当前定位输入。无需 Maps key 的「在 Google 打开当前位置街景」按钮现在可用，但该外链只是查看入口，不向模型提供图像字节。
 
-自动获取街景照片还需要配置 `GOOGLE_MAPS_API_KEY`，并在已获得涵盖保存、历史改图及向外部 AI 转交的 Google 许可后设置 `GOOGLE_STREETVIEW_AI_AUTHORIZED=true`。普通显示 key 不代表该许可。当前环境尚未配置此接入，因此 Google 自动获取与历史改图的实际端到端效果尚未验收；准备会明确报告服务未配置，不会改用 OSM 生成替代内容。图像编辑使用 `OPENAI_API_KEY`，Marble 使用 `WORLDLAB_API_KEY`，费用分开记录。
+自动获取街景照片需要配置 `GOOGLE_MAPS_API_KEY`，并在已获得涵盖保存、历史改图及向外部 AI 转交的 Google 许可后设置 `GOOGLE_STREETVIEW_AI_AUTHORIZED=true`。普通显示 key 不代表该许可。2026-09-12 已用真实 Google key 验证官方 session 与 CMU 测试点元数据成功：最近拍摄点距指定坐标约 15 米，拍摄年月为 2013-06。会话使用默认图片格式；显式传入 `imageFormat` 在这次真实测试中返回 400，已修复。当前尚未启用外部 AI 处理，也未下载真实全景瓦片，因此照片拼接、历史改图及世界生成的端到端效果仍待验收。图像编辑使用 `OPENAI_API_KEY`，Marble 使用 `WORLDLAB_API_KEY`，费用分开记录。
 
 该入口提供浏览器虚拟相机查看，尚非手机 AR，也不保证历史准确、实际米制对齐或生成世界能延伸到很远。旧 M0 单图实验的费用和时长不代表此链路；当前记录见 [实现与验收说明](docs/MARBLE_IMPLEMENTATION.md)。
 

@@ -59,7 +59,7 @@ async def test_exact_google_contract_complete_panorama_and_separate_camera_locat
         result = await client.fetch_panorama(LAT, LON)
     assert len(requests) == 30
     assert json.loads(requests[0].content) == {
-        "mapType": "streetview", "language": "en-US", "region": "US", "imageFormat": "jpeg",
+        "mapType": "streetview", "language": "en-US", "region": "US",
     }
     assert requests[0].method == "POST" and requests[0].url.path == "/v1/createSession"
     for request in requests:
@@ -80,6 +80,28 @@ async def test_exact_google_contract_complete_panorama_and_separate_camera_locat
     assert "report_problem_link" in meta
     with Image.open(io.BytesIO(result["image_bytes"])) as image:
         assert image.format == "JPEG" and image.size == (3328, 1664)
+
+
+@pytest.mark.asyncio
+async def test_session_omits_image_format_rejected_by_live_streetview_service():
+    requests = []
+    fallback = responder(requests)
+
+    def handle(request):
+        if request.url.path.endswith("createSession"):
+            payload = json.loads(request.content)
+            if "imageFormat" in payload:
+                requests.append(request)
+                return httpx.Response(400, json={"error": {"message": "Invalid Value"}})
+            assert payload == {"mapType": "streetview", "language": "en-US", "region": "US"}
+            requests.append(request)
+            return httpx.Response(200, json={"session": SESSION, "imageFormat": "jpeg"})
+        return fallback(request)
+
+    async with GoogleStreetViewClient(KEY, ai_authorized=True, transport=httpx.MockTransport(handle)) as client:
+        result = await client.fetch_panorama(LAT, LON)
+    assert "imageFormat" not in json.loads(requests[0].content)
+    assert result["metadata"]["image_width"] == 3328
 
 
 @pytest.mark.asyncio

@@ -26,12 +26,14 @@ metadata = result["metadata"]
 
 ```text
 POST /v1/createSession
-  {mapType: "streetview", language: "en-US", region: "US", imageFormat: "jpeg"}
+  {mapType: "streetview", language: "en-US", region: "US"}
 GET /v1/streetview/metadata?lat=...&lng=...&radius=50&session=...&key=...
 GET /v1/streetview/tiles/{zoom}/{x}/{y}?panoId=...&session=...&key=...
 ```
 
-实现按官方六级金字塔中 z=5 的原始尺寸选择 z=3，较大图像降到 z=2 或 z=1，使原生输出宽度不超过 3840、总像素不超过 8,294,400，以满足后续历史图像编辑器输入限制。依据 `imageWidth/imageHeight` 除以 `2^(5-z)` 得到精确图像范围。以官方示例 13312 × 6656 为例，z=3 输出 3328 × 1664，需要 7 × 4 块 512 像素瓦片；32768 × 16384 的源图使用 z=1 输出 2048 × 1024。只剪掉右边／下边超出图像范围的瓦片补白，不把整个 3584 × 2048 画布压成 2:1。无法整除、不是完整 2:1、尺寸或瓦片规格不支持时明确拒绝，避免把不确定的投影冒充完整全景。尚未用真实 Google 账户验证此适配器；模拟测试不能替代真实不同影像来源的金字塔验收。[Street View Tiles 官方说明](https://developers.google.com/maps/documentation/tile/streetview)
+实现按官方六级金字塔中 z=5 的原始尺寸选择 z=3，较大图像降到 z=2 或 z=1，使原生输出宽度不超过 3840、总像素不超过 8,294,400，以满足后续历史图像编辑器输入限制。依据 `imageWidth/imageHeight` 除以 `2^(5-z)` 得到精确图像范围。以官方示例 13312 × 6656 为例，z=3 输出 3328 × 1664，需要 7 × 4 块 512 像素瓦片；32768 × 16384 的源图使用 z=1 输出 2048 × 1024。只剪掉右边／下边超出图像范围的瓦片补白，不把整个 3584 × 2048 画布压成 2:1。无法整除、不是完整 2:1、尺寸或瓦片规格不支持时明确拒绝，避免把不确定的投影冒充完整全景。[Street View Tiles 官方说明](https://developers.google.com/maps/documentation/tile/streetview)
+
+真实 Google 测试已确认 session 和 metadata 请求通过。`createSession` 带可选的 `imageFormat:"jpeg"` 时返回 HTTP 400（Invalid Value）；移除该字段后返回 HTTP 200，服务自动选择 JPEG。因此请求只发送上述三个必要字段。CMU 测试坐标为 40.4433、-79.9436，搜索半径 100 米；metadata 返回距请求点 15.146 米、拍摄于 2013-06 的全景，原图 13312 × 6656，已通过本地 metadata 校验并选定 z=3 的 3328 × 1664 输出尺寸。此次仅验证 session 和 metadata，**没有下载瓦片，也没有调用历史改图或 World Labs AI**。瓦片拼接及不同影像来源的金字塔仍未真实验收，模拟测试不代替该验收。
 
 每次获取最多 50 个 HTTP 请求、最多 8 个并发、48 MiB 解码后下载数据，单 JSON 128 KiB、单瓦片 2 MiB，最终 JPEG 不超过 10 MiB。不重试、不跟随重定向、不读取环境代理、不遍历相邻街景、不持久化缓存。任何缺失瓦片都会使整个获取失败。无覆盖不会自动切到 CMU 或扩大到另一个街区。
 
