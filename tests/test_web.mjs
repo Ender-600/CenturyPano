@@ -69,7 +69,7 @@ function app(options = {}) {
       const response = await options.fetch(url, request);
       if (response) return response;
     }
-    if (url === '/health') return { ok: true, json: async () => ({ min_year: 1800, max_year: 2026, default_year: 1925 }) };
+    if (url === '/health') return { ok: true, json: async () => ({ min_year: 1800, max_year: 2026, default_year: 1920 }) };
     if (url === '/location/resolve') return { ok: true, json: async () => ({ place: { name: 'Pittsburgh', cc: 'US' } }) };
     if (url === '/jobs') {
       requests.push(request.body);
