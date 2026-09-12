@@ -24,6 +24,8 @@ from .config import H, TILE
 CARVE_GAIN_MIN = .70       # carve only if the cut costs <= 70% of the centre line
 CARVE_FEATHER_PX = 12      # narrow blend around the cut, to hide resampling only
 MIN_CARVE_OVERLAP = 24     # below this there is nothing to route around
+STRUCTURAL_BLEND_MIN = .85 # wide feather only when aligned edge fields agree
+DEFAULT_SHORT_FADE_PX = 24
 
 
 @dataclass(frozen=True)
@@ -70,9 +72,10 @@ def fuse_overlaps(
     1. Translate the whole right tile when the shift improves edge agreement
        (incl. a gated 1D height lock).
     2. Dense-warp the right strip onto the left strip (railings / wires follow).
-    3. Cosine-blend left → warped-right across the full overlap and write that
-       strip into both tiles so the exit into the right body stays continuous —
-       avoid hard-pasting the left tile, which reads as a collage.
+    3. For structurally agreeing overlaps, cosine-blend left → warped-right
+       across the full overlap. When the edge fields disagree, keep the left
+       tile for most of the overlap and fade only the short tail. The latter
+       prevents a different object from being averaged out across the seam.
 
     Tiles listed in `fixed` (typically failed originals) are left untouched and
     do not overwrite their neighbours.
@@ -115,17 +118,26 @@ def fuse_overlaps(
         warped_right = warp_to_reference(left_img, right_img, max_flow=12.0, scale=0.5)
         left = arrays[index][:, -overlap:]
         right = np.asarray(warped_right, dtype=np.float32)
-        # Full-overlap feather: left-weighted at the left edge, right-weighted where
-        # the strip meets the right tile body — natural continuity without a paste cut.
-        span = overlap if fade_px is None else max(8, min(int(fade_px), overlap))
+        # A wide feather is safe for a tonal mismatch, but it averages two
+        # different objects when the generated tiles disagree structurally.
+        # Measure the aligned edge fields after the optical-flow step and use a
+        # conservative short tail for that case. `None` means auto; an explicit
+        # fade_px remains an escape hatch for callers that know their seam.
+        structure_score = edge_agreement(left, right)
+        if fade_px is None:
+            span = (overlap if structure_score >= STRUCTURAL_BLEND_MIN
+                    else min(DEFAULT_SHORT_FADE_PX, overlap))
+        else:
+            span = max(0, min(int(fade_px), overlap))
         if span >= overlap:
             ramp = (.5 - .5 * np.cos(np.pi * np.linspace(0.0, 1.0, overlap, dtype=np.float32)))[None, :, None]
             strip = left * (1.0 - ramp) + right * ramp
-        else:
-            # Legacy short-tail path used by older tests that pass an explicit fade_px.
+        elif span > 0:
             strip = left.copy()
             ramp = (.5 - .5 * np.cos(np.pi * np.linspace(0.0, 1.0, span, dtype=np.float32)))[None, :, None]
             strip[:, -span:] = left[:, -span:] * (1.0 - ramp) + right[:, -span:] * ramp
+        else:
+            strip = left.copy()
         arrays[index][:, -overlap:] = strip
         arrays[index + 1][:, :overlap] = strip
     return [Image.fromarray(np.round(np.clip(array, 0, 255)).astype(np.uint8)) for array in arrays]
