@@ -1,11 +1,10 @@
 """Global style anchor and deterministic Lab color transfer."""
 from __future__ import annotations
 
-import warnings
 import numpy as np
 from PIL import Image
-from skimage.color import lab2rgb, rgb2lab
 
+from .color import delta_e, lab_to_image, rgb_to_lab
 from .config import ANCHOR_MAX_ASPECT, COLOR_MATCH_K, H, TILE
 
 
@@ -34,23 +33,181 @@ def anchor_crop(anchor: Image.Image, x: int, W: int, *, wrap: bool = False) -> I
                             resample=Image.Resampling.BICUBIC)
 
 
+# Deliberately tight. The seam metric only sees the overlap, so it happily
+# rewards a solve that satisfies the seam by making one tile's centre 15%
+# brighter than its neighbour's — banding the metric is structurally blind to.
+# Measured on a real five-tile job: widening these to +-9% bought 1.57 dE on the
+# seams but cost a 15.3% step between adjacent tile centres, and after the carve
+# the final result differed by 0.10 dE. The carve does the work; this only has to
+# remove genuine drift without introducing a gradient of its own.
+GAIN_LIMIT = (.98, 1.02)
+BIAS_LIMIT = np.array([2.0, 1.5, 1.5])         # Lab units: L, a, b
+COMPENSATION_PASSES = 3
+IDENTITY_PULL = 1.2
+
+
+def _strip_stats(strip: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Per-channel median and median absolute deviation — robust to content."""
+    middle = np.median(strip, axis=(0, 1))
+    spread = np.median(np.abs(strip - middle), axis=(0, 1)) + 1e-3
+    return middle.astype(np.float64), spread.astype(np.float64)
+
+
+def compensate_exposure(tiles: list[Image.Image | np.ndarray], x: list[int], *,
+                        fixed: set[int] | frozenset[int] = frozenset()) -> tuple[list[Image.Image], dict]:
+    """Remove left-to-right exposure drift by solving one gain+bias per tile.
+
+    Matching each tile to its own crop of the style anchor makes every tile
+    plausible on its own but leaves neighbours free to drift apart, because
+    nothing in that step looks at the seam. This does: for every adjacent pair it
+    asks that the two tiles agree in median and spread inside their shared strip,
+    and solves all tiles at once by least squares so a correction cannot be dumped
+    on one end of the panorama.
+
+    The solve is deliberately weak. Overlaps here are ~175 of 1024 pixels and the
+    two tiles genuinely drew different content inside them, so the seam statistics
+    are noisy evidence about exposure. Medians rather than means, a strong pull
+    toward identity, a zero-mean gauge on the offsets and hard clamps keep this to
+    what it is meant for — a nudge that removes drift — and leave the visible
+    disagreement to the seam carve, which is the right tool for it.
+
+    Only the overlap strips are ever converted to Lab for the solve, and the
+    iteration updates their statistics arithmetically rather than re-converting:
+    the transform is affine, so a median maps to `gain * median + bias` and a
+    spread to `gain * spread` exactly. Each tile is converted once, at the end,
+    to apply the result.
+
+    Tiles listed in `fixed` are returned untouched and the seams touching them are
+    dropped from the solve. That is how a failed tile — which is the unedited
+    present-day crop, not a reconstruction — stays identical to the photograph
+    instead of being nudged into agreement with its generated neighbours.
+    """
+    count = len(tiles)
+    if count < 2:
+        return [_as_image(tile) for tile in tiles], {"applied": False, "reason": "single tile"}
+    overlaps = [x[i] + TILE - x[i + 1] if (i not in fixed and i + 1 not in fixed) else 0
+                for i in range(count - 1)]
+    if not any(overlap > 0 for overlap in overlaps):
+        return [_as_image(tile) for tile in tiles], {"applied": False, "reason": "no usable overlap"}
+
+    strips, base = {}, {}
+    for index, overlap in enumerate(overlaps):
+        if overlap <= 0:
+            continue
+        left = rgb_to_lab(np.asarray(_as_image(tiles[index]))[:, TILE - overlap:])
+        right = rgb_to_lab(np.asarray(_as_image(tiles[index + 1]))[:, :overlap])
+        # Kept, not just summarised: the candidate is scored on these exact pixels
+        # before it is allowed anywhere near the panorama.
+        strips[index] = (left, right)
+        base[index] = (_strip_stats(left), _strip_stats(right))
+
+    def strip_error(candidate_gain, candidate_bias) -> float:
+        errors = []
+        for seam, (left, right) in strips.items():
+            moved_left = left * candidate_gain[seam] + candidate_bias[seam]
+            moved_right = right * candidate_gain[seam + 1] + candidate_bias[seam + 1]
+            errors.append(float(delta_e(moved_left, moved_right).mean()))
+        return float(np.mean(errors)) if errors else 0.0
+
+    gain, bias = np.ones((count, 3)), np.zeros((count, 3))
+    for _ in range(COMPENSATION_PASSES):
+        for channel in range(3):
+            rows, targets = [], []
+            for index, overlap in enumerate(overlaps):
+                if overlap <= 0:
+                    continue
+                (left_mid, left_spread), (right_mid, right_spread) = base[index]
+                neighbour = index + 1
+                # Where the strips sit after everything applied so far.
+                current_left = gain[index, channel] * left_mid[channel] + bias[index, channel]
+                current_right = gain[neighbour, channel] * right_mid[channel] + bias[neighbour, channel]
+                scaled_left = gain[index, channel] * left_spread[channel]
+                scaled_right = gain[neighbour, channel] * right_spread[channel]
+                row = np.zeros(2 * count)
+                row[2 * index], row[2 * index + 1] = current_left, 1.0
+                row[2 * neighbour], row[2 * neighbour + 1] = -current_right, -1.0
+                rows.append(row)
+                targets.append(0.0)
+                row = np.zeros(2 * count)
+                row[2 * index], row[2 * neighbour] = scaled_left, -scaled_right
+                rows.append(row)
+                targets.append(0.0)
+            for index in range(count):
+                # A fixed tile is pinned to the identity transform, not merely pulled.
+                pull = 1e6 if index in fixed else IDENTITY_PULL * 50
+                row = np.zeros(2 * count)
+                row[2 * index] = pull
+                rows.append(row)
+                targets.append(pull)
+                pull = 1e6 if index in fixed else IDENTITY_PULL * 4
+                row = np.zeros(2 * count)
+                row[2 * index + 1] = pull
+                rows.append(row)
+                targets.append(0.0)
+            gauge = np.zeros(2 * count)
+            gauge[1::2] = 3.0                      # offsets sum to zero: no global shift
+            rows.append(gauge)
+            targets.append(0.0)
+            solution, *_ = np.linalg.lstsq(np.array(rows), np.array(targets), rcond=None)
+            step_gain = np.clip(solution[0::2], *GAIN_LIMIT)
+            step_bias = np.clip(solution[1::2], -BIAS_LIMIT[channel], BIAS_LIMIT[channel])
+            # Clamp what has accumulated, not merely this step. Clamping only the
+            # step lets three passes reach 0.92**3 and then get truncated at the
+            # end, which breaks the agreement the least squares just solved for
+            # and drives neighbouring tiles to opposite bounds.
+            gain[:, channel] = np.clip(gain[:, channel] * step_gain, *GAIN_LIMIT)
+            bias[:, channel] = np.clip(bias[:, channel] * step_gain + step_bias,
+                                       -BIAS_LIMIT[channel], BIAS_LIMIT[channel])
+    gain[list(fixed)] = 1.0
+    bias[list(fixed)] = 0.0
+
+    # Do no harm. This step is a nudge worth a fraction of a Lab unit; the carve
+    # does the real work. If the solve did not actually reduce the disagreement on
+    # the overlaps it was fitted to, discard it rather than repaint the panorama.
+    identity_gain, identity_bias = np.ones((count, 3)), np.zeros((count, 3))
+    before = strip_error(identity_gain, identity_bias)
+    after = strip_error(gain, bias)
+    if after >= before:
+        return [_as_image(tile) for tile in tiles], {
+            "applied": False, "reason": "no measured improvement on the overlaps",
+            "seam_de_before": round(before, 4), "seam_de_after": round(after, 4)}
+    output = []
+    for index, tile in enumerate(tiles):
+        if index in fixed:
+            output.append(_as_image(tile))
+            continue
+        adjusted = rgb_to_lab(_as_image(tile))
+        adjusted *= gain[index].astype(np.float32)
+        adjusted += bias[index].astype(np.float32)
+        np.clip(adjusted[..., 0], 0, 100, out=adjusted[..., 0])
+        np.clip(adjusted[..., 1:], -128, 127, out=adjusted[..., 1:])
+        output.append(lab_to_image(adjusted))
+        del adjusted
+    neighbour_step = max((abs(gain[i + 1, 0] / gain[i, 0] - 1) for i in range(count - 1)), default=0.0)
+    record = {"applied": True, "fixed": sorted(fixed),
+              "max_neighbour_step": round(float(neighbour_step), 4),
+              "seam_de_before": round(before, 4), "seam_de_after": round(after, 4),
+              "max_gain_deviation": round(float(np.abs(gain - 1).max()), 4),
+              "max_bias": round(float(np.abs(bias).max()), 3),
+              "gain_l": [round(float(value), 4) for value in gain[:, 0]],
+              "bias_l": [round(float(value), 3) for value in bias[:, 0]]}
+    return output, record
+
+
+def _as_image(tile: Image.Image | np.ndarray) -> Image.Image:
+    if isinstance(tile, Image.Image):
+        return tile.convert("RGB")
+    return Image.fromarray(np.round(np.clip(np.asarray(tile, dtype=np.float32), 0, 255)).astype(np.uint8))
+
+
 def color_match(tile_rgb: Image.Image | np.ndarray, ref_rgb: Image.Image | np.ndarray,
                 k: float = COLOR_MATCH_K) -> Image.Image:
     """Apply the specified channel-wise Reinhard transfer in CIE Lab."""
-    tile = np.asarray(tile_rgb, dtype=np.float32)
-    reference = np.asarray(ref_rgb, dtype=np.float32)
-    if tile.max(initial=0) > 1:
-        tile /= 255.0
-    if reference.max(initial=0) > 1:
-        reference /= 255.0
-    lab = rgb2lab(np.clip(tile, 0, 1))
-    target = rgb2lab(np.clip(reference, 0, 1))
+    lab = rgb_to_lab(tile_rgb)
+    target = rgb_to_lab(ref_rgb)
     for channel in range(3):
         values, ref = lab[..., channel], target[..., channel]
         mean, std = values.mean(), values.std() + 1e-6
         ref_mean, ref_std = ref.mean(), ref.std() + 1e-6
         lab[..., channel] = (values - mean) * (ref_std / std) * k + (ref_mean * k + mean * (1 - k))
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", UserWarning)
-        output = lab2rgb(lab)
-    return Image.fromarray(np.round(np.clip(output, 0, 1) * 255).astype(np.uint8))
+    return lab_to_image(lab)

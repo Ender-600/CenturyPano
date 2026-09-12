@@ -1,4 +1,4 @@
-import os
+﻿import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -38,8 +38,8 @@ class Settings:
     fal_key: str = field(default_factory=lambda: os.getenv('FAL_KEY', ''), repr=False)
     k2_api_key: str = field(default_factory=lambda: os.getenv('K2_API_KEY', ''), repr=False)
     openai_api_key: str = field(default_factory=lambda: os.getenv('OPENAI_API_KEY', ''), repr=False)
-    gemini_image_model: str = field(default_factory=lambda: os.getenv('GEMINI_IMAGE_MODEL', 'gemini-2.5-flash-image'))
-    gemini_text_model: str = field(default_factory=lambda: os.getenv('GEMINI_TEXT_MODEL', 'gemini-2.5-flash'))
+    gemini_image_model: str = field(default_factory=lambda: os.getenv('GEMINI_IMAGE_MODEL', 'gemini-3.1-flash-image'))
+    gemini_text_model: str = field(default_factory=lambda: os.getenv('GEMINI_TEXT_MODEL', 'gemini-3.6-flash'))
     grok_image_model: str = field(default_factory=lambda: os.getenv('GROK_IMAGE_MODEL', 'grok-imagine-image-2.0'))
     k2_model: str = field(default_factory=lambda: os.getenv('K2_MODEL', 'IFM/K2-Horizon-375B-A23B'))
     k2_vl_model: str = field(default_factory=lambda: os.getenv('K2_VL_MODEL', 'qwen3-vl-plus'))

@@ -431,7 +431,11 @@
   function resizeViewport() {
     const viewport = activeViewport(), oldWidth = state.renderWidth;
     if (!viewport.clientWidth || !viewport.clientHeight) return;
-    const fraction = oldWidth > 0 ? (state.offset + (state.viewportWidth || viewport.clientWidth) / 2) / oldWidth : 0.5;
+    // When the result screen is opened, there may not be a rendered canvas yet.
+    // Use the hand-off heading instead of briefly centering the new viewport;
+    // otherwise a wide panorama can visibly jump before its geometry arrives.
+    const fraction = oldWidth > 0 ? (state.offset + (state.viewportWidth || viewport.clientWidth) / 2) / oldWidth :
+      state.screen === 'result' && Number.isFinite(state.initialHeading) ? state.initialHeading : 0.5;
     state.viewportWidth = viewport.clientWidth;
     const geometry = state.screen === 'result' && state.manifest?.geometry;
     const hero = state.screen === 'capture';
@@ -641,7 +645,13 @@
         return;
       }
       state.targetYear = targetYear;
-      await startJob(job.job_id, false, heading, targetYear);
+      // The request heading is intentionally captured at submit time for tile
+      // prioritisation. The user may keep turning the phone while the request
+      // is queued, though, so hand the viewer's current position to the result
+      // screen instead of snapping back to that older request heading.
+      const displayHeading = state.renderWidth ?
+        (state.offset + $('preview-window').clientWidth / 2) / state.renderWidth : heading;
+      await startJob(job.job_id, false, displayHeading, targetYear);
     } catch (error) {
       if (generation === state.generation) showToast(error.message || '连接失败，照片已保留，可以再次尝试。', 8000);
     } finally { state.submitting = false; syncChrome(); }
@@ -885,10 +895,14 @@
       }
       requestAnimationFrame(animate);
     });
+    // The final canvas is drawn while the progressive past layer may still be
+    // fully visible. Hide it in the same task before the first animation frame
+    // so the reveal always starts on the original image, never on a one-frame
+    // flash of the completed historical image.
+    setPastPercent(0);
     document.body.classList.add('revealing'); resizeViewport();
     state.offset = constrainOffset(center * state.renderWidth - $('pano-viewport').clientWidth / 2); render();
-    // The viewer has been watching tiles land on the past layer. Do not snap that away:
-    // sweep back to the present as a deliberate "before", hold, then sweep into the past.
+    // Start from the present as a deliberate "before", hold, then sweep into the past.
     await sweep(state.pastPercent, 0, reduced ? 0 : 420);
     if (generation !== state.generation) return;
     await new Promise((resolve) => setTimeout(resolve, reduced ? 60 : 320));
@@ -909,12 +923,14 @@
     const cells = [
       ['首个可见画面', metricNumber(metrics.first_view_s), '首次完成的重建画面'],
       ['完整旅程', metricNumber(metrics.total_s), '本次运行实际用时'],
-      ['接缝色差 · 调色前 / 后', `${metricNumber(seam.raw, '')} / ${metricNumber(seam.after_color_match, '')}`, `原图参考值 ${metricNumber(seam.originals_floor, '')}`],
+      ['接缝色差 · 生成 → 最终', `${metricNumber(seam.raw, '')} → ${metricNumber(seam.at_seam_cut ?? seam.after_color_match, '')}`,
+        seam.at_seam_cut == null ? `调色后 ${metricNumber(seam.after_color_match, '')}` :
+          `调色 ${metricNumber(seam.after_color_match, '')} · 统一曝光 ${metricNumber(seam.after_compensation, '')} · 切缝 ${seam.carved_seams ?? 0} 处`],
       ['相对串行加速', metricNumber(metrics.speedup, '×'), metrics.serial_baseline_s == null ? '尚未测量串行基线' : `串行基线 ${metricNumber(metrics.serial_baseline_s)}`],
       ['像素对齐 · 配准前 / 后', `${metricNumber(align.score_before, '')} / ${metricNumber(align.score_after, '')}`,
         align.mean_shift_px == null ? '尚未测量' : `平均漂移 ${metricNumber(align.mean_shift_px, ' px')} · 已校正 ${align.applied ?? 0} 块`],
     ];
-    $('metrics-panel').innerHTML = cells.map(([name, value, note]) => `<div class="metric"><span>${escapeHTML(name)}</span><strong>${escapeHTML(value)}</strong><small>${escapeHTML(note)}</small></div>`).join('') + `<p class="metrics-note">${isDemo(manifest) ? '以上为本地演示管线的运行数据，不代表 AI 服务的速度或质量。' : '数据来自该旅程的实际运行；回放不重新计时。'} 破折号表示尚未测量。接缝色差采用重叠区域 Lab 距离，数值越小代表色彩越接近；这不衡量历史真实性。${manifest.scene?.fallback ? ' 场景解析使用了默认设置。' : ''}${manifest.anchor?.status === 'skipped' ? ' 年代参考图未生成，已跳过色彩匹配。' : ''}${manifest.scene?.is_outdoor === false ? ' 这是室内场景：重建只更换材质与陈设，效果通常弱于室外街景。' : ''} 像素对齐为原图与生成图边缘结构的相关度，1 表示完全重合。</p>`;
+    $('metrics-panel').innerHTML = cells.map(([name, value, note]) => `<div class="metric"><span>${escapeHTML(name)}</span><strong>${escapeHTML(value)}</strong><small>${escapeHTML(note)}</small></div>`).join('') + `<p class="metrics-note">${isDemo(manifest) ? '以上为本地演示管线的运行数据，不代表 AI 服务的速度或质量。' : '数据来自该旅程的实际运行；回放不重新计时。'} 破折号表示尚未测量。接缝色差采用 Lab 距离，数值越小代表两块拼图越一致；这不衡量历史真实性。最终值测的是实际裁切路径上的差异：相邻两块若画出了不同的物体，我们不把它们平均成重影，而是沿着两块最吻合的一条竖线裁开。${manifest.scene?.fallback ? ' 场景解析使用了默认设置。' : ''}${manifest.anchor?.status === 'skipped' ? ' 年代参考图未生成，已跳过色彩匹配。' : ''}${manifest.scene?.is_outdoor === false ? ' 这是室内场景：重建只更换材质与陈设，效果通常弱于室外街景。' : ''} 像素对齐为原图与生成图边缘结构的相关度，1 表示完全重合。</p>`;
   }
   $('metrics-toggle').addEventListener('click', () => {
     const open = $('metrics-panel').hidden;
