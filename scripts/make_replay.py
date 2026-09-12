@@ -33,7 +33,10 @@ async def make_replay(image_path: Path, decade: str, place='', *, baseline=True,
     if title:
         manifest['title'] = title
     create_manifest(job_id, manifest)
-    await run_job(job_id)
+    # Never reuse the request cache here. A recorded replay is the artefact the
+    # demo falls back to, so it must be a genuine fresh run of the current code;
+    # a cache hit would copy an older job's tiles and stitch under a new id.
+    await run_job(job_id, use_cache=False)
     if read_manifest(job_id)['status'] not in ('done', 'done_partial'):
         raise RuntimeError(f'Job failed: {job_id}; inspect its manifest.')
     if baseline:

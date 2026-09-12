@@ -9,10 +9,9 @@ import io
 import json
 import math
 
-import httpx
 from PIL import Image
 
-from app.editors.base import check_response
+from app.reasoning import generate_content
 
 
 DEFAULT_SCENE_SPEC = {
@@ -140,15 +139,12 @@ async def _request_scene_gemini(image_jpeg: bytes) -> tuple[dict, int]:
         ]}],
         "generationConfig": {"responseMimeType": "application/json", "responseSchema": SCENE_SCHEMA, "temperature": 0.1},
     }
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        response = await client.post(
-            f"https://generativelanguage.googleapis.com/v1beta/models/{settings.gemini_text_model}:generateContent",
-            headers={"x-goog-api-key": settings.gemini_api_key}, json=payload,
-        )
-    check_response(response, "gemini")
-    data = response.json()
+    data = await generate_content(
+        f"https://generativelanguage.googleapis.com/v1beta/models/{settings.gemini_text_model}:generateContent",
+        {"x-goog-api-key": settings.gemini_api_key}, payload, "gemini", timeout=15.0)
     parts = data["candidates"][0]["content"]["parts"]
-    text = "".join(part.get("text", "") for part in parts)
+    # Gemini 3.x flash models interleave reasoning parts; only the answer is JSON.
+    text = "".join(part.get("text", "") for part in parts if not part.get("thought"))
     return validate_scene(parse_json_object(text)), int(data.get("usageMetadata", {}).get("totalTokenCount", 0))
 
 

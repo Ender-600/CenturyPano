@@ -12,6 +12,7 @@ import httpx
 
 from app.editors.base import check_response
 from app.location import location_context
+from app.reasoning import generate_content
 from app.scene import DEFAULT_SCENE_SPEC, parse_json_object
 from app.temporal import decade_for_year, resolve_year
 
@@ -279,10 +280,13 @@ async def _request_facts(location: dict, year: int, scene: dict, *, prefer_gemin
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{settings.gemini_text_model}:generateContent"
         headers = {"x-goog-api-key": settings.gemini_api_key}
         provider_name = "gemini"
-    async with httpx.AsyncClient(timeout=90.0) as client:
-        response = await client.post(url, headers=headers, json=payload)
-    check_response(response, provider_name)
-    data = response.json()
+    if provider_name in {"k2", "openai"}:
+        async with httpx.AsyncClient(timeout=90.0) as client:
+            response = await client.post(url, headers=headers, json=payload)
+        check_response(response, provider_name)
+        data = response.json()
+    else:
+        data = await generate_content(url, headers, payload, "gemini", timeout=90.0)
     if provider_name in {"k2", "openai"}:
         raw = data["choices"][0]["message"]["content"]
         tokens = int(data.get("usage", {}).get("total_tokens", 0))
@@ -350,7 +354,7 @@ async def build_constraints(place: dict, decade: str | int, scene: dict, *, prov
         prompt_global=_prompt(year, {**prompt_context, "present_day_scene": _scene_data(scene)}, facts,
                               structure_lock=structure_lock, is_outdoor=is_outdoor),
         negative=f"objects or buildings introduced locally after {year}-07-01, unsupported landmark substitutions, "
-                 "anachronistic technology, invented battle damage, labels, borders"
+                 "anachronistic technology, invented battle damage, any text label, date stamp, watermark, caption or border"
                  + (", cropped or re-framed image, inconsistent lighting across the panorama"
                     if structure_lock else ""),
         historical_context=context, fallback=fallback, _tokens=tokens,
