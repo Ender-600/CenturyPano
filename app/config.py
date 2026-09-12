@@ -38,6 +38,7 @@ class Settings:
     gemini_api_key: str = field(default_factory=lambda: os.getenv('GEMINI_API_KEY', ''), repr=False)
     fal_key: str = field(default_factory=lambda: os.getenv('FAL_KEY', ''), repr=False)
     k2_api_key: str = field(default_factory=lambda: os.getenv('K2_API_KEY', ''), repr=False)
+    worldlab_api_key: str = field(default_factory=lambda: os.getenv('WORLDLAB_API_KEY', ''), repr=False)
     gemini_image_model: str = field(default_factory=lambda: os.getenv('GEMINI_IMAGE_MODEL', 'gemini-2.5-flash-image'))
     gemini_text_model: str = field(default_factory=lambda: os.getenv('GEMINI_TEXT_MODEL', 'gemini-2.5-flash'))
     k2_model: str = field(default_factory=lambda: os.getenv('K2_MODEL', 'IFM/K2-Horizon-375B-A23B'))
