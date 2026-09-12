@@ -43,6 +43,11 @@ class Settings:
     k2_model: str = field(default_factory=lambda: os.getenv('K2_MODEL', 'IFM/K2-Horizon-375B-A23B'))
     k2_base_url: str = field(default_factory=lambda: os.getenv('K2_BASE_URL', 'https://api.ifm.ai/v1'))
     fal_model: str = field(default_factory=lambda: os.getenv('FAL_MODEL', 'fal-ai/flux/dev/image-to-image'))
+    # Pixel lock keeps every silhouette in place so the slider and tile seams line up.
+    structure_lock: bool = field(default_factory=lambda: os.getenv('STRUCTURE_LOCK', '1') not in {'0', 'false', 'no'})
+    # Head start for the tile the viewer is facing, so viewport priority is real
+    # even when every tile fits inside the concurrency budget at once.
+    priority_stagger_s: float = field(default_factory=lambda: max(0.0, float(os.getenv('PRIORITY_STAGGER_S', '0.4'))))
 
 
 settings = Settings()

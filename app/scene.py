@@ -20,6 +20,7 @@ DEFAULT_SCENE_SPEC = {
     "modern_elements": ["contemporary vehicles", "LED signage", "plastic street furniture", "modern shopfronts"],
     "keep_structure": ["camera position", "viewing direction", "image projection", "complete frame"],
     "sky_fraction": 0.35,
+    "is_outdoor": True,
 }
 
 SCENE_SCHEMA = {
@@ -29,8 +30,9 @@ SCENE_SCHEMA = {
         "modern_elements": {"type": "ARRAY", "items": {"type": "STRING"}},
         "keep_structure": {"type": "ARRAY", "items": {"type": "STRING"}},
         "sky_fraction": {"type": "NUMBER"},
+        "is_outdoor": {"type": "BOOLEAN"},
     },
-    "required": ["summary", "modern_elements", "keep_structure", "sky_fraction"],
+    "required": ["summary", "modern_elements", "keep_structure", "sky_fraction", "is_outdoor"],
 }
 
 
@@ -49,7 +51,8 @@ def parse_json_object(text: str) -> dict:
 
 
 def validate_scene(value: dict) -> dict:
-    if set(value) != set(DEFAULT_SCENE_SPEC):
+    # is_outdoor is optional for backwards compatibility with older manifests and tests.
+    if set(value) - {"is_outdoor"} != set(DEFAULT_SCENE_SPEC) - {"is_outdoor"}:
         raise ValueError("Invalid scene fields")
     summary = value["summary"]
     if not isinstance(summary, str) or not summary.strip() or len(summary.split()) > 60 or len(summary) > 600:
@@ -66,6 +69,10 @@ def validate_scene(value: dict) -> dict:
     if isinstance(sky, bool) or not isinstance(sky, (float, int)) or not math.isfinite(sky) or not 0 <= sky <= 1:
         raise ValueError("Invalid sky fraction")
     result["sky_fraction"] = float(sky)
+    outdoor = value.get("is_outdoor", True)
+    if not isinstance(outdoor, bool):
+        raise ValueError("Invalid is_outdoor flag")
+    result["is_outdoor"] = outdoor
     return result
 
 
@@ -82,7 +89,8 @@ async def _request_scene(image: bytes) -> tuple[dict, int]:
         "Return only JSON with these exact fields: summary (at most 60 words), modern_elements "
         "(a list of visible objects/materials and built structures whose age must be assessed), "
         "keep_structure (camera position, viewing direction, projection and frame only), "
-        "sky_fraction (a number 0 through 1). Describe visible architecture, roads, terrain and "
+        "sky_fraction (a number 0 through 1), is_outdoor (true when the viewpoint is outside; false for "
+        "rooms, halls, corridors, lobbies and other interiors). Describe visible architecture, roads, terrain and "
         "land use in summary without assuming they existed in the past. "
         "Use generic visual descriptions only. Do not transcribe signs, addresses, license plates or names. "
         "Do not infer location or construction dates. Preserve camera geometry only. Buildings, "

@@ -12,13 +12,14 @@ from pathlib import Path
 
 from PIL import Image
 
+from .alignment import align_tile
 from .config import COLOR_MATCH_K, H, TILE, settings
 from .consistency import anchor_crop, color_match, squeeze_anchor
-from .constraints import PROMPT_VERSION, build_constraints
+from .constraints import PROMPT_VERSION, build_constraints, generic_decade_prompt
 from .editors.base import EditorPool
 from .geometry import image_bytes, open_rgb, preprocess, viewport_priority
 from .manifest import job_dir, read_manifest, update_manifest
-from .metrics import seam_metrics, timing_metrics
+from .metrics import alignment_metrics, seam_metrics, timing_metrics
 from .scene import parse_scene
 from .stitch import stitch
 from .temporal import decade_for_year, manifest_year
@@ -124,6 +125,7 @@ async def run_job(job_id: str, *, concurrency: int | None = None, use_cache: boo
                         "finished_at": None, "first_view_s": None, "total_s": None,
                         "seam_err": {"raw": None, "after_color_match": None, "originals_floor": None},
                         "serial_baseline_s": None, "speedup": None, "image_calls": 0,
+                        "alignment": {"score_before": None, "score_after": None, "mean_shift_px": None, "applied": 0},
                         "tokens": {"vlm": 0, "llm": 0}}
         m["result"] = {"path": _output_path(job_id, "result.jpg"), "status": "pending"}
         m["anchor"] = {"status": "pending", "path": _output_path(job_id, "anchor.jpg"), "ms": None}
@@ -148,35 +150,34 @@ async def run_job(job_id: str, *, concurrency: int | None = None, use_cache: boo
                                                    stage="scene"))
         stage = "scene"
         band_bytes = await asyncio.to_thread(image_bytes, prepared.band)
-        scene = await parse_scene(band_bytes, provider=provider)
-        tokens_vlm = int(scene.pop("_tokens", 0))
-        update_manifest(job_id, lambda m: (m.update(scene=scene, stage="history"),
-                                           m["metrics"]["tokens"].update(vlm=tokens_vlm)))
-        stage = "history"
         year = manifest_year(manifest)
-        constraints = await build_constraints(manifest.get("place", {}), year, scene, provider=provider)
-        constraint_data = constraints.to_dict() if hasattr(constraints, "to_dict") else dict(constraints)
-        prompt = constraint_data["prompt_global"]  # One immutable string shared by anchor and every tile.
-        negative = constraint_data.get("negative")
-        tokens_llm = int(getattr(constraints, "_tokens", constraint_data.pop("_tokens", 0)))
-        strength = .7 if constraint_data.get("historical_context", {}).get("site_state") in {
-            "undeveloped", "agricultural"
-        } else .55
-        update_manifest(job_id, lambda m: (m.update(constraints=constraint_data, stage="anchor",
-                                                   target_year=year, anchor_year=year,
-                                                   decade=decade_for_year(year)),
-                                          m["metrics"]["tokens"].update(llm=tokens_llm)))
-        stage = "anchor"
         pool = EditorPool(primary=provider, fallback=settings.provider_fallback)
         seed = int(manifest.get("job_seed", 0))
+        structure_lock = settings.structure_lock
 
-        async def generate_anchor():
+        async def scene_and_history():
+            nonlocal stage
+            result = await parse_scene(band_bytes, provider=provider)
+            tokens_vlm = int(result.pop("_tokens", 0))
+            update_manifest(job_id, lambda m: (m.update(scene=result, stage="history"),
+                                               m["metrics"]["tokens"].update(vlm=tokens_vlm)))
+            stage = "history"
+            spec = await build_constraints(manifest.get("place", {}), year, result, provider=provider,
+                                           structure_lock=structure_lock)
+            data = spec.to_dict() if hasattr(spec, "to_dict") else dict(spec)
+            tokens_llm = int(getattr(spec, "_tokens", data.pop("_tokens", 0)))
+            update_manifest(job_id, lambda m: (m.update(constraints=data, target_year=year, anchor_year=year,
+                                                       decade=decade_for_year(year)),
+                                              m["metrics"]["tokens"].update(llm=tokens_llm)))
+            return result, data
+
+        async def generate_anchor(anchor_prompt: str, anchor_negative: str | None, anchor_strength: float):
             start_at = time.perf_counter()
             update_manifest(job_id, lambda m: m["anchor"].update(status="running"))
             try:
                 squeezed = await asyncio.to_thread(squeeze_anchor, prepared.band)
                 result = await pool.edit(await asyncio.to_thread(image_bytes, squeezed),
-                                         prompt, seed=seed, strength=strength, negative=negative)
+                                         anchor_prompt, seed=seed, strength=anchor_strength, negative=anchor_negative)
                 anchor = await asyncio.to_thread(open_rgb, result.image)
                 await asyncio.to_thread(_save_image, directory / "anchor.jpg", anchor)
                 update_manifest(job_id, lambda m: m["anchor"].update(status="done", provider=result.provider,
@@ -192,7 +193,32 @@ async def run_job(job_id: str, *, concurrency: int | None = None, use_cache: boo
                 update_manifest(job_id, lambda m: m["metrics"].update(anchor_done_at=time.time(),
                                                                        image_calls=pool.image_calls))
 
-        anchor = await generate_anchor()
+        if structure_lock:
+            # With every silhouette pinned, the anchor only has to settle sky, light and
+            # palette for the year — it does not need the site history. Start it at once,
+            # alongside scene parsing and the historian, and save a full round trip.
+            update_manifest(job_id, lambda m: m.update(stage="anchor"))
+            stage = "anchor"
+            (scene, constraint_data), anchor = await asyncio.gather(
+                scene_and_history(),
+                generate_anchor(generic_decade_prompt(year), None, .55),
+            )
+            update_manifest(job_id, lambda m: m["anchor"].update(prompt="generic_decade"))
+        else:
+            scene, constraint_data = await scene_and_history()
+            stage = "anchor"
+            update_manifest(job_id, lambda m: m.update(stage="anchor"))
+            anchor_strength = .7 if constraint_data.get("historical_context", {}).get("site_state") in {
+                "undeveloped", "agricultural"
+            } else .55
+            anchor = await generate_anchor(constraint_data["prompt_global"], constraint_data.get("negative"), anchor_strength)
+        prompt = constraint_data["prompt_global"]  # One immutable string shared by every tile.
+        negative = constraint_data.get("negative")
+        # Under the pixel lock the editor must keep structure: a lower strength keeps
+        # edges where they are and moves the era into surfaces and palette.
+        strength = .45 if structure_lock else (.7 if constraint_data.get("historical_context", {}).get("site_state") in {
+            "undeveloped", "agricultural"
+        } else .55)
         priority = viewport_priority(geometry["x"], manifest.get("heading", .5),
                                      geometry["W_ext"], geometry["wrap"])
         tiles = [{"i": i, "x": x, "priority": priority[i], "status": "pending",
@@ -219,13 +245,17 @@ async def run_job(job_id: str, *, concurrency: int | None = None, use_cache: boo
                     if raw.size != (TILE, H):
                         raw = raw.resize((TILE, H), Image.Resampling.LANCZOS)
                     await asyncio.to_thread(_save_image, directory / f"t{index}_raw.jpg", raw)
-                    matched = await asyncio.to_thread(color_match, raw, reference, COLOR_MATCH_K) if reference is not None else raw
+                    # Pixel alignment: register the generation back onto the original tile so the
+                    # before/after slider compares the same pixels and neighbouring tiles agree.
+                    aligned, alignment = await asyncio.to_thread(align_tile, originals[index], raw)
+                    matched = await asyncio.to_thread(color_match, aligned, reference, COLOR_MATCH_K) if reference is not None else aligned
                     await asyncio.to_thread(_save_image, directory / f"t{index}.jpg", matched)
 
                     def done(m):
                         now = time.time()
                         m["tiles"][index].update(status="done", provider=result.provider, attempts=result.attempts,
-                            ms=round((time.perf_counter() - tile_start) * 1000), done_at=now, error=None)
+                            ms=round((time.perf_counter() - tile_start) * 1000), done_at=now, error=None,
+                            align=alignment.to_dict())
                         if m["metrics"]["first_tile_at"] is None:
                             m["metrics"]["first_tile_at"] = now
                             m["metrics"]["first_view_s"] = round(now - started, 4)
@@ -243,7 +273,20 @@ async def run_job(job_id: str, *, concurrency: int | None = None, use_cache: boo
                         attempts=attempts, provider=failed_provider,
                         ms=round((time.perf_counter() - tile_start) * 1000)))
 
-        await asyncio.gather(*(generate_tile(i) for i in sorted(range(geometry["n"]), key=lambda i: priority[i])))
+        async def launch_all():
+            # Give the tile the viewer is facing a head start; otherwise, when every tile
+            # fits inside the concurrency budget, "first tile" is decided by API luck.
+            order = sorted(range(geometry["n"]), key=lambda i: priority[i])
+            first = [i for i in order if priority[i] == 0]
+            rest = [i for i in order if priority[i] != 0]
+            tasks = [asyncio.create_task(generate_tile(i)) for i in first]
+            if rest:
+                if first and settings.priority_stagger_s > 0:
+                    await asyncio.sleep(settings.priority_stagger_s)
+                tasks.extend(asyncio.create_task(generate_tile(i)) for i in rest)
+            await asyncio.gather(*tasks)
+
+        await launch_all()
         stage = "stitch"
         update_manifest(job_id, lambda m: m.update(stage=stage))
 
@@ -258,7 +301,8 @@ async def run_job(job_id: str, *, concurrency: int | None = None, use_cache: boo
         finished = time.time()
 
         def complete(m):
-            m["metrics"].update(timing_metrics(m["metrics"], finished), seam_err=seams, image_calls=pool.image_calls)
+            m["metrics"].update(timing_metrics(m["metrics"], finished), seam_err=seams, image_calls=pool.image_calls,
+                                alignment=alignment_metrics(m["tiles"]))
             m["result"]["status"] = "done"
             m["status"] = "done_partial" if any(t["status"] == "error" for t in m["tiles"]) else "done"
             m["stage"] = "complete"

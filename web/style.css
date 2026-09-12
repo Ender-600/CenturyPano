@@ -682,3 +682,5 @@ body.clean .slider-handle { visibility: hidden; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
 }
+
+.scene-hint{opacity:.85}
