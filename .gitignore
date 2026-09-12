@@ -1,0 +1,15 @@
+.env
+.env.*
+!.env.example
+.venv/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+*.pyc
+data/in/
+data/out/
+data/certs/
+data/*.png
+node_modules/
+.DS_Store
+docs/DEMO_ACCESS.md

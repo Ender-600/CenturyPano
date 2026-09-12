@@ -1,0 +1,163 @@
+# CENTURY PANO
+
+同一个地方，另一个时代。用自己拍摄的全景照片选择 1900s、1920s、1950s 或 1970s，逐块生成过去的想象重建，拖动或转动手机探索，并用滑杆比较现在与过去。
+
+**想象重建，非历史影像。** HackCMU 2026 · Traveling。
+
+## 当前可运行版本
+
+已实现移动端页面、FastAPI 图像流水线、Gemini 主服务、fal 回退、IFM K2 年代约束、磁盘缓存、渐进瓦片、前后对比、陀螺仪与拖动、音频揭幕、离线回放和串行基线。
+
+仓库自带的是 **工程示例**：程序绘制的街景插画经过本地色调变换，没有调用 AI，不是实拍照片，不代表历史重建画质。真实模型效果、真实模型性能、iPhone 的实体传感器验收需在配置密钥后完成，不能把下方本地数值作为 Gemini 的结果。
+
+## 本地启动
+
+需要 Python 3.11+，推荐 `uv`。前端没有构建步骤和 CDN 依赖。
+
+```bash
+uv sync --python 3.11
+cp .env.example .env
+uv run python scripts/generate_audio.py
+PROVIDER=demo uv run python scripts/seed_demo.py
+./scripts/serve.sh
+```
+
+打开 <http://localhost:8000>。点击「先来一场时光旅行」选工程示例；或者选择相册中的全景，预览、选择年代并生成。
+
+`seed_demo.py` 只允许 `PROVIDER=demo`，会生成城市、校园街区、360 三份插画回放和各自的串行基线。重复上传相同输入、年代、位置和提供方会命中缓存，保留原始指标并显示回放标记。离线前需要在同一浏览器至少完整打开一次所需回放，等待「旅程已保存 · 断网后可从时光档案重访」。
+
+## 前端设计 Demo
+
+打开 <http://localhost:8000/designs/> 比较三套新的设计方向：电影感深色、蓝白极简工作台、复古旅行手账。可切换手机预览，体验本地照片、年代选择、今昔对比和沉浸预览。Demo 使用概念图与本地色调模拟；当前主页面和真实生成流程保持原有实现。代码与素材说明见 [web/designs/README.md](web/designs/README.md)。
+
+## 连接真实模型
+
+把密钥写入本地 `.env`，不要写入前端或提交到 Git。变更配置后重启服务器。
+
+```dotenv
+PROVIDER=gemini
+PROVIDER_FALLBACK=fal
+GEMINI_API_KEY=你的密钥
+FAL_KEY=你的密钥
+K2_API_KEY=你的IFM密钥
+GEMINI_IMAGE_MODEL=gemini-2.5-flash-image
+GEMINI_TEXT_MODEL=gemini-2.5-flash
+K2_BASE_URL=https://api.ifm.ai/v1
+K2_MODEL=IFM/K2-Horizon-375B-A23B
+MAX_CONCURRENCY=6
+```
+
+这里的 K2 是 HackCMU 赞助方 **IFM K2**。未配置 K2 或调用失败时，使用保守的内置年代约束；VLM 失败使用默认场景，锚点失败仍继续瓦片。真实图像服务失败时不会偷偷退回本地色调变换：失败瓦片使用原图并标记 `done_partial`。
+
+先验证单次调用，再准备实拍回放。下列命令会使用所配置服务并产生对应服务用量；基线会额外完整运行一次。
+
+```bash
+uv run python scripts/probe_providers.py /absolute/path/panorama.jpg
+uv run python scripts/make_replay.py /absolute/path/panorama.jpg 1920s --place Pittsburgh
+# 省略基线：附加 --no-baseline
+# 单独补跑串行基线：
+uv run python scripts/baseline.py JOB_ID
+```
+
+官方接口参考：[Gemini 图片编辑](https://ai.google.dev/gemini-api/docs/generate-content/image-generation)、[fal img2img](https://fal.ai/models/fal-ai/flux/dev/image-to-image/api)、[IFM 快速开始](https://docs.ifm.ai/#/quickstart)、[IFM JSON 输出](https://docs.ifm.ai/#/structured-output)。
+
+## 手机 HTTPS 演示
+
+手机的传感器和定位需要安全上下文。在电脑运行服务器，然后使用 HTTPS 隧道：
+
+```bash
+cloudflared tunnel --url http://localhost:8000 --protocol http2
+uv run python scripts/make_qr.py https://终端输出的地址.trycloudflare.com
+```
+
+二维码写入 `data/demo-qr.png`。Quick Tunnel 是临时演示入口，电脑和隧道进程都需保持运行；正式服务可使用 Docker + 你们的 HTTPS 反向代理。隧道启动方式见 [Cloudflare 官方说明](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/do-more-with-tunnels/trycloudflare/)。
+
+```bash
+docker build -t century-pano .
+docker run --rm -p 8000:8000 --env-file .env -v "$PWD/data:/data" century-pano
+```
+
+当前是比赛用单实例应用，任务状态与锁均在一个 Uvicorn worker 中管理。不要加 `--workers`。公网真实生成服务需通过你们的访问控制入口限制使用，模型费用由服务器密钥承担。
+
+## 架构与数据
+
+```text
+上传原图 → EXIF/离线城市 → 预处理 → VLM 场景
+                                   ├─ IFM K2 → 冻结全局提示词 ─┐
+                                   └─ Gemini 锚点 ────────────┤
+                                                             ↓
+                         视口优先的并行瓦片 → Lab 颜色匹配 → 余弦羽化拼接
+                                      ↓                          ↓
+                              原始/匹配瓦片                   结果 + 指标
+                                      └──── manifest.json ──────┘
+                                               ↓ 每 500ms
+                                   浏览器渐进画面 / 对比 / 回放
+```
+
+- `app/main.py`：HTTP、上传校验、隐私边界、任务启动。
+- `app/pipeline.py`：并行流水线、磁盘缓存、隔离基线任务。
+- `app/geometry.py`、`consistency.py`、`stitch.py`、`metrics.py`：图像与指标。
+- `app/editors/`、`scene.py`、`constraints.py`：模型适配与故障恢复。
+- `web/`：无构建的移动端界面与 Service Worker。
+- `data/in/`：原始上传，保留原文件与 EXIF，不通过 HTTP 提供。
+- `data/out/JOB_ID/`：原子 manifest、band、anchor、`tN_raw.jpg`、`tN.jpg`、result。
+- `data/out/.cache/`：精确缓存键以及避免再次调用文本模型的请求索引。
+
+所有 manifest 写入都经过同一任务锁和临时文件替换。前端只能读取生成输出和缩放预览。定位优先级为浏览器定位、原图 EXIF、手动城市、无；坐标仅在服务器离线解析，模型提示词只使用城市和国家。未知手动文本仅显示、不进入模型提示词。
+
+## API
+
+| 方法 | 路径 | 用途 |
+|---|---|---|
+| POST | `/jobs` | multipart `image`, `decade`, `lat`, `lon`, `place`, `heading`, `is_360` |
+| GET | `/jobs/{id}/manifest` | 单一状态来源，`Cache-Control: no-store` |
+| GET | `/jobs/{id}/preview` | 去除 EXIF 的工作图 |
+| GET | `/jobs/{id}/tiles/{i}?raw=1` | 原始瓦片；去掉 raw 参数获取匹配版本 |
+| GET | `/jobs/{id}/result` | 最终拼接结果 |
+| GET | `/jobs/{id}/audio` | 原创 2 秒氛围音 |
+| POST | `/jobs/{id}/baseline` | 后台串行重跑，返回 202，通过原 manifest 查看进度 |
+| GET | `/replays` | 已完成的回放列表 |
+| POST | `/preview` | HEIC 浏览器解码失败时的服务器 JPEG 预览 |
+| POST | `/location/resolve` | 离线城市查询 |
+| GET | `/health` | 提供方和配置状态，无密钥 |
+
+## 测试与已测指标
+
+```bash
+uv run pytest -q
+uv run ruff check app scripts tests
+node --check web/app.js
+node --check web/sw.js
+```
+
+自动化覆盖：规格中的 4 种瓦片宽度；窄图、超宽和 360；原始/匹配瓦片；时间戳；颜色匹配受控实验；缺失瓦片回退；零模型调用缓存命中；隔离串行基线；真实接口的请求格式；重试/熔断；隐私边界；非法上传和并发原子写入。
+
+以下为 2026-09-12 在本机 **demo 色调模拟器** 上实际记录的指标（模拟器包含约 0.5 秒异步等待，用来验证渐进交互）。不是 AI 服务性能，不能作为重建质量证据：
+
+| 工程示例 | 首块 / s | 总时长 / s | 串行 / s | 比值 |
+|---|---:|---:|---:|---:|
+| 城市街景 | 1.9130 | 2.8679 | 6.1963 | 2.161 |
+| 校园街区 | 1.9765 | 3.0154 | 6.2509 | 2.073 |
+| 360 环景 | 2.1925 | 4.7950 | 9.9622 | 2.078 |
+
+本地模拟器本来就使用相同调色，城市示例 `seam_err.raw=0`、`after_color_match=0.35617`，因此**没有验证真实图像任务的接缝改善**。真实验收需要至少一份真实任务满足 `raw > after_color_match`，并记录 Gemini/fal 实际总时长与基线。
+
+## 规格边界与待完成现场验收
+
+- 为满足最多 8 块且仍有重叠，超宽全景工作宽度压缩至最多 7114 px（360 预留追加区域）；保留全部横向内容。小于一块宽度的输入缩放至 1024 px，不补画。
+- 360 拼接时折回追加区域的贡献，避免简单裁切丢失首尾混合。
+- 音频采用本地原创 WAV 而非 MP3，无外部素材授权和运行时下载。
+- 系统 `<input capture>` 无法保证所有手机相机选择器暴露全景模式；可在系统相机先拍全景，再从相册选择。HEIC 预览由服务器兼容处理。
+- 物理 iPhone Safari/Chrome 的滑杆、拖动、相机、传感器权限、方向符号、音频解锁仍需现场实机勾选。
+- 真实 Gemini/fal 探针、实拍全景、真实接缝改善、真实速度比以及 3–4 个真实回放尚待密钥和照片。
+
+不要把未通过的原规格 H0–H4 门槛视为完成。缺少密钥时已完成其余可独立验证的开发，不会伪造真实验收结果。
+
+## 3 分钟演示提纲
+
+1. **0:00–0:30**：同一地点的时间旅行；一句话说明「想象重建，非历史影像」。
+2. **0:30–1:30**：优先使用已缓存的真实回放，说明「这是今天较早的一次运行，计时来自那次任务」；拖动、转动手机、滑杆比较。
+3. **1:30–2:30**：展示真实首屏耗时、总时长、串行比；对比 raw 瓦片与匹配后的接缝数值，说明全局锚点和颜色匹配。
+4. **2:30–3:00**：展示自己的全景上传与预览；网络和配额允许时继续真实生成。
+
+只在准备好实拍回放后使用上述真实性能台词；工程示例需明确说明只是流程模拟。
