@@ -204,7 +204,7 @@ async def _request_facts(location: dict, year: int, scene: dict) -> tuple[dict, 
         }
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{settings.gemini_text_model}:generateContent"
         headers = {"x-goog-api-key": settings.gemini_api_key}
-    async with httpx.AsyncClient(timeout=25.0) as client:
+    async with httpx.AsyncClient(timeout=90.0) as client:
         response = await client.post(url, headers=headers, json=payload)
     check_response(response, "k2" if use_k2 else "gemini")
     data = response.json()
@@ -228,7 +228,7 @@ async def build_constraints(place: dict, decade: str | int, scene: dict, *, prov
     text_configured = (settings.k2_api_key and settings.k2_base_url and settings.k2_model) or settings.gemini_api_key
     if selected_provider != "demo" and text_configured:
         try:
-            result, tokens = await asyncio.wait_for(_request_facts(location, year, scene), timeout=25.0)
+            result, tokens = await asyncio.wait_for(_request_facts(location, year, scene), timeout=90.0)
             history = validate_history(result)
             fallback = False
         except Exception:
