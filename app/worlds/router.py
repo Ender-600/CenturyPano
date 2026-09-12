@@ -19,6 +19,7 @@ from app.config import settings
 from app.constraints import PROMPT_VERSION
 from app.temporal import DEFAULT_YEAR, MIN_YEAR, MAX_YEAR
 from app.worlds.profiles import DEFAULT_WORLD_MODEL, WORLD_MODELS, WorldModel
+from app.worlds.streetview import configuration_error
 
 router = APIRouter()
 _manager = None
@@ -67,17 +68,18 @@ async def require_access(request: Request):
 
 @router.get('/world-config')
 async def configuration():
+    streetview_error = configuration_error(settings.google_maps_api_key,
+                                          ai_authorized=settings.google_streetview_ai_authorized)
     return {'configured': bool(settings.worldlab_api_key), 'model': DEFAULT_WORLD_MODEL,
             'models': list(WORLD_MODELS.values()),
             'min_year': MIN_YEAR, 'max_year': MAX_YEAR, 'default_year': DEFAULT_YEAR,
             'test_location': {'lat': 40.4433, 'lon': -79.9436, 'radius_m': 100},
             'default_source': 'google_streetview', 'default_location_source': 'device',
-            'streetview': {'configured': bool(settings.google_maps_api_key),
+            'streetview': {'configured': streetview_error not in ('missing_key', 'invalid_key'),
                            'ai_authorized': settings.google_streetview_ai_authorized,
-                           'available': bool(settings.google_maps_api_key) and settings.google_streetview_ai_authorized},
+                           'available': streetview_error is None, 'error_code': streetview_error},
             'panorama_editor_configured': bool(settings.openai_api_key),
-            'prefetch': {'available': bool(settings.google_maps_api_key and settings.openai_api_key)
-                                     and settings.google_streetview_ai_authorized,
+            'prefetch': {'available': streetview_error is None and bool(settings.openai_api_key),
                          'max_accuracy_m': 35, 'min_speed_mps': .4, 'max_speed_mps': 3.5,
                          'min_lookahead_m': 30, 'max_lookahead_m': 150},
             'historical_accuracy': 'unverified', 'phone_ar': False}
@@ -314,9 +316,13 @@ async def create_plan(payload: PlanRequest):
     from app.worlds.jobs import GENERATION_PROFILE
     _validate_location(payload)
     if payload.source == 'google_streetview':
-        if not settings.google_maps_api_key:
+        error = configuration_error(settings.google_maps_api_key,
+                                    ai_authorized=settings.google_streetview_ai_authorized)
+        if error == 'missing_key':
             raise HTTPException(503, 'Google Street View is not configured, so a panorama of your current location is unavailable. You can open Google Street View to explore.')
-        if not settings.google_streetview_ai_authorized:
+        if error == 'invalid_key':
+            raise HTTPException(503, 'Google Street View credentials have an invalid format. Correct the server configuration and restart the service.')
+        if error == 'ai_use_not_authorized':
             raise HTTPException(503, 'External AI generation using Google Street View has not been enabled.')
     values = {k: v for k, v in payload.model_dump().items() if k not in ('location_accuracy_m', 'location_timestamp_ms')}
     values['history_prompt_version'] = PROMPT_VERSION

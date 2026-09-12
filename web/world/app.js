@@ -339,6 +339,7 @@ function syncUI() {
   renderGenerationQuality();
   const streetview = state.config?.streetview;
   $('streetview-status').textContent = !state.config ? 'Checking Street View service…'
+    : streetview?.error_code === 'invalid_key' ? 'Google panorama credentials have an invalid format. Ask the server owner to update the configuration.'
     : !streetview?.configured ? 'Google panorama retrieval is not configured. You can view your current location in Google Maps.'
       : !streetview?.ai_authorized ? 'Authorization to use Google panoramas for generation is not configured. You can open the official Street View preview.'
         : 'Generation uses the 360° Street View photo of this location.';
@@ -1939,7 +1940,10 @@ async function boot() {
 
 async function loadApp() {
   startAutomaticMotion();
-  const locationReady = refreshLocation().catch(() => {});
+  // A browser can leave its permission prompt unanswered indefinitely. Saved
+  // assets and host tab changes must remain usable while GPS is pending.
+  // refreshLocation's finally handler prepares Street View once a fix arrives.
+  void refreshLocation().catch(() => {});
   const results = await Promise.allSettled([
     api('/world-config', { auth: false }).then((config) => {
       state.config = config;
@@ -1954,7 +1958,9 @@ async function loadApp() {
   else if (!state.config.configured && !state.config.viewer_only && !(state.embedded && state.mode === 'streetview')) message('World Labs is not configured on the server. Historical panoramas remain available when image editing is configured.');
   await restoreSaved();
   state.bootReady = true;
-  await locationReady;
+  if (!state.plan && state.config?.streetview?.available === false) {
+    message($('streetview-status').textContent, true);
+  }
   await maybePrepareCurrent();
   await syncEmbeddedView();
 }

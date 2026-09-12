@@ -1639,6 +1639,51 @@ function hostMessage(view, data = {}, envelope = {}) {
     data: { type: 'century:host-state', active: true, mode: 'streetview', year: 1926, ...data }, ...envelope });
 }
 
+for (const [mode, kind, filename, expectedView] of [
+  ['streetview', 'historical_pano', 'historical_panorama.jpg', 'pano'],
+  ['world', 'spz', 'scene.spz', 'world'],
+]) {
+  test(`saved ${mode} opens and switches tabs while the browser never answers GPS`, async () => {
+    const assetURL = `/world-jobs/${JOB}/assets/${filename}`;
+    const view = app({ visibility: 'visible',
+      location: { search: `?embedded=1&world=${JOB}`, hostname: 'localhost' },
+      gps() {}, fetch: (url) => {
+        if (url === `/world-jobs/${JOB}`) return response({ job_id: JOB, plan_id: PLAN, stage: 'ready',
+          assets: [{ kind, url: assetURL }] });
+        if (url === `/world-plans/${PLAN}`) return response(plan({ input_kind: 'streetview_panorama' }));
+        if (url === assetURL) return response('saved asset');
+      } });
+    view.state.engine = fakeEngine();
+    await view.boot();
+    let settled = false;
+    const loading = hostMessage(view, { mode }).then(() => { settled = true; });
+    await new Promise(setImmediate);
+    assert.equal(settled, true, 'viewer boot must not depend on a location permission response');
+    await loading;
+    assert.equal(view.state.view, expectedView);
+    assert.ok(view.state.engine.current);
+    assert.equal(view.state.locationBusy, true);
+    assert.ok(view.requests.some((request) => request.url === assetURL));
+    assert.ok(view.requests.every((request) => request.method === 'GET'));
+    await hostMessage(view, { active: false, mode: 'camera' });
+    assert.equal(view.state.active, false);
+    view.stopLiveLocation();
+  });
+}
+
+test('invalid Street View setup is explained on the scene while GPS permission is pending', async () => {
+  const view = app({ visibility: 'visible', location: { search: '?embedded=1', hostname: 'localhost' },
+    gps() {}, fetch: (url) => url === '/world-config' ? response({ configured: true,
+      streetview: { configured: false, available: false, ai_authorized: true, error_code: 'invalid_key' } }) : undefined });
+  await view.boot();
+  void hostMessage(view);
+  await new Promise(setImmediate);
+  assert.match(view.elements.get('streetview-status').textContent, /credentials.*invalid format/i);
+  assert.match(view.elements.get('message').textContent, /credentials.*invalid format/i);
+  assert.equal(view.requests.filter((request) => request.method === 'POST').length, 0);
+  view.stopLiveLocation();
+});
+
 test('embedded boot waits for the same-origin parent and never requests resources in hidden host modes', async () => {
   let motionPermissions = 0;
   const view = app({ visibility: 'visible', location: { search: '?embedded=1', hostname: 'localhost' },
