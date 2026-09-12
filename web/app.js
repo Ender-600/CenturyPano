@@ -431,7 +431,11 @@
   function resizeViewport() {
     const viewport = activeViewport(), oldWidth = state.renderWidth;
     if (!viewport.clientWidth || !viewport.clientHeight) return;
-    const fraction = oldWidth > 0 ? (state.offset + (state.viewportWidth || viewport.clientWidth) / 2) / oldWidth : 0.5;
+    // When the result screen is opened, there may not be a rendered canvas yet.
+    // Use the hand-off heading instead of briefly centering the new viewport;
+    // otherwise a wide panorama can visibly jump before its geometry arrives.
+    const fraction = oldWidth > 0 ? (state.offset + (state.viewportWidth || viewport.clientWidth) / 2) / oldWidth :
+      state.screen === 'result' && Number.isFinite(state.initialHeading) ? state.initialHeading : 0.5;
     state.viewportWidth = viewport.clientWidth;
     const geometry = state.screen === 'result' && state.manifest?.geometry;
     const hero = state.screen === 'capture';
@@ -641,7 +645,13 @@
         return;
       }
       state.targetYear = targetYear;
-      await startJob(job.job_id, false, heading, targetYear);
+      // The request heading is intentionally captured at submit time for tile
+      // prioritisation. The user may keep turning the phone while the request
+      // is queued, though, so hand the viewer's current position to the result
+      // screen instead of snapping back to that older request heading.
+      const displayHeading = state.renderWidth ?
+        (state.offset + $('preview-window').clientWidth / 2) / state.renderWidth : heading;
+      await startJob(job.job_id, false, displayHeading, targetYear);
     } catch (error) {
       if (generation === state.generation) showToast(error.message || '连接失败，照片已保留，可以再次尝试。', 8000);
     } finally { state.submitting = false; syncChrome(); }
@@ -877,10 +887,14 @@
       }
       requestAnimationFrame(animate);
     });
+    // The final canvas is drawn while the progressive past layer may still be
+    // fully visible. Hide it in the same task before the first animation frame
+    // so the reveal always starts on the original image, never on a one-frame
+    // flash of the completed historical image.
+    setPastPercent(0);
     document.body.classList.add('revealing'); resizeViewport();
     state.offset = constrainOffset(center * state.renderWidth - $('pano-viewport').clientWidth / 2); render();
-    // The viewer has been watching tiles land on the past layer. Do not snap that away:
-    // sweep back to the present as a deliberate "before", hold, then sweep into the past.
+    // Start from the present as a deliberate "before", hold, then sweep into the past.
     await sweep(state.pastPercent, 0, reduced ? 0 : 420);
     if (generation !== state.generation) return;
     await new Promise((resolve) => setTimeout(resolve, reduced ? 60 : 320));
