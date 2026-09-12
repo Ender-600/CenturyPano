@@ -79,14 +79,70 @@ def edge_agreement(a: Image.Image | np.ndarray, b: Image.Image | np.ndarray) -> 
     return float(np.clip((ea * eb).sum() / denominator, -1.0, 1.0))
 
 
+def _profile_shift(reference: np.ndarray, moving: np.ndarray, max_shift: int = MAX_SHIFT_PX) -> float:
+    """1D cross-correlation peak: shift to apply to `moving` so it matches `reference`."""
+    if reference.size < 8 or moving.size != reference.size:
+        return 0.0
+    ref = reference.astype(np.float64)
+    mov = moving.astype(np.float64)
+    ref = ref - ref.mean()
+    mov = mov - mov.mean()
+    ref_norm = float(np.dot(ref, ref))
+    mov_norm = float(np.dot(mov, mov))
+    if ref_norm < 1e-9 or mov_norm < 1e-9:
+        return 0.0
+    limit = max(1, min(int(max_shift), reference.size // 4))
+    best_shift = 0
+    best_score = -1.0
+    for delta in range(-limit, limit + 1):
+        shifted = np.roll(mov, delta)
+        score = float(np.dot(ref, shifted) / np.sqrt(ref_norm * mov_norm))
+        if score > best_score:
+            best_score = score
+            best_shift = delta
+    return float(best_shift) if best_score >= 0.35 else 0.0
+
+
 def estimate_shift(original: Image.Image | np.ndarray, generated: Image.Image | np.ndarray) -> tuple[float, float]:
-    """Return (dx, dy) that moves `generated` onto `original`, sub-pixel."""
-    ref = canny(_gray(original), sigma=EDGE_SIGMA).astype(np.float32)
-    mov = canny(_gray(generated), sigma=EDGE_SIGMA).astype(np.float32)
-    if ref.sum() < 50 or mov.sum() < 50:
+    """Return (dx, dy) that moves `generated` onto `original`, sub-pixel.
+
+    Dense edge-map phase correlation handles general drift. A separate 1D pass on
+    row / column edge energy recovers height and object offsets that 2D correlation
+    often misses when strong vertical structure dominates the peak.
+    """
+    ref_edge = edge_map(original)
+    mov_edge = edge_map(generated)
+    if float(ref_edge.sum()) < 1.0 or float(mov_edge.sum()) < 1.0:
         return 0.0, 0.0
-    shift, _error, _phase = phase_cross_correlation(ref, mov, upsample_factor=4, normalization=None)
-    dy, dx = float(shift[0]), float(shift[1])
+    dx = dy = 0.0
+    try:
+        shift, _error, _phase = phase_cross_correlation(
+            ref_edge, mov_edge, upsample_factor=4, normalization=None,
+        )
+        dy, dx = float(shift[0]), float(shift[1])
+    except Exception:
+        dx = dy = 0.0
+    # Sparse Canny backup when the dense field is too flat after palette rewrite.
+    if abs(dx) < MIN_SHIFT_PX and abs(dy) < MIN_SHIFT_PX:
+        ref = canny(_gray(original), sigma=EDGE_SIGMA).astype(np.float32)
+        mov = canny(_gray(generated), sigma=EDGE_SIGMA).astype(np.float32)
+        if ref.sum() >= 50 and mov.sum() >= 50:
+            try:
+                shift, _error, _phase = phase_cross_correlation(
+                    ref, mov, upsample_factor=4, normalization=None,
+                )
+                dy, dx = float(shift[0]), float(shift[1])
+            except Exception:
+                pass
+    dy_row = _profile_shift(ref_edge.mean(axis=1), mov_edge.mean(axis=1))
+    dx_col = _profile_shift(ref_edge.mean(axis=0), mov_edge.mean(axis=0))
+    # Prefer the 1D height lock when it disagrees with a weak / horizontal-dominated 2D peak.
+    if abs(dy_row) >= MIN_SHIFT_PX and (abs(dy_row) > abs(dy) + 1.0 or abs(dy) < MIN_SHIFT_PX):
+        dy = dy_row
+    if abs(dx_col) >= MIN_SHIFT_PX and (abs(dx_col) > abs(dx) + 1.0 or abs(dx) < MIN_SHIFT_PX):
+        dx = dx_col
+    if abs(dx) > MAX_SHIFT_PX or abs(dy) > MAX_SHIFT_PX:
+        return 0.0, 0.0
     return dx, dy
 
 
