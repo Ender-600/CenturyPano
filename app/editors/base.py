@@ -83,10 +83,13 @@ def get_editor(name: str) -> ImageEditor:
     if name == "fal":
         from .fal import FalImg2ImgEditor
         return FalImg2ImgEditor()
+    if name == "qwen":
+        from .qwen import QwenImageEditor
+        return QwenImageEditor()
     if name == "demo":
         from .demo import DemoEditor
         return DemoEditor()
-    raise ValueError("PROVIDER must be demo, gemini, or fal")
+    raise ValueError("PROVIDER must be demo, gemini, fal, or qwen")
 
 
 class EditorPool:
@@ -159,7 +162,7 @@ class EditorPool:
     async def edit(
         self, image: bytes, prompt: str, *, reference: bytes | None = None,
         strength: float | None = None, seed: int | None = None,
-        negative: str | None = None, timeout_s: float = 60.0,
+        negative: str | None = None, timeout_s: float = 120.0,
     ) -> EditResult:
         attempts = 0
         current_negative = negative
