@@ -28,6 +28,24 @@
   function text(id, value) { $(id).textContent = value; }
   function escapeHTML(value) { return String(value ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
   function assetURL(path) { if (!path) return ''; return path.startsWith('/') ? path : '/' + path; }
+  function readableError(status, body, fallback = 'The request failed. Please try again shortly.') {
+    const raw = String(body ?? '').trim();
+    if (!raw) return fallback;
+    // Tunnel / proxy HTML error pages (Cloudflare 502, nginx, etc.) must never land in the UI.
+    if (/^<!DOCTYPE|^<html[\s>]|cf-error-details|Bad gateway/i.test(raw) || raw.includes('<div class="cf-')) {
+      if (status === 502 || status === 504) return 'The demo tunnel lost the connection to this computer. Restart the local server and tunnel, then try again.';
+      if (status === 503) return 'The service is temporarily unavailable. Please try again in a moment.';
+      return `The connection failed (${status || 'error'}). Check that the local server is still running.`;
+    }
+    try {
+      const parsed = JSON.parse(raw);
+      const detail = typeof parsed.detail === 'string' ? parsed.detail
+        : typeof parsed.message === 'string' ? parsed.message : '';
+      if (detail && !/[<>]/.test(detail)) return detail.slice(0, 280);
+    } catch { /* plain text from our API */ }
+    if (/[<>]/.test(raw) || raw.length > 280) return fallback;
+    return raw;
+  }
   function showToast(message, duration = 5500) {
     text('toast', message); $('toast').hidden = false;
     clearTimeout(showToast.timer); showToast.timer = setTimeout(() => { $('toast').hidden = true; }, duration);
@@ -768,9 +786,11 @@
       if (state.manualPlace && place) form.append('place', place);
       const response = await fetch('/jobs', { method: 'POST', body: form });
       if (!response.ok) {
-        let detail = await response.text();
-        try { const body = JSON.parse(detail); detail = typeof body.detail === 'string' ? body.detail : body.message; } catch { /* The API also returns plain, readable error messages. */ }
-        throw new Error(detail || `The request failed (${response.status}). Please try again shortly.`);
+        throw new Error(readableError(
+          response.status,
+          await response.text(),
+          `The request failed (${response.status}). Please try again shortly.`,
+        ));
       }
       const job = await response.json();
       if (!job.job_id) throw new Error('The service returned no journey id. Please try again.');
@@ -1294,7 +1314,11 @@
       });
       if (generation !== state.generation || state.activeHotspot !== hotspot.id) return;
       if (!response.ok) {
-        text('hotspot-card-body', await response.text() || 'The explanation could not be loaded.');
+        text('hotspot-card-body', readableError(
+          response.status,
+          await response.text(),
+          'The explanation could not be loaded.',
+        ));
         return;
       }
       const data = await response.json();
