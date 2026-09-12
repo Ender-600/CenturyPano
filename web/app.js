@@ -7,7 +7,7 @@
   const defaultTitle = document.title;
   const motionDevice = matchMedia('(pointer: coarse)').matches || navigator.maxTouchPoints > 0;
   const state = {
-    screen: 'capture', file: null, fileURL: null, targetYear: 1925,
+    screen: 'capture', file: null, fileURL: null, targetYear: 1920,
     minYear: 1800, maxYear: new Date().getFullYear(), yearEdited: false, yearDraft: null, expectedYear: null,
     imageWidth: 0, imageHeight: 0, location: null, locationSource: null,
     manualPlace: false, locationPromise: null, locationRevision: 0,
@@ -21,6 +21,8 @@
     loadingFile: 0, offlineSaved: false, revealing: false,
     viewMode: 'past', clean: false, submitting: false, loadingSource: false,
     viewRevision: 0, viewportWidth: 0, cachePending: false, fileOrigin: null,
+    activeHotspot: null, hotspotKey: '', explaining: false, hotspotHintShown: false,
+    activeWeather: null, weatherRevision: 0,
   };
 
   function text(id, value) { $(id).textContent = value; }
@@ -58,6 +60,7 @@
   function goHome() {
     stopJourney(); state.viewMode = 'past'; state.offset = 0; state.renderWidth = 0; state.wrap = false;
     state.yearDraft = null; document.title = defaultTitle;
+    clearHotspots();
     showScreen('capture');
     if (location.search) history.replaceState(null, '', location.pathname);
   }
@@ -97,6 +100,9 @@
     $('generate-button').hidden = !failed && (!preview || original);
     $('generate-button').disabled = busy;
     $('generate-button').innerHTML = `${failed ? 'Preview this photo again' : state.submitting ? 'Submitting…' : `Step into ${state.targetYear}`}<svg><use href="#i-arrow"/></svg>`;
+    const showWeatherOptIn = preview && !original && !failed;
+    $('weather-opt-in').hidden = !showWeatherOptIn;
+    $('weather-enabled').disabled = busy;
     $('album-button').disabled = busy;
     $('capture-button').disabled = busy;
     // Shooting a panorama is the product; it belongs on the first screen rather
@@ -160,6 +166,9 @@
         }
         if (state.screen !== 'result' && !state.submitting && !state.loadingSource && !state.yearEdited) {
           setTargetYear(state.health.default_year ?? state.targetYear);
+        }
+        if (typeof state.health.weather_enabled === 'boolean') {
+          $('weather-enabled').checked = state.health.weather_enabled;
         }
       }
     } catch { /* Replay remains available when the live service is offline. */ }
@@ -356,6 +365,10 @@
   $('year-options').addEventListener('click', (event) => {
     const button = event.target.closest('[data-year]');
     if (button) return selectYear(button.dataset.year);
+  });
+  $('weather-options').addEventListener('click', (event) => {
+    const button = event.target.closest('[data-weather]');
+    if (button) switchWeather(button.dataset.weather);
   });
   $('year-range').addEventListener('input', (event) => {
     if (state.screen === 'result') { state.yearDraft = event.target.value; syncYearControls(); }
@@ -602,6 +615,9 @@
       for (const canvas of [$('original-canvas'), $('past-canvas')]) {
         canvas.style.width = state.renderWidth * (state.wrap ? 2 : 1) + 'px'; canvas.style.height = state.renderHeight + 'px';
       }
+      const layer = $('hotspot-layer');
+      layer.style.width = state.renderWidth * (state.wrap ? 2 : 1) + 'px';
+      layer.style.height = state.renderHeight + 'px';
     }
     render();
   }
@@ -647,6 +663,7 @@
     state.pastPercent = Math.max(0, Math.min(100, value));
     $('slider-handle').setAttribute('aria-valuenow', String(Math.round(state.pastPercent)));
     $('slider-handle').setAttribute('aria-valuetext', `${Math.round(state.pastPercent)}% of the past revealed`);
+    syncHotspotVisibility();
     render();
   }
   function sliderAt(clientX) {
@@ -657,11 +674,11 @@
     viewport.addEventListener('pointerdown', (event) => {
       if (event.button !== 0 || state.revealing) return;
       const handle = event.target.closest('#slider-handle');
-      if (!handle && event.target.closest('button, a, input, select, textarea')) return;
+      if (!handle && event.target.closest('button, a, input, select, textarea, #hotspot-card')) return;
       $('gesture-hint').hidden = true;
       state.velocity = 0;
       state.drag = { pointerId: event.pointerId, x: event.clientX, y: event.clientY, offset: state.offset, slider: !!handle,
-        target: viewport, axis: null, lastX: event.clientX, lastT: performance.now(), velocity: 0 };
+        target: viewport, axis: null, lastX: event.clientX, lastT: performance.now(), velocity: 0, t0: performance.now() };
       viewport.setPointerCapture(event.pointerId); viewport.classList.add('dragging');
       if (handle) { event.preventDefault(); sliderAt(event.clientX); }
     });
@@ -684,6 +701,8 @@
     const endDrag = (event) => {
       if (!state.drag || state.drag.pointerId !== event.pointerId) return;
       const drag = state.drag;
+      const moved = Math.hypot((event.clientX ?? drag.lastX) - drag.x, (event.clientY ?? drag.y) - drag.y);
+      const tapped = !drag.slider && !drag.axis && moved < 8 && performance.now() - drag.t0 < 450;
       if (drag.axis === 'x' && !drag.slider && performance.now() - drag.lastT < 80) {
         // Flick: carry the last measured speed into the inertia loop in frame().
         state.velocity = -drag.velocity;
@@ -691,6 +710,7 @@
       if (state.gyro) resetMotionOrigin();
       state.drag = null; viewport.classList.remove('dragging');
       if (viewport.hasPointerCapture(event.pointerId)) viewport.releasePointerCapture(event.pointerId);
+      if (tapped && viewport.id === 'pano-viewport') handleHotspotTap(event.clientX, event.clientY);
     };
     viewport.addEventListener('pointerup', endDrag); viewport.addEventListener('pointercancel', endDrag); viewport.addEventListener('lostpointercapture', endDrag);
     // Safari needs a non-passive touch listener to keep horizontal pano gestures local.
@@ -743,6 +763,7 @@
       const place = $('place-input').value.trim();
       const form = new FormData(); form.append('image', file); form.append('target_year', String(targetYear));
       form.append('heading', String(Math.max(0, Math.min(1, heading)))); form.append('is_360', String(wrap));
+      form.append('weather_enabled', String(!!$('weather-enabled').checked));
       if (state.location) { form.append('lat', String(state.location.lat)); form.append('lon', String(state.location.lon)); }
       if (state.manualPlace && place) form.append('place', place);
       const response = await fetch('/jobs', { method: 'POST', body: form });
@@ -787,6 +808,8 @@
     state.revealed = false; state.pastPercent = 100; state.offlineSaved = false; state.cachePending = false;
     state.viewMode = 'past'; state.viewRevision++; state.receiptStatus = null; state.renderWidth = 0;
     state.initialHeading = heading; state.wrap = false; state.offset = 0;
+    state.activeWeather = null; state.weatherRevision++;
+    clearHotspots(); state.hotspotHintShown = false;
     $('generation-overlay').hidden = false; $('progress-strip').hidden = false;
     text('generation-title', replay ? 'Revisiting this moment' : 'Slowing time down');
     text('generation-detail', replay ? 'Opening the saved panorama…' : 'Reading your panorama…');
@@ -839,6 +862,91 @@
   }
   function placeName(place) { return typeof place === 'string' ? place : place?.name || 'Unknown city'; }
   function isDemo(manifest) { return !!manifest.demo || manifest.provider === 'demo' || manifest.tiles?.some((tile) => tile.provider === 'demo'); }
+  function weatherBlock(manifest) { return manifest?.weather || null; }
+  function weatherVariants(manifest) {
+    const weather = weatherBlock(manifest);
+    if (!weather?.enabled) return [];
+    const ids = weather.ids || Object.keys(weather.variants || {});
+    return ids.map((id) => ({ id, ...(weather.variants?.[id] || { id, label: id }) }));
+  }
+  function activeVariant(manifest) {
+    const weather = weatherBlock(manifest);
+    if (!weather?.enabled) return null;
+    const id = state.activeWeather || weather.active || weather.ids?.[0];
+    return id ? { id, ...(weather.variants?.[id] || {}) } : null;
+  }
+  function viewTiles(manifest) {
+    const variant = activeVariant(manifest);
+    return variant?.tiles || manifest.tiles || [];
+  }
+  function viewResultPath(manifest) {
+    const variant = activeVariant(manifest);
+    if (variant?.result?.path) return assetURL(variant.result.path);
+    return `/jobs/${encodeURIComponent(manifest.job_id)}/result`;
+  }
+  function renderWeatherOptions(manifest) {
+    const host = $('weather-options');
+    const variants = weatherVariants(manifest);
+    const icons = { clear: 'i-sun', rain: 'i-rain', snow: 'i-snow' };
+    if (state.screen !== 'result' || variants.length < 2) {
+      host.hidden = true; host.innerHTML = ''; return;
+    }
+    const active = state.activeWeather || weatherBlock(manifest)?.active || variants[0].id;
+    host.hidden = false;
+    host.innerHTML = variants.map((variant) => {
+      const pressed = variant.id === active;
+      const label = escapeHTML(variant.label || variant.id);
+      const icon = icons[variant.id] || 'i-sun';
+      const ready = ['done', 'done_partial'].includes(variant.status) || (variant.tiles || []).some((tile) => tile.status === 'done');
+      return `<button type="button" data-weather="${escapeHTML(variant.id)}" aria-label="${label}" title="${label}" aria-pressed="${pressed}" class="${pressed ? 'active' : ''}" ${ready ? '' : 'disabled'}><svg aria-hidden="true"><use href="#${icon}"/></svg></button>`;
+    }).join('');
+  }
+  async function switchWeather(weatherId) {
+    if (!state.manifest || state.activeWeather === weatherId) return;
+    const variant = state.manifest.weather?.variants?.[weatherId];
+    if (!variant) return;
+    state.activeWeather = weatherId;
+    state.weatherRevision++;
+    const revision = state.weatherRevision;
+    state.loadedTiles = new Set();
+    state.finalLoaded = false;
+    const geometry = state.manifest.geometry;
+    if (geometry) {
+      const ctx = $('past-canvas').getContext('2d');
+      ctx.clearRect(0, 0, $('past-canvas').width, $('past-canvas').height);
+    }
+    renderWeatherOptions(state.manifest);
+    const generation = state.generation;
+    const tiles = variant.tiles || [];
+    await Promise.all(tiles.filter((tile) => tile.status === 'done').map(async (tile) => {
+      try {
+        const image = await loadImage(tile.path ? assetURL(tile.path) : `/jobs/${encodeURIComponent(state.manifest.job_id)}/tiles/${tile.i}`);
+        if (generation !== state.generation || revision !== state.weatherRevision) return;
+        const ctx = $('past-canvas').getContext('2d');
+        ctx.drawImage(image, tile.x, 0, geometry.tile_w || 1024, geometry.H);
+        if (state.wrap && tile.x + (geometry.tile_w || 1024) > geometry.W) {
+          ctx.drawImage(image, tile.x - geometry.W, 0, geometry.tile_w || 1024, geometry.H);
+        }
+        state.loadedTiles.add(tile.i);
+        duplicateCanvas($('past-canvas'), geometry.W, geometry.H);
+      } catch { /* Missing weather tiles retry on the next poll. */ }
+    }));
+    if (generation !== state.generation || revision !== state.weatherRevision) return;
+    if (variant.result?.status === 'done') {
+      try {
+        const image = await loadImage(viewResultPath(state.manifest));
+        if (generation !== state.generation || revision !== state.weatherRevision) return;
+        const ctx = $('past-canvas').getContext('2d');
+        ctx.drawImage(image, 0, 0, geometry.W, geometry.H);
+        duplicateCanvas($('past-canvas'), geometry.W, geometry.H);
+        state.finalLoaded = true;
+        $('download-button').href = viewResultPath(state.manifest);
+        $('download-button').hidden = false;
+      } catch { /* Keep progressive tiles if the stitched result is not ready. */ }
+    }
+    render();
+    syncChrome();
+  }
   function renderHistoricalContext(manifest) {
     const context = manifest.constraints?.historical_context;
     const panel = $('historical-context'); panel.hidden = false;
@@ -879,8 +987,21 @@
     $('replay-badge').hidden = !replay;
     text('result-mode', (demo ? 'Local demo · no AI called' : replay ? 'Archived journey · no generation call' : 'AI imagined reconstruction') + (manifest.scene?.is_outdoor === false ? ' · indoor scene, limited effect' : ''));
     text('result-note', demo ? 'The engineering sample and local grading exist to verify the flow. They do not represent AI reconstruction.' : 'The scene is estimated from the chosen year and the location, so buildings and land use may differ from today.');
-    const done = manifest.tiles?.filter((tile) => ['done', 'error'].includes(tile.status)).length || 0;
-    const total = manifest.geometry?.n || manifest.tiles?.length || 0;
+    if (manifest.weather?.enabled && !state.activeWeather) {
+      state.activeWeather = manifest.weather.active || manifest.weather.ids?.[0] || null;
+    }
+    const variants = weatherVariants(manifest);
+    let done = 0, total = 0;
+    if (variants.length) {
+      const tileCount = manifest.geometry?.n || 0;
+      total = tileCount * variants.length;
+      for (const variant of variants) {
+        done += (variant.tiles || []).filter((tile) => ['done', 'error'].includes(tile.status)).length;
+      }
+    } else {
+      done = manifest.tiles?.filter((tile) => ['done', 'error'].includes(tile.status)).length || 0;
+      total = manifest.geometry?.n || manifest.tiles?.length || 0;
+    }
     $('progress-fill').style.width = `${total ? done / total * 100 : 0}%`;
     text('progress-count', `${done} / ${total || '—'} views`);
     const stage = manifest.stage;
@@ -891,9 +1012,11 @@
     text('progress-text', progress); text('generation-detail', progress);
     if (done > 0) $('generation-overlay').hidden = true;
     $('progress-strip').hidden = state.finalLoaded && ['done', 'done_partial'].includes(manifest.status);
+    renderWeatherOptions(manifest);
     syncChrome();
     renderHistoricalContext(manifest);
     renderMetrics(manifest);
+    renderHotspots(manifest);
   }
   async function applyManifest(manifest, generation) {
     if (generation !== state.generation) return;
@@ -901,8 +1024,10 @@
     let ready = false;
     try { ready = await prepareGeometry(manifest, generation); } catch { /* Preview may not exist during preprocessing. */ }
     if (!ready || generation !== state.generation) return;
+    renderHotspots(manifest);
     const geometry = manifest.geometry;
-    const arrivals = (manifest.tiles || []).filter((tile) => ['done', 'error'].includes(tile.status) && !state.loadedTiles.has(tile.i));
+    const tiles = viewTiles(manifest);
+    const arrivals = tiles.filter((tile) => ['done', 'error'].includes(tile.status) && !state.loadedTiles.has(tile.i));
     await Promise.all(arrivals.map(async (tile) => {
       try {
         if (tile.status === 'done') {
@@ -923,15 +1048,16 @@
     }));
     if (generation !== state.generation) return;
     syncChrome();
-    if (manifest.result?.status === 'done' && !state.finalLoaded) {
+    const resultReady = activeVariant(manifest)?.result?.status === 'done' || manifest.result?.status === 'done';
+    if (resultReady && !state.finalLoaded) {
       try {
-        const image = await loadImage(`/jobs/${encodeURIComponent(manifest.job_id)}/result`);
+        const image = await loadImage(viewResultPath(manifest));
         if (generation !== state.generation) return;
         const ctx = $('past-canvas').getContext('2d'); ctx.drawImage(image, 0, 0, geometry.W, geometry.H);
         duplicateCanvas($('past-canvas'), geometry.W, geometry.H);
         state.finalLoaded = true; $('generation-overlay').hidden = true;
         $('progress-strip').hidden = true;
-        $('download-button').href = `/jobs/${encodeURIComponent(manifest.job_id)}/result`;
+        $('download-button').href = viewResultPath(manifest);
         $('download-button').hidden = false;
         text('result-subtitle', isDemo(manifest) ? 'Engineering sample. Drag the handle to compare then and now.' : 'Time has travelled far. The viewpoint never moved.');
         if (manifest.status === 'done_partial') showToast('Some areas could not be reconstructed, so their originals were kept.');
@@ -967,7 +1093,13 @@
         showToast(manifest.error || 'Generation failed. Start a new journey, or open the archive.', 9000);
         return;
       }
-      if (['done', 'done_partial'].includes(manifest.status) && state.finalLoaded) return;
+      if (['done', 'done_partial'].includes(manifest.status) && state.finalLoaded) {
+        if (manifest.hotspots?.provisional) {
+          state.pollTimer = setTimeout(() => pollManifest(generation, 0), 900);
+          return;
+        }
+        return;
+      }
       state.pollTimer = setTimeout(() => pollManifest(generation, 0), 500);
     } catch (error) {
       if (generation !== state.generation) return;
@@ -1036,6 +1168,159 @@
     }).join('');
     return `<h4>Signage checked against the year</h4><ul>${rows}</ul>`;
   }
+  function clearHotspots() {
+    state.activeHotspot = null; state.hotspotKey = ''; state.explaining = false;
+    const layer = $('hotspot-layer');
+    layer.hidden = true; layer.innerHTML = '';
+    $('hotspot-card').hidden = true;
+    document.body.classList.remove('hotspots-ready');
+  }
+  function syncHotspotVisibility() {
+    const show = state.screen === 'result' && state.viewMode !== 'present' && state.pastPercent >= 20
+      && (state.manifest?.hotspots?.items?.length > 0);
+    $('hotspot-layer').hidden = !show;
+  }
+  function hotspotMarkup(item, shift = 0) {
+    const [x0, y0, x1, y1] = item.bbox || [0, 0, 0, 0];
+    const [pointX, pointY] = item.point || [(x0 + x1) / 2, (y0 + y1) / 2];
+    const leftPct = state.wrap ? ((pointX + shift) * 50).toFixed(3) : (pointX * 100).toFixed(3);
+    return `<div class="hotspot" data-id="${escapeHTML(item.id)}" data-shift="${shift}" style="left:${leftPct}%;top:${(pointY * 100).toFixed(3)}%"><span class="hotspot-label">${escapeHTML(item.label)}</span></div>`;
+  }
+  function renderHotspots(manifest) {
+    const items = manifest?.hotspots?.items || [];
+    const key = `${manifest?.job_id || ''}:${state.wrap ? 'w' : 's'}:${items.map((item) => item.id).join(',')}:${manifest?.hotspots?.provisional ? 'p' : 'f'}`;
+    if (!items.length) {
+      if (manifest?.status && ['done', 'done_partial'].includes(manifest.status) && state.finalLoaded
+          && !state.hotspotKey.endsWith(':requested')) {
+        requestHotspots(manifest.job_id);
+      } else if (key !== state.hotspotKey) {
+        clearHotspots();
+        state.hotspotKey = key;
+      }
+      return;
+    }
+    if (key === state.hotspotKey) {
+      syncHotspotVisibility();
+      return;
+    }
+    state.hotspotKey = key;
+    const layer = $('hotspot-layer');
+    let html = items.map((item) => hotspotMarkup(item, 0)).join('');
+    if (state.wrap) html += items.map((item) => hotspotMarkup(item, 1)).join('');
+    layer.innerHTML = html;
+    layer.hidden = false;
+    document.body.classList.add('hotspots-ready');
+    syncHotspotVisibility();
+    if (!state.hotspotHintShown && state.revealed) {
+      state.hotspotHintShown = true;
+      showToast('Tap a white dot to ask about that place.', 4200);
+    }
+  }
+  async function requestHotspots(jobId) {
+    if (!jobId) return;
+    state.hotspotKey = `${jobId}:requested`;
+    try {
+      const response = await fetch(`/jobs/${encodeURIComponent(jobId)}/hotspots`, { method: 'POST' });
+      if (!response.ok) { state.hotspotKey = ''; return; }
+      const hotspots = await response.json();
+      if (state.manifest?.job_id === jobId) {
+        state.manifest.hotspots = hotspots;
+        renderHotspots(state.manifest);
+        if (hotspots.provisional) {
+          state.pollTimer = setTimeout(() => pollManifest(state.generation, 0), 900);
+        }
+      }
+    } catch { state.hotspotKey = ''; }
+  }
+  function panoramaPoint(clientX, clientY) {
+    const bounds = $('pano-viewport').getBoundingClientRect();
+    const y = (activeViewport().clientHeight - state.renderHeight) / 2;
+    const localX = state.offset + (clientX - bounds.left);
+    const localY = clientY - bounds.top - y;
+    if (localY < 0 || localY > state.renderHeight || state.renderWidth <= 0 || state.renderHeight <= 0) return null;
+    let xNorm = localX / state.renderWidth;
+    if (state.wrap) xNorm = ((xNorm % 1) + 1) % 1;
+    else if (xNorm < 0 || xNorm > 1) return null;
+    return { x: xNorm, y: localY / state.renderHeight };
+  }
+  function hitTestHotspot(clientX, clientY) {
+    const point = panoramaPoint(clientX, clientY);
+    const items = state.manifest?.hotspots?.items || [];
+    if (!point || !items.length || state.pastPercent < 35 || state.viewMode === 'present') return null;
+    let best = null, bestDistance = Infinity;
+    for (const item of items) {
+      const [x0, y0, x1, y1] = item.bbox;
+      const [hotspotX, hotspotY] = item.point || [(x0 + x1) / 2, (y0 + y1) / 2];
+      let dx = Math.abs(point.x - hotspotX);
+      if (state.wrap) dx = Math.min(dx, 1 - dx);
+      const distance = Math.hypot(dx * state.renderWidth, (point.y - hotspotY) * state.renderHeight);
+      // The visible dot stays subtle, while its touch target meets mobile accessibility guidance.
+      if (distance <= 24 && distance < bestDistance) { best = item; bestDistance = distance; }
+    }
+    return best;
+  }
+  function closeHotspotCard() {
+    state.activeHotspot = null; state.explaining = false;
+    $('hotspot-card').hidden = true;
+    $('hotspot-layer').querySelectorAll('.hotspot.active').forEach((node) => node.classList.remove('active'));
+  }
+  async function handleHotspotTap(clientX, clientY) {
+    if (state.screen !== 'result' || !state.finalLoaded || state.revealing) return;
+    const hotspot = hitTestHotspot(clientX, clientY);
+    if (!hotspot) {
+      if (!$('hotspot-card').hidden) closeHotspotCard();
+      return;
+    }
+    state.activeHotspot = hotspot.id;
+    $('hotspot-layer').querySelectorAll('.hotspot').forEach((node) => {
+      node.classList.toggle('active', node.dataset.id === hotspot.id);
+    });
+    $('hotspot-card').hidden = false;
+    text('hotspot-card-kicker', yearOf(state.manifest) ? `Around ${yearOf(state.manifest)}` : 'This place');
+    text('hotspot-card-title', hotspot.label);
+    text('hotspot-card-body', 'Asking the historian about this region…');
+    $('hotspot-card-note').hidden = true;
+    if (!state.jobId) {
+      text('hotspot-card-body', 'This journey is not available for explanations.');
+      return;
+    }
+    state.explaining = true;
+    const generation = state.generation;
+    try {
+      const response = await fetch(`/jobs/${encodeURIComponent(state.jobId)}/explain`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ hotspot_id: hotspot.id }),
+      });
+      if (generation !== state.generation || state.activeHotspot !== hotspot.id) return;
+      if (!response.ok) {
+        text('hotspot-card-body', await response.text() || 'The explanation could not be loaded.');
+        return;
+      }
+      const data = await response.json();
+      if (generation !== state.generation || state.activeHotspot !== hotspot.id) return;
+      text('hotspot-card-title', data.label || hotspot.label);
+      const sections = [];
+      if (data.distinctive) sections.push(`<span>What stands out</span>${escapeHTML(data.distinctive)}`);
+      if (data.significance) sections.push(`<span>Why it matters</span>${escapeHTML(data.significance)}`);
+      if (data.past) sections.push(`<span>Then</span>${escapeHTML(data.past)}`);
+      if (data.present) sections.push(`<span>Compared with today</span>${escapeHTML(data.present)}`);
+      $('hotspot-card-body').innerHTML = sections.length
+        ? sections.map((section) => `<span class="hotspot-card-section">${section}</span>`).join('')
+        : 'No description was returned for this region.';
+      if (data.uncertainty) {
+        text('hotspot-card-note', data.uncertainty);
+        $('hotspot-card-note').hidden = false;
+      } else $('hotspot-card-note').hidden = true;
+    } catch {
+      if (generation === state.generation && state.activeHotspot === hotspot.id) {
+        text('hotspot-card-body', 'Could not reach the explanation service.');
+      }
+    } finally {
+      if (generation === state.generation) state.explaining = false;
+    }
+  }
+  $('hotspot-card-close').addEventListener('click', closeHotspotCard);
 
   function metricNumber(value, suffix = ' s') { return typeof value === 'number' && Number.isFinite(value) ? value.toFixed(2) + suffix : '—'; }
   function renderMetrics(manifest) {
@@ -1172,13 +1457,131 @@
   function rememberJob(manifest) {
     const entries = storedJourneys('century-recent-jobs');
     const previous = entries.find((entry) => entry.job_id === manifest.job_id);
+    const coords = entryCoords(manifest);
     const entry = {
       ...previous, job_id: manifest.job_id, place: manifest.place, decade: manifest.decade,
       target_year: yearOf(manifest), anchor_year: manifest.anchor_year, provider: manifest.provider, demo: isDemo(manifest),
       status: manifest.status, metrics: manifest.metrics, saved_at: Date.now(),
+      ...(coords ? { lat: coords.lat, lon: coords.lon } : {}),
     };
     try { localStorage.setItem('century-recent-jobs', JSON.stringify([entry, ...entries.filter((item) => item.job_id !== entry.job_id)].slice(0, 24))); }
     catch { /* Storage restrictions do not interrupt the active journey. */ }
+  }
+  function entryCoords(entry) {
+    if (!entry) return null;
+    if (Number.isFinite(entry.lat) && Number.isFinite(entry.lon)) return { lat: Number(entry.lat), lon: Number(entry.lon) };
+    const place = entry.place;
+    if (place && Number.isFinite(place.lat) && Number.isFinite(place.lon)) return { lat: Number(place.lat), lon: Number(place.lon) };
+    return null;
+  }
+  function clusterArchivePlaces(entries) {
+    const groups = new Map();
+    entries.forEach((entry) => {
+      const coords = entryCoords(entry);
+      if (!coords) return;
+      const label = placeName(entry.place);
+      const key = label.casefold ? label.casefold() : String(label).toLowerCase();
+      const group = groups.get(key) || { key, label, lat: 0, lon: 0, trips: [] };
+      group.trips.push(entry);
+      const n = group.trips.length;
+      group.lat += (coords.lat - group.lat) / n;
+      group.lon += (coords.lon - group.lon) / n;
+      groups.set(key, group);
+    });
+    return [...groups.values()];
+  }
+  let archiveLeaflet = null;
+  const archiveMarkers = new Map();
+  function destroyArchiveLeaflet() {
+    archiveMarkers.clear();
+    if (archiveLeaflet) {
+      archiveLeaflet.remove();
+      archiveLeaflet = null;
+    }
+    const host = $('archive-leaflet');
+    if (host) host.innerHTML = '';
+  }
+  function closeArchivePlace() {
+    const panel = $('archive-place-panel');
+    panel.hidden = true;
+    $('archive-place-trips').innerHTML = '';
+    archiveMarkers.forEach((marker) => {
+      const el = marker.getElement?.();
+      el?.classList.remove('is-active');
+    });
+  }
+  function openArchivePlace(group, dialog) {
+    const panel = $('archive-place-panel');
+    panel.hidden = false;
+    text('archive-place-title', group.label);
+    const trips = $('archive-place-trips');
+    trips.innerHTML = '';
+    group.trips.forEach((entry) => {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'archive-place-trip';
+      const pending = entry.status === 'running';
+      const year = yearOf(entry) ?? 'Journey';
+      button.innerHTML = `<img src="/jobs/${encodeURIComponent(entry.job_id)}/${pending ? 'preview' : 'result'}" alt=""><span><strong>${escapeHTML(year)}</strong><small>${pending ? 'In progress' : 'Open this scene'}</small></span>`;
+      button.querySelector('img')?.addEventListener('error', (event) => { event.target.hidden = true; }, { once: true });
+      button.addEventListener('click', () => { dialog.close(); startJob(entry.job_id, true); });
+      trips.appendChild(button);
+    });
+    archiveMarkers.forEach((marker, key) => {
+      const el = marker.getElement?.();
+      if (!el) return;
+      el.classList.toggle('is-active', key === group.key);
+    });
+  }
+  function renderArchiveMap(entries, dialog) {
+    const section = $('archive-map');
+    const empty = $('archive-map-empty');
+    const places = clusterArchivePlaces(entries);
+    section.hidden = false;
+    closeArchivePlace();
+    empty.hidden = places.length > 0;
+    if (typeof L === 'undefined') {
+      empty.hidden = false;
+      text('archive-map-empty', 'Map library unavailable. Use the journey list below.');
+      destroyArchiveLeaflet();
+      return;
+    }
+    if (!archiveLeaflet) {
+      archiveLeaflet = L.map('archive-leaflet', {
+        zoomControl: false, attributionControl: true, scrollWheelZoom: false,
+      }).setView([20, 0], 1);
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        maxZoom: 18,
+        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+      }).addTo(archiveLeaflet);
+      L.control.zoom({ position: 'topright' }).addTo(archiveLeaflet);
+    } else {
+      archiveMarkers.forEach((marker) => archiveLeaflet.removeLayer(marker));
+      archiveMarkers.clear();
+    }
+    if (!places.length) {
+      archiveLeaflet.setView([20, 0], 1);
+      setTimeout(() => archiveLeaflet.invalidateSize(), 50);
+      return;
+    }
+    const bounds = L.latLngBounds([]);
+    places.forEach((group) => {
+      const mark = group.trips.length > 1 ? String(group.trips.length) : String(yearOf(group.trips[0]) ?? '·').slice(-2);
+      const icon = L.divIcon({
+        className: 'archive-pin-icon',
+        html: `<span>${escapeHTML(mark)}</span>`,
+        iconSize: [28, 28],
+        iconAnchor: [14, 28],
+      });
+      const marker = L.marker([group.lat, group.lon], { icon, keyboard: true, title: group.label });
+      marker.on('click', () => openArchivePlace(group, dialog));
+      marker.addTo(archiveLeaflet);
+      archiveMarkers.set(group.key, marker);
+      bounds.extend([group.lat, group.lon]);
+    });
+    if (places.length === 1) archiveLeaflet.setView([places[0].lat, places[0].lon], 5);
+    else archiveLeaflet.fitBounds(bounds.pad(0.35), { maxZoom: 5 });
+    setTimeout(() => archiveLeaflet.invalidateSize(), 50);
   }
   async function cacheJourney(manifest) {
     if (state.offlineSaved || state.cachePending || !navigator.serviceWorker) return;
@@ -1194,13 +1597,24 @@
         `/jobs/${manifest.job_id}/result`,
         ...(manifest.tiles || []).filter((tile) => tile.status === 'done').map((tile) => tile.path ? assetURL(tile.path) : `/jobs/${manifest.job_id}/tiles/${tile.i}`),
       ];
+      for (const variant of weatherVariants(manifest)) {
+        if (variant.result?.path) urls.push(assetURL(variant.result.path));
+        for (const tile of variant.tiles || []) {
+          if (tile.status === 'done' && tile.path) urls.push(assetURL(tile.path));
+        }
+      }
       const channel = new MessageChannel();
       const timeout = setTimeout(() => { channel.port1.close(); if (state.jobId === jobId) state.cachePending = false; }, 15000);
       channel.port1.onmessage = (event) => {
         clearTimeout(timeout); channel.port1.close();
         if (state.jobId === jobId) state.cachePending = false;
         if (!event.data?.ok) return;
-        const entry = { job_id: manifest.job_id, place: manifest.place, target_year: yearOf(manifest), decade: manifest.decade, anchor_year: manifest.anchor_year, metrics: manifest.metrics, provider: manifest.provider, demo: isDemo(manifest), mode: 'replay' };
+        const coords = entryCoords(manifest);
+        const entry = {
+          job_id: manifest.job_id, place: manifest.place, target_year: yearOf(manifest), decade: manifest.decade,
+          anchor_year: manifest.anchor_year, metrics: manifest.metrics, provider: manifest.provider, demo: isDemo(manifest), mode: 'replay',
+          ...(coords ? { lat: coords.lat, lon: coords.lon } : {}),
+        };
         const replays = localReplays().filter((replay) => replay.job_id !== entry.job_id);
         replays.unshift(entry);
         try { localStorage.setItem('century-replays', JSON.stringify(replays.slice(0, 12))); } catch { /* Quota restriction does not affect the current viewer. */ }
@@ -1216,6 +1630,9 @@
     closeOptions();
     const dialog = $('replay-dialog'); if (!dialog.open) dialog.showModal();
     $('replay-list').innerHTML = '<p class="empty-state">Opening the archive…</p>';
+    $('archive-map').hidden = true;
+    destroyArchiveLeaflet();
+    closeArchivePlace();
     let entries = [];
     try {
       const response = await fetch('/replays');
@@ -1225,7 +1642,13 @@
     const device = localReplays();
     const map = new Map([...storedJourneys('century-recent-jobs'), ...device, ...entries].map((entry) => [entry.job_id, entry]));
     entries = [...map.values()];
-    if (!entries.length) { $('replay-list').innerHTML = '<p class="empty-state">No saved journeys yet.<br>Finish one online and you can revisit it here offline.</p>'; return; }
+    if (!entries.length) {
+      $('archive-map').hidden = true;
+      destroyArchiveLeaflet();
+      $('replay-list').innerHTML = '<p class="empty-state">No saved journeys yet.<br>Finish one online and you can revisit it here offline.</p>';
+      return;
+    }
+    renderArchiveMap(entries, dialog);
     $('replay-list').innerHTML = '';
     entries.forEach((entry) => {
       const button = document.createElement('button'); button.className = 'replay-card';
@@ -1239,8 +1662,9 @@
     });
   }
   $('sample-button').addEventListener('click', openReplays); $('nav-replays').addEventListener('click', openReplays);
-  $('close-replays').addEventListener('click', () => $('replay-dialog').close());
-  $('replay-dialog').addEventListener('click', (event) => { if (event.target === $('replay-dialog')) { const rect = $('replay-dialog').getBoundingClientRect(); if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) $('replay-dialog').close(); } });
+  $('close-replays').addEventListener('click', () => { closeArchivePlace(); $('replay-dialog').close(); });
+  $('archive-place-close').addEventListener('click', closeArchivePlace);
+  $('replay-dialog').addEventListener('click', (event) => { if (event.target === $('replay-dialog')) { const rect = $('replay-dialog').getBoundingClientRect(); if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) { closeArchivePlace(); $('replay-dialog').close(); } } });
   window.addEventListener('offline', connectionStatus);
   window.addEventListener('online', () => { checkHealth(); if (state.finalLoaded && state.manifest) cacheJourney(state.manifest); });
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => { /* HTTPS or localhost is needed for offline mode. */ });

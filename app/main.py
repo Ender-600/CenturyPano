@@ -13,9 +13,11 @@ from pillow_heif import register_heif_opener
 from pydantic import BaseModel, Field
 
 from .config import DECADE_ANCHOR, DEFAULT_DECADE, MAX_UPLOAD_MB, ROOT, settings
-from .location import exif_gps, resolve_place, city_from_latlon
+from .hotspots import explain_hotspot
+from .location import city_from_latlon, coords_for_place, exif_gps, resolve_place
 from .manifest import create_manifest, job_dir, read_manifest, update_manifest
 from .temporal import DEFAULT_YEAR, MAX_YEAR, MIN_YEAR, decade_for_year, manifest_year, resolve_year
+from .weather import DEFAULT_WEATHER_IDS, parse_weather_ids, weather_subdir
 
 register_heif_opener()
 Image.MAX_IMAGE_PIXELS = 100_000_000
@@ -76,8 +78,10 @@ def get_manifest(job_id):
         raise HTTPException(404, 'This job could not be found.') from None
 
 
-def initial_manifest(job_id, source, decade, place, heading=0.5, *, target_year=None):
+def initial_manifest(job_id, source, decade, place, heading=0.5, *, target_year=None,
+                     weather_enabled=False, weather_ids=None):
     year = resolve_year(decade if target_year is None else target_year)
+    ids = list(weather_ids or DEFAULT_WEATHER_IDS) if weather_enabled else []
     return {
         'job_id': job_id, 'status': 'running', 'mode': 'live', 'provider': settings.provider,
         'demo': settings.provider == 'demo', 'source': source, 'place': place,
@@ -85,6 +89,13 @@ def initial_manifest(job_id, source, decade, place, heading=0.5, *, target_year=
         'job_seed': int(uuid.UUID(job_id)) % (2**31), 'geometry': None, 'scene': {}, 'constraints': {},
         'anchor': {'status': 'pending', 'path': None, 'ms': None}, 'tiles': [],
         'result': {'path': None, 'status': 'pending'},
+        'hotspots': {'status': 'pending', 'items': [], 'fallback': None},
+        'weather': {
+            'enabled': bool(weather_enabled),
+            'active': ids[0] if ids else None,
+            'ids': ids,
+            'variants': {},
+        },
         'metrics': {'started_at': time.time(), 'anchor_done_at': None, 'first_tile_at': None,
                     'finished_at': None, 'first_view_s': None, 'total_s': None,
                     'seam_err': {'raw': None, 'after_color_match': None, 'originals_floor': None},
@@ -155,6 +166,8 @@ async def create_job(
     lat: float | None = Form(None, ge=-90, le=90), lon: float | None = Form(None, ge=-180, le=180),
     place: str = Form('', max_length=160), heading: float = Form(0.5, ge=0, le=1),
     is_360: bool | None = Form(None),
+    weather_enabled: bool | None = Form(None),
+    weathers: str | None = Form(None),
 ):
     try:
         if target_year is None and decade not in DECADE_ANCHOR:
@@ -170,10 +183,18 @@ async def create_job(
         raise HTTPException(422, f'Choose a whole year between {MIN_YEAR} and {MAX_YEAR}.') from None
     if (lat is None) != (lon is None):
         raise HTTPException(422, 'Latitude and longitude must be supplied together.')
+    use_weather = settings.weather_enabled if weather_enabled is None else bool(weather_enabled)
+    weather_ids = None
+    if use_weather:
+        try:
+            weather_ids = parse_weather_ids(weathers)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from None
     if len(_tasks) >= 4:
         raise HTTPException(429, 'Another job is already processing. Please try again shortly.')
     if settings.provider != 'demo' and not {
         'gemini': settings.gemini_api_key, 'grok': settings.grok_api_key, 'fal': settings.fal_key,
+        'qwen': settings.k2_api_key, 'openai': settings.openai_api_key,
     }.get(settings.provider):
         raise HTTPException(503, 'Set an image service API key in the server .env and restart, or use a replay example.')
     raw = await read_upload(image)
@@ -190,7 +211,10 @@ async def create_job(
     input_path.write_bytes(raw)
     source = {'path': f'in/{input_path.name}', 'w': w, 'h': h,
               'is_360': abs(w / h - 2.0) < 0.1 if is_360 is None else is_360}
-    manifest = initial_manifest(job_id, source, decade, location, heading, target_year=year)
+    manifest = initial_manifest(
+        job_id, source, decade, location, heading, target_year=year,
+        weather_enabled=use_weather, weather_ids=weather_ids,
+    )
     if w / h < 2:
         manifest['warnings'] = ['This image looks narrow. Your phone panorama mode will give a better result.']
     create_manifest(job_id, manifest)
@@ -228,10 +252,78 @@ async def result(job_id: str):
     return output_file(job_id, 'result.jpg')
 
 
-@app.get('/out/{job_id}/{filename}')
+class ExplainRequest(BaseModel):
+    hotspot_id: str = Field(min_length=2, max_length=4, pattern=r'^h[0-9]{1,2}$')
+
+
+_explains: dict[str, asyncio.Task] = {}
+
+
+@app.post('/jobs/{job_id}/explain')
+async def explain_region(job_id: str, body: ExplainRequest):
+    manifest = get_manifest(job_id)
+    if manifest.get('status') not in ('done', 'done_partial'):
+        raise HTTPException(409, 'Wait for the reconstruction to finish first.')
+    items = (manifest.get('hotspots') or {}).get('items') or []
+    hotspot = next((item for item in items if item.get('id') == body.hotspot_id), None)
+    if hotspot is None:
+        raise HTTPException(404, 'That highlighted region was not found.')
+    path = job_dir(job_id) / 'result.jpg'
+    if not path.is_file():
+        raise HTTPException(404, 'The reconstructed image is not available yet.')
+    if len(_explains) >= 6:
+        raise HTTPException(429, 'Too many explanations are running. Please try again shortly.')
+    key = f'{job_id}:{body.hotspot_id}'
+    if key in _explains:
+        raise HTTPException(429, 'That region is already being explained.')
+
+    async def run():
+        try:
+            image = await asyncio.to_thread(path.read_bytes)
+            return await explain_hotspot(
+                image, hotspot,
+                year=manifest_year(manifest),
+                place=manifest.get('place'),
+                historical_context=(manifest.get('constraints') or {}).get('historical_context'),
+                scene=manifest.get('scene'),
+            )
+        finally:
+            _explains.pop(key, None)
+
+    task = asyncio.create_task(run())
+    _explains[key] = task
+    try:
+        return await task
+    except Exception:
+        raise HTTPException(502, 'The explanation service did not respond. Please try again.') from None
+
+
+@app.post('/jobs/{job_id}/hotspots')
+async def refresh_hotspots(job_id: str):
+    """Return dots immediately; refine with VLM in the background."""
+    from .pipeline import _ensure_instant_hotspots, _schedule_hotspot_refine
+
+    manifest = get_manifest(job_id)
+    if manifest.get('status') not in ('done', 'done_partial'):
+        raise HTTPException(409, 'Wait for the reconstruction to finish first.')
+    path = job_dir(job_id) / 'result.jpg'
+    if not path.is_file():
+        raise HTTPException(404, 'The reconstructed image is not available yet.')
+    hotspots = _ensure_instant_hotspots(job_id, manifest.get('scene'))
+    _schedule_hotspot_refine(job_id, job_dir(job_id), manifest.get('provider') or settings.provider)
+    return hotspots
+
+
+@app.get('/out/{job_id}/{filename:path}')
 async def generated_asset(job_id: str, filename: str):
     allowed = {'band.jpg', 'band_ext.jpg', 'anchor.jpg', 'result.jpg'}
     allowed |= {f't{i}{suffix}.jpg' for i in range(8) for suffix in ('', '_raw')}
+    for weather_id in DEFAULT_WEATHER_IDS:
+        prefix = weather_subdir(weather_id)
+        allowed |= {
+            f'{prefix}/anchor.jpg', f'{prefix}/result.jpg',
+            *{f'{prefix}/t{i}{suffix}.jpg' for i in range(8) for suffix in ('', '_raw')},
+        }
     if filename not in allowed:
         raise HTTPException(404, 'File not found')
     return output_file(job_id, filename)
@@ -269,6 +361,9 @@ async def replays():
             if m.get('mode') == 'replay' and m.get('status') in ('done', 'done_partial') and not m.get('baseline_of'):
                 entry = {k: m.get(k) for k in ('job_id', 'place', 'decade', 'anchor_year', 'metrics', 'provider', 'demo', 'title', 'source')}
                 entry['target_year'] = manifest_year(m)
+                coords = coords_for_place(m.get('place'))
+                if coords:
+                    entry['lat'], entry['lon'] = coords
                 result.append(entry)
     return {'replays': result}
 
@@ -286,10 +381,12 @@ async def resolve(coords: Coordinates):
 @app.get('/health')
 async def health():
     configured = settings.provider == 'demo' or bool({
-        'gemini': settings.gemini_api_key, 'grok': settings.grok_api_key, 'fal': settings.fal_key,
+        'gemini': settings.gemini_api_key, 'grok': settings.grok_api_key,
+        'fal': settings.fal_key, 'qwen': settings.k2_api_key, 'openai': settings.openai_api_key,
     }.get(settings.provider))
     return {'status': 'ok', 'provider': settings.provider, 'configured': configured, 'version': '0.1.0',
-            'min_year': MIN_YEAR, 'max_year': MAX_YEAR, 'default_year': DEFAULT_YEAR}
+            'min_year': MIN_YEAR, 'max_year': MAX_YEAR, 'default_year': DEFAULT_YEAR,
+            'weather_enabled': settings.weather_enabled, 'weather_ids': list(DEFAULT_WEATHER_IDS)}
 
 
 app.mount('/', StaticFiles(directory=ROOT / 'web', html=True), name='web')

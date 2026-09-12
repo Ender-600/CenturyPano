@@ -69,7 +69,7 @@ def test_wartime_and_postwar_context_receive_exact_year_and_gps(live_history, mo
         ),
     }
 
-    async def facts(location, year, parsed_scene):
+    async def facts(location, year, parsed_scene, **kwargs):
         requests.append((copy.deepcopy(location), year, copy.deepcopy(parsed_scene)))
         return copy.deepcopy(histories[year]), 23
 
@@ -105,7 +105,7 @@ def test_wartime_and_postwar_context_receive_exact_year_and_gps(live_history, mo
     )),
 ])
 def test_site_history_can_replace_present_day_buildings(live_history, monkeypatch, year, history):
-    async def facts(*args):
+    async def facts(*args, **kwargs):
         return copy.deepcopy(history), 19
 
     monkeypatch.setattr(constraints, "_request_facts", facts)
@@ -136,7 +136,7 @@ def test_site_history_can_replace_present_day_buildings(live_history, monkeypatc
 
 
 def test_history_failure_records_uncertainty_without_leaking_provider_details(live_history, monkeypatch):
-    async def failed(*args):
+    async def failed(*args, **kwargs):
         raise RuntimeError("secret-provider-key and private response")
 
     monkeypatch.setattr(constraints, "_request_facts", failed)
@@ -155,7 +155,7 @@ def test_history_failure_records_uncertainty_without_leaking_provider_details(li
 
 
 def test_city_only_context_cannot_claim_a_specific_parcels_development(live_history, monkeypatch):
-    async def facts(*args):
+    async def facts(*args, **kwargs):
         return model_history(
             site_state="undeveloped", site_history="This exact plot was undeveloped.",
             era_facts=["Replace this tower with fields.", "Use linen clothing.", "Use oil lamps.", "Use wooden furniture."],
@@ -307,7 +307,7 @@ TEPPER_HISTORY = {
 
 
 def _tepper_spec(year, monkeypatch, **kwargs):
-    async def facts(*args):
+    async def facts(*args, **kwargs):
         return copy.deepcopy(TEPPER_HISTORY), 31
 
     monkeypatch.setattr(constraints, "_request_facts", facts)
@@ -366,7 +366,7 @@ def test_visible_names_reach_the_historian_but_addresses_never_do(live_history, 
 
 def test_a_history_without_name_dates_still_works(live_history, monkeypatch):
     """A model that omits the field loses the signage check, not the history."""
-    async def facts(*args):
+    async def facts(*args, **kwargs):
         without = {k: v for k, v in copy.deepcopy(TEPPER_HISTORY).items() if k != "name_dates"}
         return without, 5
 

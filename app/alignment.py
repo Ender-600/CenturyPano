@@ -1,16 +1,10 @@
 """Pixel alignment between an original tile and its generated counterpart.
 
-Image editors drift: even with a "keep the composition" instruction the output
-can come back shifted by a few pixels. Across a panorama that drift shows up
-twice — as a mismatch under the before/after slider, and as a structural seam
-between neighbouring tiles that each drifted differently. Both are corrected
-here with a deterministic, translation-only registration on edge maps, and
-both are measured so the manifest can report how aligned the result really is.
-
-Rotation and scale drift are deliberately not corrected: they are rare with
-img2img at moderate strength, and a wrong warp is worse than no warp. When the
-estimated shift is implausibly large the tile is left untouched and the
-measurement records that structure changed rather than merely moved.
+Image editors drift and locally reshape thin structures (railings, wires, kerbs).
+A translation-only fix removes global drift; a clamped dense optical-flow warp then
+pulls the generation onto the original edge field so neighbouring tiles that share
+the same original geometry agree on those lines. Measurements are kept so the
+manifest can report how aligned the result really is.
 """
 from __future__ import annotations
 
@@ -21,11 +15,15 @@ from PIL import Image
 from scipy.ndimage import shift as nd_shift
 from skimage.feature import canny
 from skimage.filters import gaussian, sobel
-from skimage.registration import phase_cross_correlation
+from skimage.registration import optical_flow_tvl1, phase_cross_correlation
+from skimage.transform import rescale, resize, warp
 
-MAX_SHIFT_PX = 48          # beyond this the model changed structure; do not warp
+MAX_SHIFT_PX = 48          # beyond this the model changed structure; do not translate
 MIN_SHIFT_PX = 0.75        # below this a warp only adds resampling blur
 EDGE_SIGMA = 1.6
+FLOW_SCALE = 0.5           # compute flow at half resolution, then upsample
+FLOW_MAX_PX = 20           # clamp per-pixel warp so appearance is not destroyed
+FLOW_MIN_IMPROVE = 0.015   # require a real edge-agreement gain before keeping flow
 
 
 @dataclass(frozen=True)
@@ -35,11 +33,12 @@ class Alignment:
     score_before: float
     score_after: float
     applied: bool
+    flow_applied: bool = False
 
     def to_dict(self) -> dict:
         return {"dx": round(self.dx, 2), "dy": round(self.dy, 2),
                 "score_before": round(self.score_before, 4), "score_after": round(self.score_after, 4),
-                "applied": self.applied}
+                "applied": self.applied, "flow_applied": self.flow_applied}
 
 
 # Rec. 709 luma, as scikit-image uses. Written out rather than called as a
@@ -80,14 +79,70 @@ def edge_agreement(a: Image.Image | np.ndarray, b: Image.Image | np.ndarray) -> 
     return float(np.clip((ea * eb).sum() / denominator, -1.0, 1.0))
 
 
+def _profile_shift(reference: np.ndarray, moving: np.ndarray, max_shift: int = MAX_SHIFT_PX) -> float:
+    """1D cross-correlation peak: shift to apply to `moving` so it matches `reference`."""
+    if reference.size < 8 or moving.size != reference.size:
+        return 0.0
+    ref = reference.astype(np.float64)
+    mov = moving.astype(np.float64)
+    ref = ref - ref.mean()
+    mov = mov - mov.mean()
+    ref_norm = float(np.dot(ref, ref))
+    mov_norm = float(np.dot(mov, mov))
+    if ref_norm < 1e-9 or mov_norm < 1e-9:
+        return 0.0
+    limit = max(1, min(int(max_shift), reference.size // 4))
+    best_shift = 0
+    best_score = -1.0
+    for delta in range(-limit, limit + 1):
+        shifted = np.roll(mov, delta)
+        score = float(np.dot(ref, shifted) / np.sqrt(ref_norm * mov_norm))
+        if score > best_score:
+            best_score = score
+            best_shift = delta
+    return float(best_shift) if best_score >= 0.35 else 0.0
+
+
 def estimate_shift(original: Image.Image | np.ndarray, generated: Image.Image | np.ndarray) -> tuple[float, float]:
-    """Return (dx, dy) that moves `generated` onto `original`, sub-pixel."""
-    ref = canny(_gray(original), sigma=EDGE_SIGMA).astype(np.float32)
-    mov = canny(_gray(generated), sigma=EDGE_SIGMA).astype(np.float32)
-    if ref.sum() < 50 or mov.sum() < 50:
+    """Return (dx, dy) that moves `generated` onto `original`, sub-pixel.
+
+    Dense edge-map phase correlation handles general drift. A separate 1D pass on
+    row / column edge energy recovers height and object offsets that 2D correlation
+    often misses when strong vertical structure dominates the peak.
+    """
+    ref_edge = edge_map(original)
+    mov_edge = edge_map(generated)
+    if float(ref_edge.sum()) < 1.0 or float(mov_edge.sum()) < 1.0:
         return 0.0, 0.0
-    shift, _error, _phase = phase_cross_correlation(ref, mov, upsample_factor=4, normalization=None)
-    dy, dx = float(shift[0]), float(shift[1])
+    dx = dy = 0.0
+    try:
+        shift, _error, _phase = phase_cross_correlation(
+            ref_edge, mov_edge, upsample_factor=4, normalization=None,
+        )
+        dy, dx = float(shift[0]), float(shift[1])
+    except Exception:
+        dx = dy = 0.0
+    # Sparse Canny backup when the dense field is too flat after palette rewrite.
+    if abs(dx) < MIN_SHIFT_PX and abs(dy) < MIN_SHIFT_PX:
+        ref = canny(_gray(original), sigma=EDGE_SIGMA).astype(np.float32)
+        mov = canny(_gray(generated), sigma=EDGE_SIGMA).astype(np.float32)
+        if ref.sum() >= 50 and mov.sum() >= 50:
+            try:
+                shift, _error, _phase = phase_cross_correlation(
+                    ref, mov, upsample_factor=4, normalization=None,
+                )
+                dy, dx = float(shift[0]), float(shift[1])
+            except Exception:
+                pass
+    dy_row = _profile_shift(ref_edge.mean(axis=1), mov_edge.mean(axis=1))
+    dx_col = _profile_shift(ref_edge.mean(axis=0), mov_edge.mean(axis=0))
+    # Prefer the 1D height lock when it disagrees with a weak / horizontal-dominated 2D peak.
+    if abs(dy_row) >= MIN_SHIFT_PX and (abs(dy_row) > abs(dy) + 1.0 or abs(dy) < MIN_SHIFT_PX):
+        dy = dy_row
+    if abs(dx_col) >= MIN_SHIFT_PX and (abs(dx_col) > abs(dx) + 1.0 or abs(dx) < MIN_SHIFT_PX):
+        dx = dx_col
+    if abs(dx) > MAX_SHIFT_PX or abs(dy) > MAX_SHIFT_PX:
+        return 0.0, 0.0
     return dx, dy
 
 
@@ -99,16 +154,117 @@ def apply_shift(image: Image.Image, dx: float, dy: float) -> Image.Image:
     return Image.fromarray(np.round(np.clip(moved, 0, 255)).astype(np.uint8))
 
 
+def _clamp_flow(v: np.ndarray, u: np.ndarray, max_flow: float) -> tuple[np.ndarray, np.ndarray]:
+    magnitude = np.sqrt(v * v + u * u)
+    too_far = magnitude > max_flow
+    if not np.any(too_far):
+        return v, u
+    scale = max_flow / np.maximum(magnitude, 1e-6)
+    return np.where(too_far, v * scale, v), np.where(too_far, u * scale, u)
+
+
+def warp_to_reference(
+    reference: Image.Image,
+    moving: Image.Image,
+    *,
+    max_flow: float = FLOW_MAX_PX,
+    scale: float = FLOW_SCALE,
+) -> Image.Image:
+    """Dense-register `moving` onto `reference` with clamped optical flow.
+
+    Thin structures (railings, cables) rarely share one global translation. Flow
+    bends the generation onto the reference edge field so every tile of one
+    panorama lands in the same geometry and neighbouring strips can fuse cleanly.
+    """
+    ref_rgb = np.asarray(reference.convert("RGB"), dtype=np.float32) / 255.0
+    mov_rgb = np.asarray(moving.convert("RGB"), dtype=np.float32) / 255.0
+    if mov_rgb.shape != ref_rgb.shape:
+        mov_rgb = np.asarray(
+            moving.convert("RGB").resize(reference.size, Image.Resampling.LANCZOS),
+            dtype=np.float32,
+        ) / 255.0
+    ref_gray = _gray(ref_rgb)
+    mov_gray = _gray(mov_rgb)
+    # Prefer edge energy so thin rails / wires dominate the flow field over flat walls.
+    ref_edge = edge_map(ref_gray)
+    mov_edge = edge_map(mov_gray)
+    ref_small = rescale(ref_edge, scale, anti_aliasing=True)
+    mov_small = rescale(mov_edge, scale, anti_aliasing=True)
+    try:
+        v_small, u_small = optical_flow_tvl1(
+            ref_small, mov_small, attachment=5.0, tightness=0.2, n_warp=5, n_iter=60,
+        )
+    except Exception:
+        return moving.convert("RGB")
+    height, width = ref_gray.shape
+    v = resize(v_small, (height, width), anti_aliasing=True, preserve_range=True) / scale
+    u = resize(u_small, (height, width), anti_aliasing=True, preserve_range=True) / scale
+    v, u = _clamp_flow(v.astype(np.float32), u.astype(np.float32), max_flow)
+    rows, cols = np.meshgrid(np.arange(height), np.arange(width), indexing="ij")
+    warped = np.empty_like(mov_rgb)
+    coords = np.array([rows + v, cols + u])
+    for channel in range(3):
+        warped[..., channel] = warp(mov_rgb[..., channel], coords, mode="edge")
+    return Image.fromarray(np.round(np.clip(warped * 255.0, 0, 255)).astype(np.uint8))
+
+
+def preserve_structure(
+    original: Image.Image,
+    generated: Image.Image,
+    *,
+    sigma: float = 10.0,
+    appearance: float = 1.0,
+    mix: float = 0.35,
+    edge_band: int = 0,
+) -> Image.Image:
+    """Harmonise overlap lighting without stacking a second silhouette."""
+    from scipy.ndimage import gaussian_filter
+
+    source = np.asarray(original.convert("RGB"), dtype=np.float32)
+    edited = np.asarray(generated.convert("RGB"), dtype=np.float32)
+    if source.shape != edited.shape:
+        edited = np.asarray(
+            generated.convert("RGB").resize(original.size, Image.Resampling.LANCZOS),
+            dtype=np.float32,
+        )
+    amount = float(np.clip(appearance, 0.0, 1.0))
+    lf_mix = float(np.clip(mix, 0.0, 1.0))
+    low_source = np.stack([gaussian_filter(source[..., channel], sigma=sigma) for channel in range(3)], axis=-1)
+    low_edited = np.stack([gaussian_filter(edited[..., channel], sigma=sigma) for channel in range(3)], axis=-1)
+    high_edited = edited - low_edited
+    low_mixed = low_edited * (1.0 - lf_mix * amount) + low_source * (lf_mix * amount)
+    combined = high_edited + low_mixed
+
+    width = combined.shape[1]
+    band = max(0, min(int(edge_band), width // 2))
+    if band <= 0 or lf_mix <= 0:
+        return generated.convert("RGB") if isinstance(generated, Image.Image) else Image.fromarray(
+            np.round(np.clip(edited, 0, 255)).astype(np.uint8)
+        )
+    ramp = np.zeros(width, dtype=np.float32)
+    ramp[:band] = np.linspace(1.0, 0.0, band, endpoint=False)
+    ramp[-band:] = np.linspace(0.0, 1.0, band, endpoint=True)
+    result = edited * (1.0 - ramp[:, None, None]) + combined * ramp[:, None, None]
+    return Image.fromarray(np.round(np.clip(result, 0, 255)).astype(np.uint8))
+
+
 def align_tile(original: Image.Image, generated: Image.Image) -> tuple[Image.Image, Alignment]:
-    """Register `generated` onto `original`; return the (possibly) shifted tile and the record."""
+    """Register `generated` onto `original` with translation, then clamped dense flow."""
     before = edge_agreement(original, generated)
     dx, dy = estimate_shift(original, generated)
     magnitude = float(np.hypot(dx, dy))
-    if magnitude < MIN_SHIFT_PX or magnitude > MAX_SHIFT_PX:
-        return generated, Alignment(dx, dy, before, before, applied=False)
-    shifted = apply_shift(generated, dx, dy)
-    after = edge_agreement(original, shifted)
-    if after <= before:
-        # The registration did not help; keep the untouched generation.
-        return generated, Alignment(dx, dy, before, before, applied=False)
-    return shifted, Alignment(dx, dy, before, after, applied=True)
+    candidate = generated
+    translated = False
+    if MIN_SHIFT_PX <= magnitude <= MAX_SHIFT_PX:
+        shifted = apply_shift(generated, dx, dy)
+        if edge_agreement(original, shifted) > before:
+            candidate = shifted
+            translated = True
+    mid = edge_agreement(original, candidate)
+    refined = warp_to_reference(original, candidate)
+    after = edge_agreement(original, refined)
+    if after >= mid + FLOW_MIN_IMPROVE:
+        return refined, Alignment(dx, dy, before, after, applied=True, flow_applied=True)
+    if translated:
+        return candidate, Alignment(dx, dy, before, mid, applied=True, flow_applied=False)
+    return generated, Alignment(dx, dy, before, before, applied=False, flow_applied=False)

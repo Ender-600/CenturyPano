@@ -45,10 +45,16 @@ def test_gemini_sends_two_images_and_normalizes_output():
     # The reference instruction shares a request with the structure policy, so it
     # must never license what that policy forbids.
     instruction = parts[2]["text"]
-    assert "image 2" in instruction and "reference" in instruction
+    assert "image 2" in instruction.lower() and "reference" in instruction.lower()
     for licence in ("remove or replace buildings", "recompose", "move the viewpoint"):
-        assert f"but {licence}" not in instruction
+        assert f"but {licence}" not in instruction.lower()
     assert "do not add, remove, resize or replace any building" in instruction.lower()
+    # With the pixel lock off, the reference instruction follows the composition
+    # lock instead: masses stay put, historically justified change is allowed.
+    asyncio.run(editor.edit(source, "One frozen prompt", reference=reference, negative="LED signs",
+                            structure_lock=False))
+    open_instruction = json.loads(requests[-1].content)["contents"][0]["parts"][2]["text"].lower()
+    assert "major masses" in open_instruction and "historically justified" in open_instruction
     assert requests[0].headers["x-goog-api-key"] == "test-only-key"
     assert "test-only-key" not in str(requests[0].url)
     assert Image.open(io.BytesIO(output)).size == (96, 48)
@@ -289,7 +295,7 @@ def test_constraints_are_frozen_and_include_explicit_location_and_year(monkeypat
 def test_successful_llm_facts_freeze_and_token_usage(monkeypatch):
     configured(monkeypatch, provider="gemini", k2_api_key="test-key", k2_base_url="https://api.ifm.ai/v1", k2_model="IFM/K2-Horizon-375B-A23B")
 
-    async def facts(*args):
+    async def facts(*args, **kwargs):
         return historical_facts(), 234
 
     monkeypatch.setattr(constraints, "_request_facts", facts)

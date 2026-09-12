@@ -20,7 +20,7 @@ def job_dir(job_id: str) -> Path:
 
 def read_manifest(job_id: str) -> dict:
     with _locks[job_id]:
-        return json.loads((job_dir(job_id) / 'manifest.json').read_text())
+        return json.loads((job_dir(job_id) / 'manifest.json').read_text(encoding='utf-8'))
 
 
 def update_manifest(job_id: str, fn: Callable[[dict], object]) -> dict:
@@ -28,10 +28,13 @@ def update_manifest(job_id: str, fn: Callable[[dict], object]) -> dict:
         directory = job_dir(job_id)
         directory.mkdir(parents=True, exist_ok=True)
         path = directory / 'manifest.json'
-        current = json.loads(path.read_text()) if path.exists() else {}
+        current = json.loads(path.read_text(encoding='utf-8')) if path.exists() else {}
         fn(current)
         temporary = directory / 'manifest.json.tmp'
-        temporary.write_text(json.dumps(current, ensure_ascii=False, allow_nan=False, indent=2))
+        temporary.write_text(
+            json.dumps(current, ensure_ascii=False, allow_nan=False, indent=2),
+            encoding='utf-8',
+        )
         temporary.replace(path)
         return current
 
