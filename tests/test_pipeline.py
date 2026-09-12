@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -7,7 +8,7 @@ import pytest
 from PIL import Image
 
 from app import constraints, pipeline, scene
-from app.config import settings
+from app.config import H, TILE, settings
 from app.geometry import image_bytes, open_rgb
 from app.manifest import update_manifest
 
@@ -240,3 +241,81 @@ def test_live_history_failure_is_not_cached_and_old_fallback_cache_does_not_bloc
     assert third["status"] == "done" and third["mode"] == "replay"
     assert third["cache_source_job_id"] == "history-recovered"
     assert history_calls == [1945, 1945] and len(FakePool.instances) == 2
+
+
+class SplittingPool(FakePool):
+    """Returns a tile that is two pictures the first time each tile is asked for.
+
+    A retry is what the pipeline is supposed to do, so the second answer for the
+    same tile is whole. Counting per tile rather than per call keeps the test
+    honest when tiles run concurrently.
+    """
+
+    asked: dict = {}
+    fix_on_retry = True
+
+    async def edit(self, image, prompt, **kwargs):
+        result = await FakePool.edit(self, image, prompt, **kwargs)
+        source = open_rgb(result.image)
+        # Key on the whole request, not a prefix: JPEG headers are identical across
+        # tiles, so a prefix would make every tile share one counter. The anchor is
+        # not a tile and is left alone.
+        key = hashlib.sha256(image).hexdigest()
+        seen = SplittingPool.asked.get(key, 0)
+        SplittingPool.asked[key] = seen + 1
+        if source.size == (TILE, H) and (seen == 0 or not SplittingPool.fix_on_retry):
+            array = np.asarray(source, dtype=np.float32)
+            column = source.width // 2
+            # A different picture in the right half: dark, flat, and unrelated to
+            # anything the original had at that column.
+            array[:, column:] = np.array([18, 20, 24], dtype=np.float32)
+            array[::7, column:] = np.array([70, 74, 80], dtype=np.float32)
+            source = Image.fromarray(np.clip(array, 0, 255).astype(np.uint8))
+        return SimpleNamespace(image=image_bytes(source), provider="demo", attempts=1)
+
+
+@pytest.fixture
+def splitting(workspace, monkeypatch):
+    SplittingPool.instances = []
+    SplittingPool.asked = {}
+    SplittingPool.fail_tile = False
+    SplittingPool.fail_anchor = False
+    SplittingPool.fix_on_retry = True
+    monkeypatch.setattr(pipeline, "EditorPool", SplittingPool)
+    return workspace
+
+
+def test_a_tile_that_comes_back_as_two_pictures_is_regenerated(splitting):
+    create_job("split", target_year=1925)
+    manifest = asyncio.run(pipeline.run_job("split", use_cache=False))
+    assert manifest["status"] == "done"
+    record = manifest["metrics"]["integrity"]
+    assert record["tested"] == len(manifest["tiles"])
+    assert record["splits_detected"] == record["retries"] == len(manifest["tiles"])
+    assert record["unresolved"] == 0, "the retry returned one picture, so nothing is left broken"
+    for tile in manifest["tiles"]:
+        assert tile["integrity"]["retried"] and not tile["integrity"]["split"]
+        assert tile["integrity"]["first"]["step_de"] > tile["integrity"]["step_de"]
+
+
+def test_an_unfixable_split_is_reported_rather_than_hidden(splitting):
+    # The model returns the same broken answer twice. One more image call is all
+    # we are willing to spend, so the panorama finishes with the break in it and
+    # says so -- silently shipping it as a clean result would be the real failure.
+    SplittingPool.fix_on_retry = False
+    create_job("stubborn", target_year=1925)
+    manifest = asyncio.run(pipeline.run_job("stubborn", use_cache=False))
+    assert manifest["status"] == "done"
+    record = manifest["metrics"]["integrity"]
+    assert record["unresolved"] == len(manifest["tiles"]) == record["retries"]
+    assert record["worst_step_de"] > 18.0
+    assert all(tile["integrity"]["kept"].startswith("first attempt") for tile in manifest["tiles"])
+
+
+def test_one_retry_is_the_whole_budget(splitting):
+    SplittingPool.fix_on_retry = False
+    create_job("budget", target_year=1925)
+    manifest = asyncio.run(pipeline.run_job("budget", use_cache=False))
+    tiles = len(manifest["tiles"])
+    # One anchor call, then exactly two per tile: never an unbounded retry loop.
+    assert manifest["metrics"]["image_calls"] == 1 + 2 * tiles

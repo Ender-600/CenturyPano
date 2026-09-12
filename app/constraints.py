@@ -18,7 +18,7 @@ from app.temporal import decade_for_year, resolve_year
 
 
 # Also versions the pre-model request cache: old decade-only images cannot replay.
-PROMPT_VERSION = "location-year-history-v5-en"
+PROMPT_VERSION = "location-year-history-v6-en"   # v6: the negative prompt forbids a split picture
 SITE_STATES = {"undeveloped", "agricultural", "built", "mixed", "unknown"}
 GEOMETRY_POLICY = (
     "Keep the camera position, viewing direction, projection and complete input frame fixed. "
@@ -420,7 +420,8 @@ async def build_constraints(place: dict, decade: str | int, scene: dict, *, prov
                               structure_lock=structure_lock, is_outdoor=is_outdoor,
                               lean=settings.lean_locked_prompt, anachronistic_names=anachronistic),
         negative=f"objects or buildings introduced locally after {year}-07-01, unsupported landmark substitutions, "
-                 "anachronistic technology, invented battle damage, any text label, date stamp, watermark, caption or border"
+                 "anachronistic technology, invented battle damage, any text label, date stamp, watermark, caption or border, "
+                 "split screen, diptych, collage, two different views side by side, a hard vertical divider across the picture"
                  + ("".join(f", the words \"{item['name']}\" anywhere in the image" for item in anachronistic)
                     if anachronistic else "")
                  + (", moved or resized buildings, added or removed structures, changed skyline, changed road "

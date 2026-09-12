@@ -18,8 +18,9 @@ from .consistency import anchor_crop, color_match, compensate_exposure, squeeze_
 from .constraints import PROMPT_VERSION, build_constraints, generic_decade_prompt
 from .editors.base import EditorPool, ProviderError
 from .geometry import image_bytes, open_rgb, preprocess, viewport_priority
+from .integrity import split_check, worse
 from .manifest import job_dir, read_manifest, update_manifest
-from .metrics import alignment_metrics, seam_metrics, timing_metrics
+from .metrics import alignment_metrics, integrity_metrics, seam_metrics, timing_metrics
 from .scene import parse_scene
 from .stitch import seam_plan, stitch
 from .temporal import decade_for_year, manifest_year
@@ -133,6 +134,8 @@ async def run_job(job_id: str, *, concurrency: int | None = None, use_cache: boo
                         "seam_err": {"raw": None, "after_color_match": None, "originals_floor": None,
                                      "after_compensation": None, "at_seam_cut": None, "carved_seams": None},
                         "compensation": None, "seams": [],
+                        "integrity": {"tested": 0, "splits_detected": 0, "retries": 0,
+                                      "unresolved": 0, "worst_step_de": None},
                         "serial_baseline_s": None, "speedup": None, "image_calls": 0,
                         "alignment": {"score_before": None, "score_after": None, "mean_shift_px": None, "applied": 0},
                         "tokens": {"vlm": 0, "llm": 0}}
@@ -248,11 +251,36 @@ async def run_job(job_id: str, *, concurrency: int | None = None, use_cache: boo
                     reference = await asyncio.to_thread(anchor_crop, anchor, geometry["x"][index],
                         geometry["W"], wrap=geometry["wrap"]) if anchor is not None else None
                     reference_bytes = await asyncio.to_thread(image_bytes, reference) if reference is not None else None
-                    result = await pool.edit(await asyncio.to_thread(image_bytes, originals[index]), prompt,
-                                             reference=reference_bytes, seed=seed, strength=strength, negative=negative)
-                    raw = await asyncio.to_thread(open_rgb, result.image)
-                    if raw.size != (TILE, H):
-                        raw = raw.resize((TILE, H), Image.Resampling.LANCZOS)
+                    original_bytes_tile = await asyncio.to_thread(image_bytes, originals[index])
+
+                    async def attempt():
+                        outcome = await pool.edit(original_bytes_tile, prompt, reference=reference_bytes,
+                                                  seed=seed, strength=strength, negative=negative)
+                        image = await asyncio.to_thread(open_rgb, outcome.image)
+                        if image.size != (TILE, H):
+                            image = image.resize((TILE, H), Image.Resampling.LANCZOS)
+                        return outcome, image, await asyncio.to_thread(split_check, originals[index], image)
+
+                    result, raw, integrity = await attempt()
+                    # Occasionally the editor returns two pictures butted together rather
+                    # than one repainted view. No amount of stitching can help -- the break
+                    # is inside a single tile -- so the only fix is to ask again, and to keep
+                    # whichever of the two answers is actually one picture.
+                    if integrity.get("split"):
+                        try:
+                            retried = await attempt()
+                        except Exception:
+                            retried = None      # A failed retry must not lose a usable tile.
+                        if retried is not None:
+                            integrity = {**integrity, "retried": True, "first": {
+                                key: integrity[key] for key in ("column", "step_de", "broken_rows")
+                                if key in integrity}}
+                            if worse(integrity, retried[2]):
+                                result, raw = retried[0], retried[1]
+                                integrity = {**retried[2], "retried": True,
+                                             "first": integrity["first"]}
+                            else:
+                                integrity["kept"] = "first attempt; the retry was no better"
                     await asyncio.to_thread(_save_image, directory / f"t{index}_raw.jpg", raw)
                     # Pixel alignment: register the generation back onto the original tile so the
                     # before/after slider compares the same pixels and neighbouring tiles agree.
@@ -264,7 +292,7 @@ async def run_job(job_id: str, *, concurrency: int | None = None, use_cache: boo
                         now = time.time()
                         m["tiles"][index].update(status="done", provider=result.provider, attempts=result.attempts,
                             ms=round((time.perf_counter() - tile_start) * 1000), done_at=now, error=None,
-                            align=alignment.to_dict())
+                            align=alignment.to_dict(), integrity=integrity)
                         if m["metrics"]["first_tile_at"] is None:
                             m["metrics"]["first_tile_at"] = now
                             m["metrics"]["first_view_s"] = round(now - started, 4)
@@ -327,6 +355,7 @@ async def run_job(job_id: str, *, concurrency: int | None = None, use_cache: boo
         def complete(m):
             m["metrics"].update(timing_metrics(m["metrics"], finished), seam_err=seams, image_calls=pool.image_calls,
                                 alignment=alignment_metrics(m["tiles"]),
+                                integrity=integrity_metrics(m["tiles"]),
                                 compensation=compensation, seams=seam_details)
             m["result"]["status"] = "done"
             m["status"] = "done_partial" if any(t["status"] == "error" for t in m["tiles"]) else "done"

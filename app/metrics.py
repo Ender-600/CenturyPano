@@ -45,6 +45,21 @@ def seam_metrics(raw: list[Image.Image], matched: list[Image.Image],
     return result
 
 
+def integrity_metrics(tiles: list[dict]) -> dict:
+    """How many tiles came back as two pictures, and how many were recovered.
+
+    `unresolved` is the honest column: a retry is one more sample from the same
+    model and it does not always land, so a panorama can finish with a break still
+    in it. That is worth reporting rather than hiding behind the retry count.
+    """
+    records = [tile.get("integrity") for tile in tiles if isinstance(tile.get("integrity"), dict)]
+    detected = [r for r in records if r.get("split") or r.get("retried")]
+    return {"tested": len(records), "splits_detected": len(detected),
+            "retries": sum(1 for r in records if r.get("retried")),
+            "unresolved": sum(1 for r in records if r.get("split")),
+            "worst_step_de": round(max((float(r.get("step_de") or 0.0) for r in records), default=0.0), 3)}
+
+
 def timing_metrics(metrics: dict, finished_at: float) -> dict:
     start = metrics["started_at"]
     total = round(max(0.0, finished_at - start), 4)
