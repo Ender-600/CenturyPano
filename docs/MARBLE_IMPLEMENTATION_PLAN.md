@@ -90,6 +90,33 @@ Google 输入可能减少用户扫描的负担、提高起始覆盖，也可能�
 
 预留 `google_grounded` 来源接口，但未确认准入和上述许可前保持不可用。Google 托管的用户贡献照片不自动等于我们的自有素材；自有照片优先读取自己保留的原文件。无需等待 Google 准入即可开展主线实验。
 
+### 3.3 GPS 自动取景与几何引导生成（2026-09-12 补充）
+
+产品入口按用户补充的目标设计为“读取手机 GPS、朝向与目标年份，自动查找当前位置及沿路邻近区域的可用数据”。GPS 决定检索区域；手机连续六自由度运动仍由 AR 跟踪提供，地理定位可结合 Geospatial/VPS，不能用 GPS 更新频率和精度代替相机姿态。[Geospatial API](https://developers.google.com/ar/develop/geospatial)
+
+必须区分 Google 两种数据：Street View Tiles 是街道全景图像及 metadata，支持按一组位置批量查询 pano ID；Photorealistic 3D Tiles 是带纹理的三维网格。普通 Street View 官方接口没有因此交付对应完整街道网格。获取前后数百米的多个拍摄点，在有覆盖时可以形成检索计划，但不等于已获得一张连续、可编辑的街道三维模型。[Street View](https://developers.google.com/maps/documentation/tile/streetview)、[Tiles 数据类型](https://developers.google.com/maps/documentation/tile/overview)
+
+World Labs 的公开世界生成接口目前接受文字、图片、多图和视频，没有直接接受 Google tileset、GLB 或任意三维网格的参数。不过已确认另有 `POST /marble/v1/pano:depth_to_rgb`：完整 2:1 球形深度图加文字描述，异步生成彩色全景；随后可把该全景作为图片输入生成世界。因此新增以下候选路线，输入几何须来自允许外部生成处理的数据源：
+
+```mermaid
+flowchart LR
+    GPS[GPS 与朝向] --> Source[检索获得授权的局部三维数据]
+    Source --> Depth[在已知相机位置渲染球形深度图]
+    Depth --> RGB[World Labs 深度图加历史描述生成彩色全景]
+    RGB --> Check[检查年代外观与空间布局]
+    Check --> World[Marble 生成三维世界]
+    World --> Align[校准尺度与源相机位置]
+    Align --> AR[手机 AR 持续渲染]
+```
+
+深度输入可为浮点 EXR，或按接口指定编码及深度范围提供 PNG；普通透视深度图不能直接当完整球形深度图。此接口返回全景，后续世界生成是另一个任务和计费阶段；每段分别持久化 operation。官方文档仅描述对几何的引导，不保证生成世界严格保留原网格、真实尺度、地理坐标或被遮挡结构。[Depth to RGB](https://docs.worldlabs.ai/api/reference/pano/depth_to_rgb)、[OpenAPI](https://docs.worldlabs.ai/api/reference/openapi)
+
+这条路线可能让首次历史外观生成也使用 World Labs，但历史化效果尚未实测；之前普通图加年份的单次结果没有通过历史化检查。先验证一个局部区域，再验证两个有重叠的区域：检查共同建筑、坐标尺度、接缝和切换时的跳变。通过后才研究沿路扩展与预生成。不能把来自相隔数百米的多个全景当成同一拍摄中心，或把各自生成的世界直接摆在一起就称为连续街道。
+
+若历史资料显示旧建筑体量、道路走向与现代不同，需要先调整几何约束；固定现代深度只改变外观，不能表达已经拆除的建筑或改变的街道布局。历史背景提示词中区分有来源的事实与推测补全。
+
+Google 标准 Map Tiles 的显示访问权限仍不足以覆盖上述外部生成用途；“先渲染成深度图”不会自动扩大使用许可。Google 来源需确认专门授权或 Imagery Grounding 的准入及结果转交范围。当前仅更新实现计划，没有抓取 Google 数据，也没有追加付费生成。新的深度路线费用与总耗时不包含在之前 18 次实验估算中，不能沿用单次 Draft 29.4 秒作为此路线的预计结果。
+
 ## 4. 系统结构
 
 ```mermaid
