@@ -10,6 +10,7 @@ const TERMINAL = new Set(['ready', 'error', 'submission_unknown', 'insufficient_
 const STAGES = {
   queued: '世界任务已排队', rendering_depth: '正在渲染历史几何深度',
   submitting_depth: '正在提交深度全景', generating_depth: '正在生成历史全景',
+  submitting_image_edit: '正在提交历史全景改写', editing_panorama: '正在改写历史全景',
   fetching_pano: '正在保存历史全景', pano_ready: '历史全景已就绪',
   submitting_world: '正在提交三维世界', generating_world: '正在生成 Draft 三维世界',
   fetching_assets: '正在下载并检查世界资产', ready: '世界资产已就绪',
@@ -29,8 +30,10 @@ const STANDARD_REASONS = new Map([
 const state = {
   token: '', config: null, plan: null, job: null, planBusy: false, generateBusy: false,
   restoring: false, resumeBusy: false, submissionUnknown: false, planEpoch: 0, jobEpoch: 0, viewEpoch: 0,
-  pollTimer: null, view: 'historical', viewAbort: null, userViewLocked: false,
+  pollTimer: null, view: 'source', viewAbort: null, userViewLocked: false,
   imageURL: null, engine: null, keys: new Set(), touchMoves: new Set(),
+  locationMode: 'device', locationFix: null, locationEpoch: 0, locationBusy: false, locationError: '',
+  viewingSavedPlan: false, streetViewBusy: false,
 };
 
 function storageGet(key) { try { return sessionStorage.getItem(key); } catch { return null; } }
@@ -155,11 +158,25 @@ function syncUI() {
   const busy = state.planBusy || state.generateBusy || state.restoring || state.resumeBusy || running;
   for (const element of $('plan-form').querySelectorAll('input,select,button')) element.disabled = !!busy;
   $('prepare').disabled = !!busy || !state.token;
-  if ($('snapshot')) $('snapshot').disabled = !!busy || !state.token;
+  if ($('snapshot')) $('snapshot').disabled = !!busy || !state.token || state.locationMode !== 'test';
+  $('lat').readOnly = $('lon').readOnly = state.locationMode === 'device';
+  $('gps').disabled = !!busy || state.locationBusy;
+  $('open-streetview').disabled = !!busy || state.streetViewBusy;
+  $('geometry-test').disabled = !!busy || !state.token || state.locationMode !== 'test';
+  $('test-controls').hidden = state.locationMode !== 'test';
+  $('location-mode').value = state.locationMode;
+  $('location-label').textContent = state.locationMode === 'device' ? '手机当前位置' : '测试点位 · 非当前位置';
+  renderLocationStatus();
   if ($('edits-file')) $('edits-file').disabled = !!busy || !state.token || !state.plan;
   $('generate').disabled = !state.token || !state.plan || !state.config?.configured || !!busy
-    || !!state.job || state.submissionUnknown;
-  $('prepare').textContent = state.planBusy ? '正在获取轮廓与准备几何…' : '准备历史区块 →';
+    || !!state.job || state.submissionUnknown
+    || state.plan?.input_kind === 'streetview_panorama' && state.config?.panorama_editor_configured === false;
+  $('prepare').textContent = state.planBusy ? '正在准备所选位置…' : '准备当前街景 →';
+  const streetview = state.config?.streetview;
+  $('streetview-status').textContent = !state.config ? '正在检查街景服务…'
+    : !streetview?.configured ? '服务器尚未配置 Google 全景获取。可以先在 Google 地图查看当前位置。'
+      : !streetview?.ai_authorized ? 'Google 全景用于生成的授权尚未配置；可先打开官方街景查看。'
+        : '生成流程使用此处的 360° 实景全景，不使用地图粗模型。';
   $('generate').textContent = state.generateBusy ? '正在创建世界任务…'
     : state.job?.stage === 'ready' ? (failedHistoricalReview() ? '生成完成 · 历史外观未通过检查' : '世界已生成')
       : state.job ? '任务已创建，请查看下方状态'
@@ -168,11 +185,15 @@ function syncUI() {
     const view = button.dataset.view;
     button.classList.toggle('active', view === state.view || view === 'depth' && state.view === 'depth_preview');
     button.disabled = !availableView(view);
+    button.hidden = (!state.plan || state.plan.input_kind === 'streetview_panorama') && ['historical', 'modern', 'depth'].includes(view);
   }
 }
 
 function assetFor(view) {
   const assets = Array.isArray(state.job?.assets) ? state.job.assets : [];
+  if (view === 'source' && state.plan?.assets?.['source_panorama.jpg']) {
+    return { filename: 'source_panorama.jpg', url: state.plan.assets['source_panorama.jpg'] };
+  }
   if (view === 'world') return assets.find((asset) => asset.kind === 'spz');
   if (view === 'pano') return assets.find((asset) => asset.kind === 'historical_pano')
     || assets.find((asset) => asset.kind === 'pano');
@@ -185,6 +206,11 @@ function availableView(view) { return !!assetFor(view); }
 function renderPlan(plan) {
   state.plan = plan;
   $('plan-panel').hidden = false;
+  const photograph = plan.input_kind === 'streetview_panorama';
+  $('geometry-stats').hidden = photograph; $('geometry-edits').hidden = photograph;
+  $('generation-description').textContent = photograph
+    ? '先将实景全景改写为目标年代，再由 World Labs 生成 Draft 三维世界。图片处理与世界生成分别计费；相同区块任务会复用已有结果。'
+    : '旧几何实验：World Labs 将依次从粗模型深度生成历史全景与 Draft 三维世界。此路线不使用 Google 街景照片。';
   const modern = Array.isArray(plan.modern_buildings) ? plan.modern_buildings : [];
   const historical = Array.isArray(plan.historical_buildings) ? plan.historical_buildings : [];
   const changes = Array.isArray(plan.changes) ? plan.changes : [];
@@ -197,14 +223,16 @@ function renderPlan(plan) {
     const badge = document.createElement('span'); badge.className = `badge${change.action === 'remove' ? ' remove' : ''}`;
     badge.textContent = change.origin === 'user_edit'
       ? ({ add: '新增 · 未核实', remove: '移除 · 未核实', replace: '替换 · 未核实', keep: '保留 · 未核实' }[change.action] || '用户编辑 · 未核实')
-      : ({ remove: '移除现代体块', keep: '年代有依据', unknown: '年代未核实' }[change.action] || '未核实');
+      : ({ remove: '移除现代体块', remove_if_visible: '若入镜则移除', predates_target: '建成年代早于目标年份', keep: '年代有依据', unknown: '年代未核实' }[change.action] || '未核实');
     const name = document.createElement('strong');
     name.textContent = text([...modern, ...historical].find((building) => building.id === change.building_id)?.label,
-      text(change.building_id, '建筑'));
+      text(change.name, text(change.building_id, '建筑')));
     const reason = document.createElement('p'); reason.textContent = changeReason(change);
     entry.append(badge, name, reason); $('changes').append(entry);
   }
-  if (!changes.length) $('changes').textContent = '没有可逐项核实的建筑年代变化；保留体块仍需核实。';
+  if (!changes.length) $('changes').textContent = photograph
+    ? '将以真实街景照片为输入；目标年代的建筑外观与结构变化仍需结合史料核实。'
+    : '没有可逐项核实的建筑年代变化；保留体块仍需核实。';
   $('sources').replaceChildren();
   for (const source of Array.isArray(plan.sources) ? plan.sources : []) {
     const href = safeSourceURL(source.url);
@@ -217,35 +245,139 @@ function renderPlan(plan) {
   for (const uncertainty of Array.isArray(plan.uncertainties) ? plan.uncertainties : []) {
     const item = document.createElement('li'); item.textContent = text(uncertainty); $('uncertainties').append(item);
   }
-  if (Number.isInteger(plan.target_year)) $('year').value = String(plan.target_year);
-  if (Number.isFinite(plan.location?.lat)) $('lat').value = String(plan.location.lat);
-  if (Number.isFinite(plan.location?.lon)) $('lon').value = String(plan.location.lon);
-  if (Number.isFinite(plan.location?.radius_m)) $('radius').value = String(plan.location.radius_m);
+  const planLocation = plan.location || {};
+  const coordinates = Number.isFinite(planLocation.lat) && Number.isFinite(planLocation.lon)
+    ? `${planLocation.lat.toFixed(6)}, ${planLocation.lon.toFixed(6)}` : '坐标未记录';
+  const provenance = planLocation.location_source || plan.location_source;
+  $('plan-location').textContent = `${state.viewingSavedPlan ? '正在查看已保存的结果' : '当前预览区块'}：${coordinates} · ${plan.target_year} 年。`
+    + (provenance === 'test' ? ' 此结果使用测试点位。' : '')
+    + (state.viewingSavedPlan ? ' 与上方正在定位的手机位置独立；准备新区块会重新定位。' : '');
+  if (photograph && Number.isFinite(plan.source_panorama?.metadata?.distance_m)) {
+    $('plan-location').textContent += ` 街景拍摄点距输入位置约 ${Math.round(plan.source_panorama.metadata.distance_m)} 米。`;
+  }
   saveResume(); syncUI();
 }
 
-async function preparePlan(source = 'osm') {
+function renderLocationStatus() {
+  const mode = state.locationMode;
+  $('location-status').classList.toggle('error', !!state.locationError);
+  if (mode === 'test') {
+    $('location-status').textContent = '测试模式已开启：只使用指定点位，不会自动改为手机位置。';
+    $('location-meta').textContent = '切换回“手机当前位置”后将重新定位。';
+    return;
+  }
+  if (state.locationBusy) $('location-status').textContent = '正在请求手机当前位置，请允许位置权限…';
+  else if (state.locationError) $('location-status').textContent = state.locationError;
+  else if (state.locationFix) $('location-status').textContent = '已获取设备位置。准备新区块时会再次定位。';
+  else $('location-status').textContent = '尚未获取手机位置。请允许位置权限并重新定位。';
+  const fix = state.locationFix;
+  $('location-meta').textContent = fix
+    ? `设备报告精度约 ${Math.round(fix.accuracy_m)} 米 · ${Math.max(0, Math.round((Date.now() - fix.timestamp_ms) / 1000))} 秒前定位（${new Date(fix.timestamp_ms).toLocaleTimeString()}）。`
+    : '没有位置时不会使用 CMU 或上次保存的坐标。';
+}
+
+function locationFailure(error) {
+  if (error?.code === 1) return '位置权限被拒绝。请在浏览器设置中允许定位，再点“重新定位”。';
+  if (error?.code === 2) return '设备暂时无法确定位置，请到信号较好的地方重新定位。';
+  if (error?.code === 3) return '定位超时，请重试；不会改用旧坐标或测试点位。';
+  return error?.message || '无法获取手机位置，请重新定位。';
+}
+
+async function refreshLocation() {
+  const epoch = ++state.locationEpoch;
+  state.locationFix = null; state.locationError = ''; state.locationBusy = true;
+  if (state.locationMode === 'device') { $('lat').value = ''; $('lon').value = ''; }
+  syncUI();
+  try {
+    if (!window.isSecureContext) throw new Error('手机定位需要 HTTPS。请用安全演示链接打开页面。');
+    if (!navigator.geolocation) throw new Error('此浏览器不支持定位，请使用支持定位的 Safari 或 Chrome。');
+    const position = await new Promise((resolve, reject) => navigator.geolocation.getCurrentPosition(resolve, reject,
+      { enableHighAccuracy: true, maximumAge: 0, timeout: 15000 }));
+    if (epoch !== state.locationEpoch || state.locationMode !== 'device') throw new Error('位置模式已切换，本次定位已忽略。');
+    const fix = { lat: position.coords?.latitude, lon: position.coords?.longitude,
+      accuracy_m: position.coords?.accuracy, timestamp_ms: position.timestamp };
+    const age = Date.now() - fix.timestamp_ms;
+    if (![fix.lat, fix.lon, fix.accuracy_m, fix.timestamp_ms].every(Number.isFinite)
+        || Math.abs(fix.lat) > 85 || Math.abs(fix.lon) > 180 || fix.accuracy_m < 0
+        || age > 60000 || age < -10000) throw new Error('设备返回的位置无效或已过期，请重新定位。');
+    state.locationFix = fix;
+    $('lat').value = fix.lat.toFixed(6); $('lon').value = fix.lon.toFixed(6);
+    return fix;
+  } catch (error) {
+    if (epoch === state.locationEpoch && state.locationMode === 'device') state.locationError = locationFailure(error);
+    throw new Error(locationFailure(error));
+  } finally {
+    if (epoch === state.locationEpoch) { state.locationBusy = false; syncUI(); }
+  }
+}
+
+async function setLocationMode(mode) {
+  if (mode !== 'device' && mode !== 'test') return;
+  state.locationMode = mode; ++state.locationEpoch;
+  state.locationFix = null; state.locationError = ''; state.locationBusy = false;
+  $('lat').value = ''; $('lon').value = '';
+  syncUI();
+  if (mode === 'device') { try { await refreshLocation(); } catch { /* Visible location status provides retry. */ } }
+}
+
+async function resolveLocation() {
+  if (state.locationMode === 'device') {
+    const fix = await refreshLocation();
+    return { lat: fix.lat, lon: fix.lon, location_source: 'device',
+      location_accuracy_m: fix.accuracy_m, location_timestamp_ms: fix.timestamp_ms };
+  }
+  if (!$('lat').value.trim() || !$('lon').value.trim()) throw new Error('请在测试模式中填写经纬度，或明确选择 CMU 测试快照。');
+  const lat = Number($('lat').value), lon = Number($('lon').value);
+  if (!Number.isFinite(lat) || !Number.isFinite(lon) || Math.abs(lat) > 85 || Math.abs(lon) > 180) {
+    throw new Error('测试经纬度无效。');
+  }
+  return { lat, lon, location_source: 'test' };
+}
+
+async function openStreetView() {
+  if (state.streetViewBusy) return;
+  // Reserve the new tab in the click event before asynchronous geolocation.
+  const target = window.open('about:blank', '_blank');
+  if (!target) { message('浏览器阻止了新页面，请允许此网站打开 Google 街景。', true); return; }
+  target.opener = null;
+  state.streetViewBusy = true; syncUI();
+  try {
+    const coordinates = await resolveLocation();
+    const url = new URL('https://www.google.com/maps/@');
+    url.search = new URLSearchParams({ api: '1', map_action: 'pano', viewpoint: `${coordinates.lat},${coordinates.lon}` }).toString();
+    target.location.replace(url.href);
+  } catch (error) { target.close(); message(error.message, true); }
+  finally { state.streetViewBusy = false; syncUI(); }
+}
+
+async function preparePlan(source = 'google_streetview') {
   if (state.planBusy || state.generateBusy || state.restoring
       || state.job && !TERMINAL.has(state.job.stage || state.job.status)) return;
-  if (source === 'cmu_snapshot') {
-    $('lat').value = String(state.config?.default_location?.lat ?? 40.4433);
-    $('lon').value = String(state.config?.default_location?.lon ?? -79.9436);
+  if (source !== 'google_streetview' && state.locationMode !== 'test') {
+    message('地图粗模型与 CMU 快照仅用于明确开启的测试模式。', true); return;
   }
-  if (!$('plan-form').reportValidity()) return;
-  const payload = { lat: Number($('lat').value), lon: Number($('lon').value), year: Number($('year').value),
-    radius_m: Number($('radius').value), heading_deg: 0, source };
-  if (![payload.lat, payload.lon, payload.year, payload.radius_m].every(Number.isFinite)) return;
+  if (source === 'cmu_snapshot') {
+    $('lat').value = String(state.config?.test_location?.lat ?? 40.4433);
+    $('lon').value = String(state.config?.test_location?.lon ?? -79.9436);
+  }
   const epoch = ++state.planEpoch;
   state.planBusy = true; syncUI();
-  message(source === 'cmu_snapshot' ? '正在读取明确选择的 CMU 地图快照并生成粗模型…'
-    : '正在查询当前地图轮廓并核对历史来源，可能需要片刻…');
   try {
+    const coordinates = await resolveLocation();
+    if (epoch !== state.planEpoch) return;
+    if (!$('plan-form').reportValidity()) return;
+    const payload = { ...coordinates, year: Number($('year').value),
+      radius_m: Number($('radius').value), heading_deg: 0, source };
+    if (![payload.year, payload.radius_m].every(Number.isFinite)) return;
+    message(source === 'google_streetview' ? '正在获取所选位置的 Google 360° 实景全景…'
+      : source === 'cmu_snapshot' ? '正在读取明确选择的 CMU 地图快照并生成粗模型…'
+      : '正在查询所选位置的地图轮廓并核对历史来源，可能需要片刻…');
     const plan = await api('/world-plans', { method: 'POST', body: payload });
     if (epoch !== state.planEpoch) return;
     clearTimeout(state.pollTimer); ++state.jobEpoch;
-    state.job = null; state.submissionUnknown = false; state.userViewLocked = false; setJobURL();
+    state.job = null; state.submissionUnknown = false; state.userViewLocked = false; state.viewingSavedPlan = false; setJobURL();
     $('job-panel').hidden = true; renderPlan(plan);
-    await showView('historical', { automatic: true });
+    await showView(plan.input_kind === 'streetview_panorama' ? 'source' : 'historical', { automatic: true });
     revealMobilePreview();
   } catch (error) {
     if (epoch === state.planEpoch) message(error.message, true);
@@ -262,7 +394,9 @@ function jobDetails(job) {
   if (stage === 'error') return `任务停止${/^[a-z0-9_]{1,80}$/.test(job.error_code || '') ? `（${job.error_code}）` : ''}。现有资产保留。`;
   if (stage === 'paused') return '任务已保存。这里只继续读取状态，恢复由生成服务处理。';
   if (stage === 'ready') return '真实生成资产已保存；历史准确性、空间对齐与手机追踪仍未核实。';
-  return '可先查看几何深度或已完成的全景。刷新页面会读取原任务，不会重新提交生成。';
+  return state.plan?.input_kind === 'streetview_panorama'
+    ? '可先查看输入的真实街景与已完成的历史全景。刷新页面会读取原任务，不会重新提交生成。'
+    : '可先查看几何深度或已完成的全景。刷新页面会读取原任务，不会重新提交生成。';
 }
 
 async function importEdits(file) {
@@ -314,7 +448,10 @@ function applyJob(job) {
     + (Number.isFinite(elapsed) ? ` 从创建到资产就绪 ${elapsed.toFixed(1)} 秒。` : '');
   const costs = job.cost_credits || {};
   const credit = (value) => Number.isFinite(value) ? `${value} credits` : '未返回';
-  $('cost').textContent = `全景：${credit(costs.depth)} · 世界：${credit(costs.world)} · 总计：${credit(costs.total)}`;
+  const photoInput = state.plan?.input_kind === 'streetview_panorama' || !!job.generation_calls?.image_edit;
+  $('cost').textContent = photoInput
+    ? `OpenAI 图片改写另行计费 · World Labs 世界：${credit(costs.world)} · World Labs 总计：${credit(costs.total)}`
+    : `全景：${credit(costs.depth)} · 世界：${credit(costs.world)} · 总计：${credit(costs.total)}`;
   $('job-assets').replaceChildren();
   if (job.can_resume) {
     const resume = document.createElement('button'); resume.type = 'button';
@@ -514,18 +651,21 @@ async function showView(view, { automatic = false } = {}) {
   let pendingObject = null;
   try {
     const url = safeAssetURL(asset.url);
-    if (view === 'depth' || view === 'depth_preview' || view === 'pano') {
+    if (view === 'source' || view === 'depth' || view === 'depth_preview' || view === 'pano') {
       const blob = await api(url, { format: 'blob', signal: controller.signal });
       if (epoch !== state.viewEpoch) return;
       state.imageURL = URL.createObjectURL(blob); $('flat-preview').src = state.imageURL;
       await $('flat-preview').decode();
       if (epoch !== state.viewEpoch) return;
       $('flat-preview').hidden = false;
-      $('flat-preview').alt = view === 'pano' ? '模型生成的历史想象全景，历史准确性未核实'
+      $('flat-preview').alt = view === 'source' ? 'Google Street View 360 度实景全景照片，平面展开预览' : view === 'pano' ? '模型生成的历史想象全景，历史准确性未核实'
         : view === 'depth_preview' ? '历史粗几何的全景诊断预览' : '历史几何的全景径向深度，近白远黑';
-      $('view-caption').textContent = view === 'pano' ? '历史想象全景 · 实际生成结果'
+      $('view-caption').textContent = view === 'source' ? '当前街景 · 360° 实景全景照片（平面展开）' : view === 'pano' ? '历史想象全景 · 实际生成结果'
         : view === 'depth_preview' ? '历史几何全景 · 墙面、屋顶与地面的诊断预览' : '360° 径向深度 · 对数编码 · 近白 / 远黑';
-      $('viewer-note').textContent = view === 'pano'
+      const sourceMetadata = state.plan?.source_panorama?.metadata || {};
+      $('viewer-note').textContent = view === 'source'
+        ? `Google Street View · ${text(sourceMetadata.copyright)} · 拍摄日期：${text(sourceMetadata.date, '未提供')}。这是一张完整全景照片；拍摄时间可能早于现在，平面展开不是三维网格。`
+        : view === 'pano'
         ? '这是平面展示的生成全景。建筑外观及历史细节未核实；不会把全景旋转称为真实空间行走。'
         : '全景由建筑几何射线求交得到，删除体块会改变遮挡。诊断色彩仅区分几何表面，未观察到的历史地物仍未知。';
     } else {
@@ -620,11 +760,14 @@ async function restoreSaved() {
     if (/^[a-f0-9-]{36}$/.test(planId || '')) {
       const plan = await api(`/world-plans/${planId}`);
       if (epoch !== state.planEpoch) return;
-      renderPlan(plan);
+      state.viewingSavedPlan = true; renderPlan(plan);
     }
     state.submissionUnknown = saved.submission_unknown === true && !job;
     if (job) { applyJob(job); schedulePoll(++state.jobEpoch); }
-    if (!assetFor('world') && !assetFor('pano') && availableView('historical')) await showView('historical', { automatic: true });
+    if (!assetFor('world') && !assetFor('pano')) {
+      const preview = availableView('source') ? 'source' : 'historical';
+      if (availableView(preview)) await showView(preview, { automatic: true });
+    }
     if (state.submissionUnknown) message('上次提交响应未确认；请核对服务器任务，页面不会自动重发。', true);
     else if (!availableView(state.view)) message();
   } catch (error) { if (epoch === state.planEpoch) message(error.message, true); }
@@ -632,7 +775,9 @@ async function restoreSaved() {
 }
 
 function bindEvents() {
-  $('plan-form').addEventListener('submit', (event) => { event.preventDefault(); void preparePlan('osm'); });
+  $('plan-form').addEventListener('submit', (event) => { event.preventDefault(); void preparePlan('google_streetview'); });
+  $('geometry-test').addEventListener('click', () => { void preparePlan('osm'); });
+  $('open-streetview').addEventListener('click', openStreetView);
   $('snapshot')?.addEventListener('click', () => { void preparePlan('cmu_snapshot'); });
   $('edits-file')?.addEventListener('change', (event) => { void importEdits(event.target.files?.[0]); });
   $('generate').addEventListener('click', () => { void startGeneration(); });
@@ -644,14 +789,10 @@ function bindEvents() {
     catch (error) { state.token = ''; storageSet(TOKEN_KEY, null); message(error.message, true); syncUI(); }
     finally { $('connect').disabled = false; }
   });
-  $('gps').addEventListener('click', () => {
-    if (!navigator.geolocation) { message('此浏览器无法获取位置，请手动输入经纬度。', true); return; }
-    $('gps').disabled = true; message('等待设备位置许可…');
-    navigator.geolocation.getCurrentPosition((position) => {
-      $('lat').value = position.coords.latitude.toFixed(6); $('lon').value = position.coords.longitude.toFixed(6);
-      message(`位置已填入，设备报告精度约 ${Math.round(position.coords.accuracy)} 米。请准备区块以查看覆盖。`); syncUI();
-    }, () => { message('未获取位置，请允许位置权限或手动填写经纬度。', true); syncUI(); },
-    { enableHighAccuracy: true, timeout: 15000, maximumAge: 30000 });
+  $('location-mode').addEventListener('change', (event) => setLocationMode(event.target.value));
+  $('gps').addEventListener('click', async () => {
+    if (state.locationMode !== 'device') await setLocationMode('device');
+    else { try { await refreshLocation(); } catch { /* Error remains beside the location inputs. */ } }
   });
   for (const button of document.querySelectorAll('[data-view]')) {
     button.addEventListener('click', () => { void showView(button.dataset.view); });
@@ -687,6 +828,7 @@ function bindEvents() {
 
 async function boot() {
   bindEvents(); syncUI();
+  void refreshLocation().catch(() => {});
   const results = await Promise.allSettled([
     api('/world-config', { auth: false }).then((config) => {
       state.config = config;

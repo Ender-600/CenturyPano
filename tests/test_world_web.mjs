@@ -48,13 +48,13 @@ function plan(overrides = {}) {
 
 function app(options = {}) {
   const elements = new Map([...html.matchAll(/id="([^"]+)"/g)].map((match) => [match[1], new Element()]));
-  for (const [id, value] of Object.entries({ lat: 40.4433, lon: -79.9436, year: 1925, radius: 100 })) {
+  for (const [id, value] of Object.entries({ lat: '', lon: '', year: 1925, radius: 100, 'location-mode': 'device' })) {
     elements.get(id).value = String(value);
   }
-  elements.get('plan-form').inputs = ['lat', 'lon', 'year', 'radius', 'gps', 'snapshot', 'prepare'].map((id) => elements.get(id));
-  const tabs = ['historical', 'modern', 'depth', 'pano', 'world'].map((view) => Object.assign(new Element('BUTTON'), { dataset: { view } }));
+  elements.get('plan-form').inputs = ['lat', 'lon', 'year', 'radius', 'gps', 'snapshot', 'prepare', 'location-mode', 'geometry-test', 'open-streetview'].map((id) => elements.get(id));
+  const tabs = ['source', 'historical', 'modern', 'depth', 'pano', 'world'].map((view) => Object.assign(new Element('BUTTON'), { dataset: { view } }));
   const moves = ['forward', 'back', 'left', 'right'].map((move) => Object.assign(new Element('BUTTON'), { dataset: { move } }));
-  const storage = new Map(Object.entries(options.storage || {})), requests = [], timers = new Map(), rewrites = [];
+  const storage = new Map(Object.entries(options.storage || {})), requests = [], timers = new Map(), rewrites = [], gpsOptions = [], popups = [];
   const objects = new Map(), revoked = [];
   const workspace = new Element('SECTION');
   let timerId = 0, objectId = 0, gpsCalls = 0;
@@ -76,11 +76,18 @@ function app(options = {}) {
   const context = vm.createContext({
     THREE, SplatMesh: SplatStub, SparkRenderer: class {},
     GLTFLoader: class { async parseAsync() { return { scene: options.gltf || new THREE.Group() }; } },
-    document, window: { addEventListener() {}, devicePixelRatio: 1, matchMedia: () => ({ matches: !!options.mobile }) },
+    document, window: { addEventListener() {}, open(...args) {
+      const popup = { args, opener: {}, location: { replace(url) { popup.url = url; } }, close() { popup.closed = true; } };
+      popups.push(popup); return options.blockPopups ? null : popup;
+    }, isSecureContext: options.secure !== false, devicePixelRatio: 1, matchMedia: () => ({ matches: !!options.mobile }) },
     location: { hash: '', search: '', pathname: '/world', hostname: 'example.test', ...options.location },
     history: { replaceState(...args) { rewrites.push(args); } },
     sessionStorage: { getItem: (key) => storage.get(key) || null, setItem: (key, value) => storage.set(key, value), removeItem: (key) => storage.delete(key) },
-    navigator: { geolocation: { getCurrentPosition(success) { gpsCalls++; success({ coords: { latitude: 1, longitude: 2, accuracy: 12 } }); } } },
+    navigator: { geolocation: options.noGPS ? undefined : { getCurrentPosition(success, failure, settings) {
+      gpsCalls++; gpsOptions.push(settings);
+      if (options.gps) return options.gps(success, failure, settings, gpsCalls);
+      success({ coords: { latitude: 1, longitude: 2, accuracy: 12 }, timestamp: Date.now() });
+    } } },
     Headers, Blob, URL: ObjectURL, URLSearchParams, AbortController, DOMException, Uint8Array,
     setTimeout(callback, milliseconds) { const id = ++timerId; timers.set(id, { callback, milliseconds }); return id; },
     clearTimeout(id) { timers.delete(id); }, ResizeObserver: class { observe() {} disconnect() {} },
@@ -96,10 +103,10 @@ function app(options = {}) {
       throw new Error('Unexpected fetch');
     },
   });
-  const hooks = '{state,api,safeAssetURL,safeSourceURL,initialiseAccess,boot,bindEvents,preparePlan,renderPlan,startGeneration,pollJob,applyJob,restoreSaved,showView,semanticsTransform,importEdits,resumeJob,changeReason}';
+  const hooks = '{state,api,safeAssetURL,safeSourceURL,initialiseAccess,boot,bindEvents,preparePlan,renderPlan,startGeneration,pollJob,applyJob,restoreSaved,showView,semanticsTransform,importEdits,resumeJob,changeReason,refreshLocation,setLocationMode,resolveLocation,openStreetView}';
   vm.runInContext(source.replace(/^import .*;\n/gm, '').replace('void boot();', `globalThis.hooks = ${hooks};`), context);
   return { ...context.hooks, elements, tabs, moves, requests, timers, storage, rewrites, objects, revoked,
-    gpsCalls: () => gpsCalls, document, SplatStub, workspace };
+    gpsCalls: () => gpsCalls, gpsOptions, popups, document, SplatStub, workspace };
 }
 
 function authorised(view) { view.state.token = TOKEN; view.state.config = { configured: true }; }
@@ -117,14 +124,18 @@ test('remote fragment access is removed from URL and sent only in protected head
   assert.equal(view.gpsCalls(), 0);
 });
 
-test('boot uses loopback session without keys and never requests geolocation automatically', async () => {
+test('boot uses loopback session and requests a fresh device position automatically', async () => {
   const view = app({ location: { hostname: 'localhost' } });
   await view.boot();
   assert.deepEqual(view.requests.map((request) => request.url).sort(), ['/world-config', '/world-session']);
   assert.ok(view.requests.every((request) => !request.headers.has('Authorization')));
-  assert.equal(view.gpsCalls(), 0);
-  await view.elements.get('gps').emit('click');
   assert.equal(view.gpsCalls(), 1);
+  assert.equal(view.elements.get('lat').readOnly, true);
+  assert.equal(view.elements.get('test-controls').hidden, true);
+  await view.elements.get('gps').emit('click');
+  assert.equal(view.gpsCalls(), 2);
+  assert.equal(view.gpsOptions[0].maximumAge, 0);
+  assert.equal(view.gpsOptions[0].enableHighAccuracy, true);
   assert.equal(view.elements.get('lat').value, '1.000000');
 });
 
@@ -142,8 +153,9 @@ test('external asset and source URLs cannot receive a service token', async () =
 
 test('OSM failure exits loading without silently switching to a snapshot', async () => {
   const view = app({ fetch: (url) => url === '/world-plans' ? response({ detail: '地图来源不可用。' }, 422) : undefined });
-  authorised(view);
-  await view.preparePlan();
+  authorised(view); await view.setLocationMode('test');
+  view.elements.get('lat').value = '40.44'; view.elements.get('lon').value = '-79.94';
+  await view.preparePlan('osm');
   assert.equal(view.requests.length, 1);
   assert.equal(JSON.parse(view.requests[0].body).source, 'osm');
   assert.equal(view.state.planBusy, false);
@@ -153,10 +165,10 @@ test('OSM failure exits loading without silently switching to a snapshot', async
 
 test('explicit CMU snapshot retains chosen year and never starts paid generation', async () => {
   const view = app({ fetch: (url) => url === '/world-plans' ? response(plan({ target_year: 1946 })) : undefined });
-  authorised(view); view.elements.get('lat').value = '1'; view.elements.get('year').value = '1946';
+  authorised(view); await view.setLocationMode('test'); view.elements.get('lat').value = '1'; view.elements.get('year').value = '1946';
   await view.preparePlan('cmu_snapshot');
   const payload = JSON.parse(view.requests[0].body);
-  assert.deepEqual(payload, { lat: 40.4433, lon: -79.9436, year: 1946, radius_m: 100, heading_deg: 0, source: 'cmu_snapshot' });
+  assert.deepEqual(payload, { lat: 40.4433, lon: -79.9436, year: 1946, radius_m: 100, heading_deg: 0, source: 'cmu_snapshot', location_source: 'test' });
   assert.equal(view.requests.length, 1);
   assert.equal(view.state.plan.plan_id, PLAN);
 });
@@ -334,7 +346,7 @@ test('mobile prepare reveals the preview but refresh restoration does not force 
   const view = app({ mobile: true, fetch: (url) => {
     if (url === '/world-plans' || url === `/world-plans/${PLAN}`) return response(plan());
   } });
-  authorised(view); await view.preparePlan('cmu_snapshot');
+  authorised(view); await view.setLocationMode('test'); await view.preparePlan('cmu_snapshot');
   assert.equal(view.workspace.scrolls.length, 1);
   await view.restoreSaved();
   assert.equal(view.workspace.scrolls.length, 1);
@@ -386,4 +398,169 @@ test('resuming is an explicit POST for the saved job and then GET polling', asyn
   assert.equal(view.requests[0].method, 'POST');
   assert.equal(view.state.resumeBusy, false);
   assert.equal([...view.timers.values()][0].milliseconds, 5000);
+});
+
+
+test('preparing the live plan reacquires position instead of reusing the displayed fix', async () => {
+  const timestamp = Date.now();
+  const view = app({ gps: (success, _failure, _settings, call) => success({
+    coords: { latitude: 40 + call / 10, longitude: -79 - call / 10, accuracy: 7 }, timestamp }),
+    fetch: (url) => url === '/world-plans' ? response(plan()) : undefined });
+  authorised(view);
+  await view.refreshLocation();
+  assert.equal(view.elements.get('lat').value, '40.100000');
+  await view.preparePlan();
+  assert.equal(view.gpsCalls(), 2);
+  const payload = JSON.parse(view.requests[0].body);
+  assert.equal(payload.lat, 40.2);
+  assert.equal(payload.lon, -79.2);
+  assert.equal(payload.location_source, 'device');
+  assert.equal(payload.location_timestamp_ms, timestamp);
+  assert.equal(payload.location_accuracy_m, 7);
+});
+
+test('GPS denial blocks live preparation and does not fall back to old or CMU coordinates', async () => {
+  const view = app({ gps: (_success, failure) => failure({ code: 1 }) });
+  authorised(view);
+  view.elements.get('lat').value = '40.4433'; view.elements.get('lon').value = '-79.9436';
+  await view.preparePlan();
+  assert.equal(view.requests.length, 0);
+  assert.equal(view.elements.get('lat').value, '');
+  assert.equal(view.elements.get('lon').value, '');
+  assert.equal(view.state.locationFix, null);
+  assert.match(view.elements.get('location-status').textContent, /权限被拒绝/);
+  assert.equal(view.state.planBusy, false);
+  await view.preparePlan('cmu_snapshot');
+  assert.equal(view.requests.length, 0);
+  assert.equal(view.state.locationMode, 'device');
+});
+
+test('a fresh request rejects stale coordinates even when the browser supplies them', async () => {
+  const view = app({ gps: (success) => success({
+    coords: { latitude: 40.4433, longitude: -79.9436, accuracy: 12 }, timestamp: Date.now() - 120000 }) });
+  authorised(view); await view.preparePlan();
+  assert.equal(view.requests.length, 0);
+  assert.match(view.elements.get('location-status').textContent, /过期/);
+  assert.equal(view.state.locationFix, null);
+});
+
+test('insecure context and unsupported GPS block live requests with actionable location errors', async () => {
+  for (const options of [{ secure: false }, { noGPS: true }]) {
+    const view = app(options); authorised(view); await view.preparePlan();
+    assert.equal(view.requests.length, 0);
+    assert.equal(view.gpsCalls(), 0);
+    assert.match(view.elements.get('location-status').textContent, /HTTPS|不支持定位/);
+  }
+});
+
+test('explicit manual test mode sends test provenance and never calls GPS', async () => {
+  const view = app({ fetch: (url) => url === '/world-plans' ? response(plan()) : undefined });
+  authorised(view); await view.setLocationMode('test');
+  view.elements.get('lat').value = '40.442'; view.elements.get('lon').value = '-79.946';
+  await view.preparePlan();
+  assert.equal(view.gpsCalls(), 0);
+  assert.equal(view.elements.get('lat').readOnly, false);
+  assert.equal(view.elements.get('test-controls').hidden, false);
+  assert.match(view.elements.get('location-status').textContent, /测试模式/);
+  const payload = JSON.parse(view.requests[0].body);
+  assert.equal(payload.location_source, 'test');
+  assert.equal(payload.lat, 40.442);
+  assert.equal(payload.location_timestamp_ms, undefined);
+  await view.setLocationMode('device');
+  assert.equal(view.gpsCalls(), 1);
+  assert.equal(view.elements.get('lat').value, '1.000000');
+  assert.equal(view.elements.get('lat').readOnly, true);
+});
+
+test('replaying an old world leaves current GPS and year inputs independent', async () => {
+  const view = app({ location: { search: `?world=${JOB}` }, fetch: (url) => {
+    if (url === `/world-jobs/${JOB}`) return response({ job_id: JOB, plan_id: PLAN, stage: 'ready', assets: [] });
+    if (url === `/world-plans/${PLAN}`) return response(plan({ target_year: 1900,
+      location: { lat: 40.4433, lon: -79.9436, radius_m: 50, location_source: 'test' } }));
+  } });
+  authorised(view); await view.refreshLocation();
+  view.elements.get('year').value = '1925';
+  await view.restoreSaved();
+  assert.equal(view.elements.get('lat').value, '1.000000');
+  assert.equal(view.elements.get('lon').value, '2.000000');
+  assert.equal(view.elements.get('year').value, '1925');
+  assert.equal(view.elements.get('radius').value, '100');
+  assert.equal(view.state.locationMode, 'device');
+  assert.match(view.elements.get('plan-location').textContent, /已保存.*40.443300.*1900 年.*测试点位.*独立/);
+  assert.ok(view.requests.every((request) => request.method === 'GET'));
+});
+
+test('switching to test mode discards a late pending GPS success', async () => {
+  let deliver;
+  const view = app({ gps: (success) => { deliver = success; } });
+  const pending = view.refreshLocation();
+  await view.setLocationMode('test');
+  view.elements.get('lat').value = '40'; view.elements.get('lon').value = '-79';
+  deliver({ coords: { latitude: 10, longitude: 20, accuracy: 2 }, timestamp: Date.now() });
+  await assert.rejects(pending, /模式已切换/);
+  assert.equal(view.state.locationMode, 'test');
+  assert.equal(view.elements.get('lat').value, '40');
+  assert.equal(view.state.locationFix, null);
+  assert.equal(view.state.locationBusy, false);
+});
+
+
+test('live preparation requests Google street-view photographs and does not fall back to OSM', async () => {
+  const view = app({ fetch: (url) => url === '/world-plans' ? response({ detail: '街景服务未配置。' }, 503) : undefined });
+  authorised(view); await view.preparePlan();
+  assert.equal(view.requests.length, 1);
+  const payload = JSON.parse(view.requests[0].body);
+  assert.equal(payload.source, 'google_streetview');
+  assert.equal(payload.location_source, 'device');
+  assert.match(view.elements.get('message').textContent, /未配置/);
+  await view.preparePlan('osm');
+  assert.equal(view.requests.length, 1);
+});
+
+test('source-photo plan shows the genuine private panorama and hides geometry tools', async () => {
+  const view = app({ fetch: (url) => {
+    if (url === '/world-plans') return response(plan({ input_kind: 'streetview_panorama',
+      source_panorama: { metadata: { date: '2024-06', copyright: '© Google' } },
+      assets: { 'source_panorama.jpg': `/world-plans/${PLAN}/assets/source_panorama.jpg` } }));
+    if (url.endsWith('/source_panorama.jpg')) return response('source photograph');
+  } });
+  authorised(view); await view.preparePlan();
+  assert.equal(view.state.view, 'source');
+  assert.equal(view.elements.get('geometry-stats').hidden, true);
+  assert.equal(view.elements.get('geometry-edits').hidden, true);
+  assert.ok(view.tabs.filter((tab) => ['historical', 'modern', 'depth'].includes(tab.dataset.view)).every((tab) => tab.hidden));
+  assert.match(view.elements.get('view-caption').textContent, /360° 实景全景照片/);
+  assert.match(view.elements.get('viewer-note').textContent, /2024-06.*照片/);
+  assert.equal(await [...view.objects.values()][0].text(), 'source photograph');
+  assert.equal(view.requests.filter((request) => request.method === 'POST').length, 1);
+});
+
+test('official Street View link uses a fresh fix and never includes a key or service token', async () => {
+  const view = app(); authorised(view);
+  await view.openStreetView();
+  assert.equal(view.gpsCalls(), 1);
+  assert.equal(view.requests.length, 0);
+  assert.equal(view.popups.length, 1);
+  assert.equal(view.popups[0].opener, null);
+  const url = new URL(view.popups[0].url);
+  assert.equal(url.origin, 'https://www.google.com');
+  assert.equal(url.searchParams.get('viewpoint'), '1,2');
+  assert.equal(url.searchParams.get('map_action'), 'pano');
+  assert.equal(url.searchParams.has('key'), false);
+  assert.equal(url.href.includes(TOKEN), false);
+});
+
+test('denied location closes the pending official Street View tab without a test-location fallback', async () => {
+  const view = app({ gps: (_success, failure) => failure({ code: 1 }) });
+  await view.openStreetView();
+  assert.equal(view.popups[0].closed, true);
+  assert.equal(view.popups[0].url, undefined);
+  assert.match(view.elements.get('location-status').textContent, /权限被拒绝/);
+});
+
+test('photo generation separates image-edit charges from World Labs credits', () => {
+  const view = app(); authorised(view); view.state.plan = plan({ input_kind: 'streetview_panorama' });
+  view.applyJob({ job_id: JOB, stage: 'ready', generation_calls: { image_edit: 1, world: 1 },
+    cost_credits: { depth: null, world: 150, total: 150 }, assets: [] });
+  assert.match(view.elements.get('cost').textContent, /OpenAI 图片改写另行计费.*世界：150 credits.*总计：150 credits/);
 });

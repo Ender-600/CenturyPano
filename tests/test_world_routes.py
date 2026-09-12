@@ -15,7 +15,7 @@ BUILDING = {'id': 'way/1', 'label': 'Later building',
 PLAN = {'target_year': 1925, 'modern_buildings': [BUILDING], 'historical_buildings': [],
         'camera_position': [0, 1.6, 0], 'heading_deg': 0, 'sources': [], 'uncertainties': [],
         'changes': [{'building_id': 'way/1', 'action': 'remove', 'reason': 'Later building', 'evidence_ids': []}]}
-PAYLOAD = {'lat': 40.4433, 'lon': -79.9436, 'year': 1925, 'source': 'cmu_snapshot'}
+PAYLOAD = {'lat': 40.4433, 'lon': -79.9436, 'year': 1925, 'source': 'cmu_snapshot', 'location_source': 'test'}
 AUTH = {'Authorization': 'Bearer test-world-access'}
 
 

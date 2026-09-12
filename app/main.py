@@ -80,6 +80,8 @@ async def security_headers(request, call_next):
 
 @app.exception_handler(HTTPException)
 async def plain_error(request, exc):
+    if request.url.path.startswith('/world-'):
+        return JSONResponse({'detail': str(exc.detail)}, status_code=exc.status_code, headers=exc.headers)
     return PlainTextResponse(str(exc.detail), status_code=exc.status_code, headers=exc.headers)
 
 

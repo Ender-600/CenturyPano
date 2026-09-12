@@ -483,3 +483,313 @@ async def test_updated_content_hash_reuses_legacy_job_without_recharging(tmp_pat
     assert reused["cost_credits"] == ready["cost_credits"]
     assert client.calls.count("depth_post") == client.calls.count("world_post") == 1
     await engine.aclose()
+
+
+# The RGB path uses a real 2:1 JPEG fixture; all provider calls stay offline.
+def source_jpeg():
+    output = io.BytesIO()
+    Image.new('RGB', (128, 64), (75, 95, 115)).save(output, 'JPEG')
+    return output.getvalue()
+
+
+def photo_plan(**overrides):
+    import hashlib
+    return {'plan_id': '11111111-2222-3333-4444-555555555555', 'target_year': 1925,
+            'input_kind': 'streetview_panorama', 'generation_profile': 'streetview-rgb-history-v1',
+            'source': 'google_streetview', 'historical_buildings': [], 'modern_buildings': [],
+            'camera_position': [0, 0, 0], 'history_context': {'period_summary': 'Campus in 1925'},
+            'panorama_editor': {'model': 'gpt-image-test', 'quality': 'medium'},
+            'source_panorama': {'filename': 'source_panorama.jpg',
+                                'sha256': hashlib.sha256(source_jpeg()).hexdigest(),
+                                'metadata': {'pano_id': 'example-pano', 'lat': 40.443, 'lon': -79.944,
+                                             'heading': 42, 'date': '2024-06'}},
+            'location': {'lat': 40.4431, 'lon': -79.9442, 'location_source': 'device',
+                         'accuracy_m': 8, 'timestamp_ms': 1000}, **overrides}
+
+
+class FakeEditor:
+    api_key = 'offline-editor-key'
+    model = 'gpt-image-test'
+
+    def __init__(self, root, *, error=None, wait=False):
+        self.root = root
+        self.calls = []
+        self.error = error
+        self.wait = wait
+        self.entered = asyncio.Event()
+
+    async def edit(self, data, prompt):
+        record = json.loads(next(self.root.glob('*/record.json')).read_text())
+        assert record['stage'] == 'submitting_image_edit'
+        assert record['generation_calls']['image_edit'] == 1
+        assert record['image_edit_attempted'] is True
+        assert data == source_jpeg()
+        assert '1925' in prompt and '40.443000' in prompt
+        self.calls.append('image_post')
+        if self.error:
+            raise self.error
+        if self.wait:
+            self.entered.set()
+            await asyncio.Future()
+        return {'image_bytes': png(), 'model': self.model, 'usage': {
+            'input_tokens': 100, 'output_tokens': 250, 'total_tokens': 350,
+            'malicious': 'do not publish', 'nested_key': 'sk-not-real',
+        }}
+
+
+def photo_manager(root, client, editor, **overrides):
+    return manager(root, client, panorama_editor_factory=lambda: editor,
+                   source_loader=lambda _plan: source_jpeg(), **overrides)
+
+
+@pytest.mark.asyncio
+async def test_photo_pipeline_skips_geometry_and_depth_and_preserves_source_sha(tmp_path):
+    client = FakeClient(tmp_path)
+    editor = FakeEditor(tmp_path)
+    engine = photo_manager(tmp_path, client, editor)
+    def forbidden_renderer(**_arguments):
+        raise AssertionError('The photo pipeline must never render coarse geometry')
+    engine._renderer = forbidden_renderer
+    initial = await engine.start(photo_plan())
+    result = await finish(engine, initial['id'])
+    assert result['stage'] == 'ready', result
+    assert editor.calls == ['image_post']
+    assert 'depth_post' not in client.calls
+    assert client.calls.count('world_post') == 1
+    assert result['generation_calls'] == {'image_edit': 1, 'world': 1}
+    assert result['cost_credits'] == {'depth': None, 'world': 150, 'known_total': 150, 'total': 150}
+    assert result['image_edit_usage'] == {'input_tokens': 100, 'output_tokens': 250, 'total_tokens': 350}
+    assert result['image_edit_billing']['included_in_worldlabs_credits'] is False
+    assert result['image_edit_billing']['amount'] is None
+    assert result['input_kind'] == 'streetview_panorama'
+    assert result['validation']['geometry'] == 'generated_from_rgb_unverified'
+    assert {item['kind'] for item in result['assets']} == {'source_pano', 'historical_pano', 'spz'}
+    assert engine.artifact_path(initial['id'], 'source_panorama.jpg').read_bytes() == source_jpeg()
+    public = json.dumps(result)
+    assert 'sk-not-real' not in public and SECRET not in public and str(tmp_path) not in public
+    assert engine.artifact_path(initial['id'], 'image_edit_receipt.json') is None
+    assert engine.artifact_path(initial['id'], 'plan.json') is None
+    await engine.aclose()
+
+
+@pytest.mark.asyncio
+async def test_photo_same_capture_reuses_world_across_new_gps_fixes_and_ui_ids(tmp_path):
+    client = FakeClient(tmp_path)
+    editor = FakeEditor(tmp_path)
+    engine = photo_manager(tmp_path, client, editor)
+    original = photo_plan()
+    initial = await engine.start(original)
+    await finish(engine, initial['id'])
+    moved = photo_plan(plan_id='aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', created_at=99999,
+                       location={'lat': 40.444, 'lon': -79.943, 'location_source': 'test',
+                                 'accuracy_m': 100, 'timestamp_ms': 9999})
+    moved['source_panorama']['metadata']['distance_m'] = 60
+    again = await engine.start(moved)
+    assert again['id'] == initial['id']
+    assert again['plan_id'] == original['plan_id']
+    assert editor.calls == ['image_post']
+    assert client.calls.count('world_post') == 1
+    await engine.aclose()
+
+
+def test_photo_hash_changes_for_source_image_capture_year_history_and_editor_profile():
+    from app.worlds.jobs import _generation_hash
+    original = photo_plan()
+    for change in ('sha256', 'lat', 'year', 'history', 'model', 'quality'):
+        changed = deepcopy(original)
+        if change == 'sha256':
+            changed['source_panorama']['sha256'] = '0' * 64
+        elif change == 'lat':
+            changed['source_panorama']['metadata']['lat'] += .001
+        elif change == 'year':
+            changed['target_year'] = 1946
+        elif change == 'history':
+            changed['history_context']['period_summary'] = 'Corrected archival evidence'
+        else:
+            changed['panorama_editor'][change] = 'high' if change == 'quality' else 'another-model'
+        assert _generation_hash(changed) != _generation_hash(original)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('kind', ['missing_key', 'low_balance'])
+async def test_photo_preflight_blocks_edit_before_paid_marker(tmp_path, kind):
+    client = FakeClient(tmp_path, balance=149 if kind == 'low_balance' else 1000)
+    editor = FakeEditor(tmp_path)
+    if kind == 'missing_key':
+        editor.api_key = ''
+    engine = photo_manager(tmp_path, client, editor)
+    job = await engine.start(photo_plan())
+    result = await finish(engine, job['id'])
+    assert result['error_code'] == ('not_configured' if kind == 'missing_key' else 'insufficient_credits')
+    assert result['generation_calls'] == {'image_edit': 0, 'world': 0}
+    assert editor.calls == [] and 'world_post' not in client.calls
+    await engine.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('unknown', [False, True])
+async def test_photo_editor_rejection_or_unknown_is_never_reposted(tmp_path, unknown):
+    from app.worlds.panorama import PanoramaEditError, PanoramaSubmissionUnknown
+    client = FakeClient(tmp_path)
+    editor = FakeEditor(tmp_path, error=PanoramaSubmissionUnknown(503) if unknown else PanoramaEditError('authentication_failed', 401))
+    engine = photo_manager(tmp_path, client, editor)
+    job = await engine.start(photo_plan())
+    result = await finish(engine, job['id'])
+    assert result['stage'] == ('submission_unknown' if unknown else 'error')
+    assert result['http_status'] == (503 if unknown else 401)
+    assert result['can_resume'] is False
+    assert editor.calls == ['image_post'] and 'world_post' not in client.calls
+    await engine.aclose()
+    new_editor = FakeEditor(tmp_path)
+    resumed = photo_manager(tmp_path, FakeClient(tmp_path), new_editor)
+    await resumed.resume_all()
+    assert not resumed._tasks
+    assert (await resumed.start(photo_plan()))['id'] == job['id']
+    assert new_editor.calls == []
+    with pytest.raises(MarbleError, match='cannot be safely resumed'):
+        await resumed.resume(job['id'])
+    await resumed.aclose()
+
+
+@pytest.mark.asyncio
+async def test_photo_cancellation_during_edit_has_no_receipt_and_cannot_resume(tmp_path):
+    client, editor = FakeClient(tmp_path), FakeEditor(tmp_path, wait=True)
+    engine = photo_manager(tmp_path, client, editor)
+    job = await engine.start(photo_plan())
+    await asyncio.wait_for(editor.entered.wait(), 3)
+    await engine.aclose()
+    result = engine.get(job['id'])
+    assert result['stage'] == 'submission_unknown'
+    assert result['can_resume'] is False
+    # An incorrectly paused old state still cannot repeat an attempted image POST.
+    path = tmp_path / job['id'] / 'record.json'
+    record = json.loads(path.read_text())
+    record['stage'] = 'paused'
+    path.write_text(json.dumps(record))
+    resumed_editor = FakeEditor(tmp_path)
+    resumed_client = FakeClient(tmp_path)
+    resumed = photo_manager(tmp_path, resumed_client, resumed_editor)
+    assert resumed.get(job['id'])['can_resume'] is False
+    await resumed.resume_all()
+    outcome = await finish(resumed, job['id'])
+    assert outcome['stage'] == 'submission_unknown'
+    assert resumed_editor.calls == [] and resumed_client.calls == []
+    await resumed.aclose()
+
+
+@pytest.mark.asyncio
+async def test_photo_receipt_survives_interruption_before_pano_ready_record(tmp_path):
+    editor, client = FakeEditor(tmp_path), FakeClient(tmp_path)
+    engine = photo_manager(tmp_path, client, editor)
+    stage = engine._stage
+    def interrupt_before_ready(record, name):
+        if name == 'pano_ready':
+            raise asyncio.CancelledError()
+        return stage(record, name)
+    engine._stage = interrupt_before_ready
+    job = await engine.start(photo_plan())
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(engine._tasks[job['id']], 3)
+    result = engine.get(job['id'])
+    assert result['stage'] == 'paused' and result['can_resume'] is True
+    assert (tmp_path / job['id'] / 'image_edit_receipt.json').is_file()
+    assert 'world_post' not in client.calls
+    await engine.aclose()
+    resumed_editor = FakeEditor(tmp_path)
+    resumed_editor.api_key = ''  # A stored receipt needs no OpenAI credentials.
+    resumed_client = FakeClient(tmp_path)
+    resumed = photo_manager(tmp_path, resumed_client, resumed_editor)
+    await resumed.resume_all()
+    ready = await finish(resumed, job['id'])
+    assert ready['stage'] == 'ready'
+    assert resumed_editor.calls == []
+    assert resumed_client.calls.count('world_post') == 1
+    await resumed.aclose()
+
+
+@pytest.mark.asyncio
+async def test_photo_saved_world_operation_resumes_without_image_or_world_post(tmp_path):
+    editor, client = FakeEditor(tmp_path), FakeClient(tmp_path, wait_stage='world')
+    engine = photo_manager(tmp_path, client, editor)
+    job = await engine.start(photo_plan())
+    await asyncio.wait_for(client.entered.wait(), 3)
+    await engine.aclose()
+    resumed_editor, resumed_client = FakeEditor(tmp_path), FakeClient(tmp_path)
+    resumed = photo_manager(tmp_path, resumed_client, resumed_editor)
+    await resumed.resume_all()
+    result = await finish(resumed, job['id'])
+    assert result['stage'] == 'ready'
+    assert resumed_editor.calls == []
+    assert 'world_post' not in resumed_client.calls and 'depth_post' not in resumed_client.calls
+    assert result['cost_credits']['total'] == 150
+    await resumed.aclose()
+
+
+@pytest.mark.asyncio
+async def test_photo_source_hash_mismatch_stops_before_any_provider_call(tmp_path):
+    client, editor = FakeClient(tmp_path), FakeEditor(tmp_path)
+    engine = photo_manager(tmp_path, client, editor)
+    plan = photo_plan()
+    plan['source_panorama']['sha256'] = '0' * 64
+    job = await engine.start(plan)
+    result = await finish(engine, job['id'])
+    assert result['error_code'] == 'source_hash_mismatch'
+    assert result['generation_calls']['image_edit'] == 0
+    assert client.calls == [] and editor.calls == []
+    await engine.aclose()
+
+
+@pytest.mark.asyncio
+async def test_photo_source_uses_private_plan_uuid_and_rejects_path_overrides(tmp_path):
+    root = tmp_path / 'jobs'
+    client, editor = FakeClient(root), FakeEditor(root)
+    engine = WorldJobManager(root, 'offline-key', client_factory=lambda: client,
+                             panorama_editor_factory=lambda: editor, asset_downloader=assets_download, poll_s=.001)
+    plan = photo_plan()
+    source_dir = tmp_path / 'plans' / plan['plan_id']
+    source_dir.mkdir(parents=True)
+    (source_dir / 'source_panorama.jpg').write_bytes(source_jpeg())
+    job = await engine.start(plan)
+    assert (await finish(engine, job['id']))['stage'] == 'ready'
+    for bad in ({'plan_id': '../../elsewhere'}, {'source_panorama': {**plan['source_panorama'], 'filename': '../../secret'}}):
+        with pytest.raises(ValueError, match='Invalid frozen'):
+            await engine.start({**plan, **bad})
+    await engine.aclose()
+
+
+@pytest.mark.asyncio
+async def test_photo_corrupted_receipt_output_never_repeats_edit(tmp_path):
+    editor, client = FakeEditor(tmp_path), FakeClient(tmp_path, wait_stage='world')
+    engine = photo_manager(tmp_path, client, editor)
+    job = await engine.start(photo_plan())
+    await asyncio.wait_for(client.entered.wait(), 3)
+    await engine.aclose()
+    (tmp_path / job['id'] / 'historical_panorama.jpg').write_bytes(b'corrupted-image')
+    resumed_editor, resumed_client = FakeEditor(tmp_path), FakeClient(tmp_path)
+    resumed = photo_manager(tmp_path, resumed_client, resumed_editor)
+    assert resumed.get(job['id'])['can_resume'] is False
+    await resumed.resume_all()
+    result = await finish(resumed, job['id'])
+    assert result['stage'] == 'submission_unknown'
+    assert resumed_editor.calls == [] and resumed_client.calls == []
+    await resumed.aclose()
+
+
+@pytest.mark.asyncio
+async def test_photo_private_source_symlink_cannot_escape_plan_root(tmp_path):
+    root = tmp_path / 'jobs'
+    client, editor = FakeClient(root), FakeEditor(root)
+    engine = WorldJobManager(root, 'offline-key', client_factory=lambda: client,
+                             panorama_editor_factory=lambda: editor, asset_downloader=assets_download, poll_s=.001)
+    plan = photo_plan()
+    outside = tmp_path / 'outside.jpg'
+    outside.write_bytes(source_jpeg())
+    source_dir = tmp_path / 'plans' / plan['plan_id']
+    source_dir.mkdir(parents=True)
+    (source_dir / 'source_panorama.jpg').symlink_to(outside)
+    job = await engine.start(plan)
+    result = await finish(engine, job['id'])
+    assert result['error_code'] == 'invalid_source_path'
+    assert result['generation_calls']['image_edit'] == 0
+    assert editor.calls == [] and client.calls == []
+    await engine.aclose()

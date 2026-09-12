@@ -1,4 +1,4 @@
-"""Durable depth → RGB panorama → Marble world jobs.
+"""Durable historical RGB/depth panorama → Marble world jobs.
 
 Only one POST per stage is allowed. Ambiguous submissions stop until reconciled;
 recovery of an accepted stage uses its stored operation ID. Provider responses
@@ -12,12 +12,14 @@ from contextlib import asynccontextmanager
 import fcntl
 import hashlib
 import io
+import inspect
 import json
 import os
 from pathlib import Path
 import re
 import tempfile
 import time
+import uuid
 from typing import Any
 
 import httpx
@@ -25,9 +27,13 @@ from PIL import Image
 
 from .assets import AssetError, _download, _validate_url, download_assets, inspect_image
 from .marble import MarbleClient, MarbleError, SubmissionUnknown, _finite_number, _valid_id
+from .panorama import (HistoricalPanoramaEditor, PanoramaEditError, PanoramaSubmissionUnknown,
+                       _image_size, _safe_usage, panorama_prompt)
 
 
 _JOB_ID = re.compile(r"[0-9a-f]{32}\Z")
+_SHA256 = re.compile(r"[0-9a-f]{64}\Z")
+_EDITOR_MODEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}\Z")
 _FILENAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,100}\Z")
 _TERMINAL = {"ready", "error", "submission_unknown", "insufficient_credits"}
 GENERATION_PROFILE = 'depth-history-v2'
@@ -69,7 +75,17 @@ def _read_json(path: Path) -> dict:
 
 
 def _generation_hash(plan: dict) -> str:
-    content = {key: plan[key] for key in _GENERATION_FIELDS if key in plan}
+    if plan.get("input_kind") == "streetview_panorama":
+        source = plan.get("source_panorama", {})
+        metadata = source.get("metadata", {})
+        content = {key: plan[key] for key in (
+            "input_kind", "target_year", "history_context", "changes", "sources", "uncertainties",
+            "generation_profile", "panorama_editor",
+        ) if key in plan}
+        content["source_panorama"] = {"sha256": source.get("sha256"), "capture": {
+            key: metadata[key] for key in ("pano_id", "lat", "lon", "heading", "date") if key in metadata}}
+    else:
+        content = {key: plan[key] for key in _GENERATION_FIELDS if key in plan}
     return hashlib.sha256(json.dumps(content, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
 
 
@@ -184,7 +200,7 @@ def _geometry_renderer(**arguments):
 class WorldJobManager:
     def __init__(
         self, root_dir: Path, api_key: str, *, client_factory=None, poll_s: float = 5,
-        asset_downloader=None, pano_downloader=None, renderer=None,
+        asset_downloader=None, pano_downloader=None, renderer=None, panorama_editor_factory=None, source_loader=None,
     ) -> None:
         self.root_dir = Path(root_dir).resolve()
         self.root_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -193,6 +209,9 @@ class WorldJobManager:
         self._asset_downloader = asset_downloader or download_assets
         self._pano_downloader = pano_downloader or _download_pano
         self._renderer = renderer or _geometry_renderer
+        self._panorama_editor_factory = panorama_editor_factory
+        self._source_loader = source_loader
+        self._source_root = (self.root_dir.parent / "plans").resolve()
         if not _finite_number(poll_s) or poll_s <= 0:
             raise ValueError("Invalid world polling interval")
         self._poll_s = poll_s
@@ -239,7 +258,18 @@ class WorldJobManager:
                     or not isinstance(frozen.get("historical_buildings"), list)
                     or not isinstance(frozen.get("camera_position"), (list, dict))):
                 raise ValueError
-        except (ValueError, TypeError, UnicodeError):
+            if frozen.get("input_kind") == "streetview_panorama":
+                source = frozen.get("source_panorama")
+                profile = frozen.get("panorama_editor")
+                if (str(uuid.UUID(frozen.get("plan_id", ""))) != frozen["plan_id"]
+                        or not isinstance(source, dict) or source.get("filename") != "source_panorama.jpg"
+                        or not isinstance(source.get("sha256"), str) or not _SHA256.fullmatch(source["sha256"])
+                        or not isinstance(source.get("metadata"), dict)
+                        or not isinstance(profile, dict) or not isinstance(profile.get("model"), str)
+                        or not _EDITOR_MODEL.fullmatch(profile["model"])
+                        or profile.get("quality") not in {"low", "medium", "high", "xhigh", "max", "auto"}):
+                    raise ValueError
+        except (ValueError, TypeError, AttributeError, UnicodeError):
             raise ValueError("Invalid frozen historical world plan") from None
         # A UI record ID does not make otherwise identical paid generation new.
         # Cache timestamps, parent/UI IDs and rendered asset URLs do not affect
@@ -260,7 +290,7 @@ class WorldJobManager:
                                 and _generation_hash(_read_json(previous / "plan.json")) == plan_hash):
                             directory, job_id = previous, previous.name
                             break
-                    except (OSError, ValueError, TypeError):
+                    except (OSError, ValueError, TypeError, AttributeError):
                         continue
             if not (directory / "record.json").exists():
                 directory.mkdir(exist_ok=True, mode=0o700)
@@ -268,9 +298,16 @@ class WorldJobManager:
                 self._save({
                     "schema_version": 1, "id": job_id, "plan_hash": plan_hash,
                     **({"plan_id": frozen["plan_id"]} if _valid_id(frozen.get("plan_id")) else {}),
-                    "model": model, "year": frozen["target_year"], "prompt": _prompt(frozen),
+                    "model": model, "year": frozen["target_year"],
+                    "prompt": ("Reconstruct the supplied full spherical historical RGB panorama as a coherent "
+                               "three-dimensional world. Preserve the already edited scene, camera origin, "
+                               "architecture, materials and layout; do not restyle it or return modern objects. "
+                               "Maintain a continuous 360 by 180 degree environment."
+                               if frozen.get("input_kind") == "streetview_panorama" else _prompt(frozen)),
+                    **({"input_kind": "streetview_panorama"} if frozen.get("input_kind") == "streetview_panorama" else {}),
                     "stage": "queued", "created_at": time.time(), "stage_times": {},
-                    "timing_s": {}, "generation_calls": {"depth": 0, "world": 0},
+                    "timing_s": {}, "generation_calls": ({"image_edit": 0, "world": 0}
+                        if frozen.get("input_kind") == "streetview_panorama" else {"depth": 0, "world": 0}),
                     "cost_credits": {"depth": None, "world": None}, "assets": [],
                 })
         record = _read_json(directory / "record.json")
@@ -286,13 +323,17 @@ class WorldJobManager:
         result = {key: record[key] for key in (
             "id", "plan_id", "model", "year", "stage", "created_at", "updated_at", "timing_s",
             "generation_calls", "error_code", "http_status", "credits_before_depth",
-            "credits_before_world", "credits_after",
+            "credits_before_world", "credits_after", "input_kind", "credits_before_image_edit", "image_edit_model",
         ) if key in record}
         result.update(job_id=record["id"], status=record["stage"], can_resume=self._can_resume(record))
         costs = {name: record.get("cost_credits", {}).get(name) for name in ("depth", "world")}
         known = [value for value in costs.values() if _finite_number(value) and value >= 0]
         costs["known_total"] = sum(known)
-        costs["total"] = sum(known) if len(known) == 2 else None
+        costs["total"] = sum(known) if len(known) == (1 if record.get("input_kind") == "streetview_panorama" else 2) else None
+        if record.get("input_kind") == "streetview_panorama":
+            result["image_edit_usage"] = _safe_usage(record.get("image_edit_usage"))
+            result["image_edit_billing"] = {"provider": "openai", "included_in_worldlabs_credits": False,
+                                            "amount": None, "currency": None}
         result["cost_credits"] = costs
         result["assets"] = []
         for item in record.get("assets", []):
@@ -303,7 +344,8 @@ class WorldJobManager:
             public["url"] = f"/world-jobs/{job_id}/assets/{item['filename']}"
             result["assets"].append(public)
         result["validation"] = {
-            "historical_accuracy": "unverified", "geometry": "coarse_reference",
+            "historical_accuracy": "unverified", "geometry": ("generated_from_rgb_unverified"
+                if record.get("input_kind") == "streetview_panorama" else "coarse_reference"),
             "gpu_rendering": "unverified", "phone_6dof": "unverified", "coordinate_alignment": "unverified",
         }
         review = record.get('review')
@@ -312,12 +354,18 @@ class WorldJobManager:
             result['validation']['historical_accuracy'] = 'failed_visual_review'
         return result
 
-    @staticmethod
-    def _can_resume(record: dict) -> bool:
+    def _can_resume(self, record: dict) -> bool:
         if record.get("stage") not in {"paused", "error"} or record.get("error_code") in {
             "submission_unknown", "operation_failed", "insufficient_credits",
         }:
             return False
+        image_receipt = False
+        if record.get("generation_calls", {}).get("image_edit", 0) or record.get("image_edit_attempted"):
+            try:
+                self._read_image_receipt(self._directory(record["id"]), record)
+                image_receipt = True
+            except (OSError, ValueError, SubmissionUnknown):
+                return False
         # A paid attempt without a durable accepted operation cannot be replayed,
         # even if an older record accidentally describes it as merely paused.
         for stage in ("depth", "world"):
@@ -327,7 +375,9 @@ class WorldJobManager:
             return True
         return record.get("resume_stage") in {
             "generating_depth", "fetching_pano", "pano_ready", "generating_world", "fetching_assets",
-        } and any(_valid_id(record.get(f"{stage}_operation_id")) for stage in ("depth", "world"))
+            "submitting_image_edit", "editing_panorama",
+        } and (image_receipt or any(
+            _valid_id(record.get(f"{stage}_operation_id")) for stage in ("depth", "world")))
 
     async def resume(self, job_id: str) -> dict:
         """Continue safe work; never reset operation IDs, costs, or paid counters."""
@@ -395,6 +445,108 @@ class WorldJobManager:
         item = {"kind": kind, "filename": path.name, "relative_path": relative.as_posix(),
                 "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest(), "media_type": media_type, **extra}
         record["assets"] = [old for old in record["assets"] if old["filename"] != item["filename"]] + [item]
+
+    def _read_image_receipt(self, directory: Path, record: dict) -> dict:
+        """A receipt is usable only while its complete validated JPEG still exists."""
+        try:
+            receipt = _read_json(directory / "image_edit_receipt.json")
+            image_path = directory / "historical_panorama.jpg"
+            expected = receipt.get("sha256")
+            if (receipt.get("filename") != image_path.name or not isinstance(expected, str)
+                    or not _SHA256.fullmatch(expected) or not image_path.is_file()
+                    or image_path.stat().st_size > 10 * 1024 * 1024
+                    or hashlib.sha256(image_path.read_bytes()).hexdigest() != expected
+                    or not isinstance(receipt.get("model"), str) or not _EDITOR_MODEL.fullmatch(receipt["model"])
+                    or not _finite_number(receipt.get("completed_at")) or receipt["completed_at"] <= 0):
+                raise ValueError
+            return receipt
+        except (OSError, ValueError, TypeError):
+            raise SubmissionUnknown() from None
+
+    async def _photo_source(self, record: dict, plan: dict, directory: Path) -> bytes:
+        target = directory / "source_panorama.jpg"
+        if record.get("source_ready") and target.is_file():
+            data = await asyncio.to_thread(target.read_bytes)
+        elif self._source_loader:
+            data = self._source_loader(plan)
+            if inspect.isawaitable(data):
+                data = await data
+        else:
+            # The plan itself was created by the server. Still reject path-like
+            # IDs, mutable filenames and symlinks escaping its private root.
+            plan_id = str(uuid.UUID(plan["plan_id"]))
+            source_directory = (self._source_root / plan_id).resolve()
+            source_path = (source_directory / "source_panorama.jpg").resolve()
+            if (not source_directory.is_relative_to(self._source_root)
+                    or not source_path.is_relative_to(source_directory)):
+                raise AssetError("invalid_source_path", "The stored panorama path is invalid.")
+            if source_path.stat().st_size > 10 * 1024 * 1024:
+                raise AssetError("invalid_source_image", "The source panorama exceeds its size limit.")
+            data = await asyncio.to_thread(source_path.read_bytes)
+        if (not isinstance(data, bytes) or hashlib.sha256(data).hexdigest() != plan["source_panorama"]["sha256"]):
+            raise AssetError("source_hash_mismatch", "The source panorama no longer matches its frozen plan.")
+        await asyncio.to_thread(_image_size, data)
+        if not record.get("source_ready"):
+            _atomic_bytes(target, data)
+            self._asset(record, target, "source_pano", "image/jpeg")
+            record["source_ready"] = True
+            self._save(record)
+        return data
+
+    async def _ensure_photo_panorama(self, record: dict, plan: dict, client, directory: Path) -> None:
+        async with _file_lock(self.root_dir / ".paid.lock"):
+            attempted = record.get("generation_calls", {}).get("image_edit", 0) or record.get("image_edit_attempted")
+            if attempted or (directory / "image_edit_receipt.json").exists():
+                # A receipt survives a crash between the synchronous image edit
+                # response and the next record write. Absence never permits retry.
+                receipt = self._read_image_receipt(directory, record)
+            else:
+                source = await self._photo_source(record, plan, directory)
+                profile = plan.get("panorama_editor", {})
+                editor = (self._panorama_editor_factory() if self._panorama_editor_factory
+                          else HistoricalPanoramaEditor(model=profile.get("model"), quality=profile.get("quality")))
+                api_key = getattr(editor, "api_key", None)
+                if not api_key:
+                    raise PanoramaEditError("not_configured")
+                if not isinstance(api_key, str) or len(api_key) > 4096 or not re.fullmatch(r"[\x21-\x7e]+", api_key):
+                    raise PanoramaEditError("invalid_configuration")
+                prompt = panorama_prompt(plan)
+                balance = (await client.credits())["remaining_credits"]
+                record["credits_before_image_edit"] = balance
+                if balance < 150:
+                    raise MarbleError("Insufficient Marble credits", code="insufficient_credits")
+                record["generation_calls"]["image_edit"] = 1
+                record["image_edit_attempted"] = True
+                self._stage(record, "submitting_image_edit")
+                result = await editor.edit(source, prompt)
+                try:
+                    image = result["image_bytes"]
+                    await asyncio.to_thread(_image_size, image, output=True)
+                    # Saving JPEG preserves angular projection; never resize,
+                    # crop, rotate, stretch or tile the returned panorama.
+                    with Image.open(io.BytesIO(image)) as decoded:
+                        output = io.BytesIO()
+                        decoded.convert("RGB").save(output, "JPEG", quality=95, subsampling=0)
+                    prepared = output.getvalue()
+                    if len(prepared) > 10 * 1024 * 1024:
+                        raise ValueError
+                    model = result.get("model")
+                    if not isinstance(model, str) or not _EDITOR_MODEL.fullmatch(model) or model != profile.get("model"):
+                        raise ValueError
+                    receipt = {"filename": "historical_panorama.jpg", "sha256": hashlib.sha256(prepared).hexdigest(),
+                               "model": model, "usage": _safe_usage(result.get("usage")), "completed_at": time.time()}
+                    _atomic_bytes(directory / "historical_panorama.jpg", prepared)
+                    _write_json(directory / "image_edit_receipt.json", receipt)
+                except (ValueError, TypeError, KeyError, OSError, PanoramaEditError):
+                    raise PanoramaSubmissionUnknown() from None
+            record.update(image_edit_complete=True, image_edit_model=receipt["model"],
+                          image_edit_usage=_safe_usage(receipt.get("usage")), pano_ready=True)
+            record["timing_s"].setdefault("image_edit", max(0, receipt.get("completed_at", time.time())
+                - record["stage_times"].get("submitting_image_edit", record["created_at"])))
+            checked = await asyncio.to_thread(inspect_image, directory / "historical_panorama.jpg")
+            self._asset(record, directory / "historical_panorama.jpg", "historical_pano", "image/jpeg", validation=checked)
+            self._stage(record, "pano_ready")
+            await asyncio.sleep(0)
 
     async def _render(self, record: dict, plan: dict, directory: Path) -> None:
         if record.get("geometry_ready"):
@@ -511,30 +663,33 @@ class WorldJobManager:
                         self._accept(record, stage, _read_json(receipt))
                 plan = _read_json(directory / "plan.json")
                 client = self._client_factory()
-                await self._render(record, plan, directory)
-                depth_operation = await self._ensure_operation(record, "depth", client, directory)
-                if not record.get("pano_ready"):
-                    self._stage(record, "fetching_pano")
-                    response = depth_operation.get("response")
-                    pano_url = response.get("pano_url") if isinstance(response, dict) else None
-                    # The live API also returns a World-shaped result for pano
-                    # operations, despite the documented flat PanoDepthToRgbResult.
-                    if not pano_url and isinstance(response, dict):
-                        assets = response.get("assets")
-                        imagery = assets.get("imagery") if isinstance(assets, dict) else None
-                        pano_url = imagery.get("pano_url") if isinstance(imagery, dict) else None
-                    if not isinstance(pano_url, str):
-                        raise AssetError("missing_panorama", "Completed depth generation has no panorama.")
-                    pano = await self._pano_downloader(pano_url, directory)
-                    # Even injected downloaders must provide a complete spherical JPEG.
-                    prepared = await asyncio.to_thread(_pano_jpeg, Path(pano))
-                    _atomic_bytes(directory / "historical_panorama.jpg", prepared)
-                    checked = await asyncio.to_thread(inspect_image, directory / "historical_panorama.jpg")
-                    self._asset(record, directory / "historical_panorama.jpg", "historical_pano", "image/jpeg",
-                                validation=checked)
-                    record["pano_ready"] = True
-                    self._stage(record, "pano_ready")
-                    await asyncio.sleep(0)
+                if plan.get("input_kind") == "streetview_panorama":
+                    await self._ensure_photo_panorama(record, plan, client, directory)
+                else:
+                    await self._render(record, plan, directory)
+                    depth_operation = await self._ensure_operation(record, "depth", client, directory)
+                    if not record.get("pano_ready"):
+                        self._stage(record, "fetching_pano")
+                        response = depth_operation.get("response")
+                        pano_url = response.get("pano_url") if isinstance(response, dict) else None
+                        # The live API also returns a World-shaped result for pano
+                        # operations, despite the documented flat PanoDepthToRgbResult.
+                        if not pano_url and isinstance(response, dict):
+                            assets = response.get("assets")
+                            imagery = assets.get("imagery") if isinstance(assets, dict) else None
+                            pano_url = imagery.get("pano_url") if isinstance(imagery, dict) else None
+                        if not isinstance(pano_url, str):
+                            raise AssetError("missing_panorama", "Completed depth generation has no panorama.")
+                        pano = await self._pano_downloader(pano_url, directory)
+                        # Even injected downloaders must provide a complete spherical JPEG.
+                        prepared = await asyncio.to_thread(_pano_jpeg, Path(pano))
+                        _atomic_bytes(directory / "historical_panorama.jpg", prepared)
+                        checked = await asyncio.to_thread(inspect_image, directory / "historical_panorama.jpg")
+                        self._asset(record, directory / "historical_panorama.jpg", "historical_pano", "image/jpeg",
+                                    validation=checked)
+                        record["pano_ready"] = True
+                        self._stage(record, "pano_ready")
+                        await asyncio.sleep(0)
                 operation = await self._ensure_operation(record, "world", client, directory)
                 response = operation.get("response") or {}
                 if isinstance(response, dict) and isinstance(response.get("world"), dict):
@@ -575,12 +730,23 @@ class WorldJobManager:
 
     def _failure(self, record: dict, exc: Exception | None) -> None:
         previous = record["stage"]
-        uncertain = isinstance(exc, SubmissionUnknown) or previous.startswith("submitting_") and not isinstance(exc, MarbleError)
-        code = exc.code if isinstance(exc, (MarbleError, AssetError)) else "interrupted" if exc is None else "job_failed"
+        known_error = isinstance(exc, (MarbleError, PanoramaEditError))
+        uncertain = isinstance(exc, (SubmissionUnknown, PanoramaSubmissionUnknown)) or (
+            previous.startswith("submitting_") and not known_error)
+        if previous == "submitting_image_edit":
+            try:
+                self._read_image_receipt(self._directory(record["id"]), record)
+                uncertain = False
+            except SubmissionUnknown:
+                pass
+        code = exc.code if isinstance(exc, (MarbleError, AssetError, PanoramaEditError)) else (
+            "interrupted" if exc is None else "job_failed")
         if uncertain:
             stage, code = "submission_unknown", "submission_unknown"
         elif code == "insufficient_credits":
             stage = "insufficient_credits"
+        elif isinstance(exc, PanoramaEditError):
+            stage = "error"
         elif code in {"operation_failed", "invalid_input", "missing_key", "invalid_key", "http_error"} and (
             previous.startswith("submitting_") or code != "http_error"
         ):
@@ -588,6 +754,6 @@ class WorldJobManager:
         else:
             stage = "paused"
         record.update(stage=stage, error_code=code, resume_stage=previous)
-        if isinstance(exc, MarbleError) and exc.status_code is not None:
+        if isinstance(exc, (MarbleError, PanoramaEditError)) and exc.status_code is not None:
             record["http_status"] = exc.status_code
         self._save(record)

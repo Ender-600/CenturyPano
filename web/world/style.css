@@ -3,3 +3,10 @@
 #viewport .move-pad{right:16px;bottom:16px}
 #viewport #message{left:16px;right:16px;bottom:105px;margin:0}
 #viewport canvas{position:absolute;inset:0}
+.location-mode{margin:12px 0}#location-mode{font-size:12px}
+#location-status{margin:10px 0 0;font-size:11px;line-height:1.8;color:var(--accent)}
+#location-status.error{color:var(--red)}#location-meta,#plan-location{font-size:10px;line-height:1.8;color:var(--muted)}
+#open-streetview,#geometry-test{width:100%;margin-top:10px;line-height:1.6}
+#test-controls{margin-top:14px;padding:12px;border:1px dashed #b9bea9;border-radius:6px;background:#ececdf}
+#test-controls button{width:100%}#streetview-status{overflow-wrap:anywhere}
+input[readonly]{background:#ebece6;color:#666e63}#plan-location{padding:10px 0;border-bottom:1px solid var(--line)}

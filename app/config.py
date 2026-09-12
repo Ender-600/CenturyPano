@@ -41,6 +41,8 @@ class Settings:
     fal_key: str = field(default_factory=lambda: os.getenv('FAL_KEY', ''), repr=False)
     k2_api_key: str = field(default_factory=lambda: os.getenv('K2_API_KEY', ''), repr=False)
     worldlab_api_key: str = field(default_factory=lambda: os.getenv('WORLDLAB_API_KEY', ''), repr=False)
+    google_maps_api_key: str = field(default_factory=lambda: os.getenv('GOOGLE_MAPS_API_KEY', ''), repr=False)
+    google_streetview_ai_authorized: bool = field(default_factory=lambda: os.getenv('GOOGLE_STREETVIEW_AI_AUTHORIZED', '').lower() == 'true')
     world_dir: Path = field(default_factory=lambda: Path(os.getenv('WORLD_DIR', str(ROOT / 'data/worlds'))).resolve())
     world_access_token: str = field(default_factory=lambda: os.getenv('WORLD_ACCESS_TOKEN') or secrets.token_urlsafe(32), repr=False)
     gemini_image_model: str = field(default_factory=lambda: os.getenv('GEMINI_IMAGE_MODEL', 'gemini-2.5-flash-image'))

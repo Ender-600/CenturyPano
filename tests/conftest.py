@@ -9,3 +9,5 @@ def isolated_world_storage(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, 'world_dir', tmp_path / 'worlds')
     monkeypatch.setattr(settings, 'worldlab_api_key', '')
     monkeypatch.setattr(settings, 'world_access_token', 'test-world-access')
+    monkeypatch.setattr(settings, 'google_maps_api_key', '')
+    monkeypatch.setattr(settings, 'google_streetview_ai_authorized', False)
