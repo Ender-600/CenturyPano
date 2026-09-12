@@ -110,7 +110,7 @@ function viewer({ ios = false, permissions = ['granted'], touch = true, secure =
     FormData: class { append() {} }, ResizeObserver: class { observe() {} },
     fetch: async (url, options) => {
       requests.push({ url, method: options?.method || 'GET' });
-      const body = url === '/health' ? { configured: true, provider: 'demo', min_year: 1800, max_year: 2026, default_year: 1925 } : url === '/jobs' ? { job_id: manifest.job_id } : url.endsWith('/manifest') ? manifest : [];
+      const body = url === '/health' ? { configured: true, provider: 'demo', min_year: 1800, max_year: 2026, default_year: 1920 } : url === '/jobs' ? { job_id: manifest.job_id } : url.endsWith('/manifest') ? manifest : [];
       return { ok: true, json: async () => body, blob: async () => ({}) };
     },
     setTimeout: (callback, delay = 0) => { const handle = nextHandle++; timers.set(handle, { callback, due: now + delay }); return handle; },
