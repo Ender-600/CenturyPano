@@ -15,3 +15,10 @@ data/*.png
 node_modules/
 .DS_Store
 docs/DEMO_ACCESS.md
+mobile/android/.gradle/
+mobile/android/local.properties
+mobile/android/**/build/
+mobile/ios/build/
+mobile/ios/DerivedData/
+mobile/ios/**/xcuserdata/
+mobile/ios/**/*.xcuserstate

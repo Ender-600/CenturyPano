@@ -40,14 +40,14 @@ test('positionFix accepts bounded locations and rejects latitude, longitude, and
   }
   for (const values of [{ lat: -85.001 }, { lat: 85.001 }, { lon: -180.001 }, { lon: 180.001 },
     { accuracy: -0.001 }, { accuracy: 1000.001 }]) {
-    assert.throws(() => positionFix(position(values), NOW), /位置无效/);
+    assert.throws(() => positionFix(position(values), NOW), /location is invalid/);
   }
 });
 
 test('positionFix does not coerce null, strings, NaN, or infinity into valid coordinates', () => {
   for (const key of ['lat', 'lon', 'accuracy', 'timestamp']) {
     for (const value of [null, '0', NaN, Infinity, -Infinity]) {
-      assert.throws(() => positionFix(position({ [key]: value }), NOW), /位置无效/);
+      assert.throws(() => positionFix(position({ [key]: value }), NOW), /location is invalid/);
     }
   }
   for (const malformed of [null, undefined, {}, { coords: null, timestamp: NOW }, { coords: {}, timestamp: NOW }]) {
@@ -58,8 +58,8 @@ test('positionFix does not coerce null, strings, NaN, or infinity into valid coo
 test('positionFix rejects expired or implausibly future timestamps at exact freshness boundaries', () => {
   assert.equal(positionFix(position({ timestamp: NOW - 60000 }), NOW).timestamp_ms, NOW - 60000);
   assert.equal(positionFix(position({ timestamp: NOW + 10000 }), NOW).timestamp_ms, NOW + 10000);
-  assert.throws(() => positionFix(position({ timestamp: NOW - 60001 }), NOW), /过期/);
-  assert.throws(() => positionFix(position({ timestamp: NOW + 10001 }), NOW), /位置无效/);
+  assert.throws(() => positionFix(position({ timestamp: NOW - 60001 }), NOW), /outdated/);
+  assert.throws(() => positionFix(position({ timestamp: NOW + 10001 }), NOW), /location is invalid/);
 });
 
 test('haversine distances agree with equatorial arc lengths and realistic city distances', () => {

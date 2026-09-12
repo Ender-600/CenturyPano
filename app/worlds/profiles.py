@@ -11,13 +11,13 @@ WorldModel = Literal["marble-1.1", "marble-1.0-draft"]
 DEFAULT_WORLD_MODEL: WorldModel = "marble-1.1"
 WORLD_MODELS = {
     "marble-1.1": {
-        "id": "marble-1.1", "label": "标准质量", "world_credits": 1500,
-        "cost_label": "1,500 credits / 世界",
-        "description": "正式生成模型；最终细节与空间效果仍需查看。",
+        "id": "marble-1.1", "label": "Standard quality", "world_credits": 1500,
+        "cost_label": "1,500 credits / world",
+        "description": "Full generation model; review the final detail and spatial quality.",
     },
     "marble-1.0-draft": {
-        "id": "marble-1.0-draft", "label": "快速草稿", "world_credits": 150,
-        "cost_label": "150 credits / 世界", "description": "适合快速预览。",
+        "id": "marble-1.0-draft", "label": "Quick draft", "world_credits": 150,
+        "cost_label": "150 credits / world", "description": "Suitable for quick previews.",
     },
 }
 

@@ -1,5 +1,5 @@
 'use strict';
-const SHELL_CACHE = 'century-shell-v2';
+const SHELL_CACHE = 'century-shell-v3';
 const JOURNEY_CACHE = 'century-journeys-v1';
 const SHELL = ['/', '/index.html', '/app.js', '/style.css', '/scene.svg'];
 
@@ -41,7 +41,7 @@ self.addEventListener('fetch', (event) => {
         return cached;
       }
       if (url.pathname === '/replays') return new Response('{"replays":[]}', { headers: { 'Content-Type': 'application/json' } });
-      return new Response('{"detail":"此旅程尚未保存在当前设备"}', { status: 503, headers: { 'Content-Type': 'application/json' } });
+      return new Response('{"detail":"This journey has not been saved on this device"}', { status: 503, headers: { 'Content-Type': 'application/json' } });
     })); return;
   }
   if (/^\/(jobs\/[^/]+\/(preview|result|audio|tiles\/\d+)|out\/)/.test(url.pathname)) {

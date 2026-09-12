@@ -1,11 +1,11 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#f9df72">
-  <meta name="description" content="CENTURY PANO 时光邮局：把眼前的风景，寄给另一个年代。前端交互设计演示。">
-  <title>CENTURY PANO · 时光邮局</title>
+  <meta name="description" content="CENTURY PANO Time Post Office: send your view to another era. An interactive design demo.">
+  <title>CENTURY PANO · Time Post Office</title>
   <link rel="stylesheet" href="../demo.css">
   <link rel="stylesheet" href="style.css">
   <script src="../demo.js" defer></script>
@@ -13,60 +13,60 @@
 <body data-design="postcard">
   <div class="pc-page">
     <header class="pc-header">
-      <a class="pc-brand" href="../" aria-label="CENTURY PANO 设计方案首页"><span class="pc-brand-icon" aria-hidden="true">✳</span><span>CENTURY<br>PANO<span class="pc-brand-dot">®</span></span></a>
-      <nav class="pc-nav" aria-label="主导航"><a href="#journey">时光路线</a><button type="button" data-archive>我的旅行簿 <span>↗</span></button></nav>
-      <span class="pc-header-note">收集风景，也收集时间。<span>EST. TODAY · DEST. YESTERDAY</span></span>
+      <a class="pc-brand" href="../" aria-label="CENTURY PANO Design gallery home"><span class="pc-brand-icon" aria-hidden="true">✳</span><span>CENTURY<br>PANO<span class="pc-brand-dot">®</span></span></a>
+      <nav class="pc-nav" aria-label="Main navigation"><a href="#journey">Time routes</a><button type="button" data-archive>My travel journal <span>↗</span></button></nav>
+      <span class="pc-header-note">Collect views. Collect moments.<span>EST. TODAY · DEST. YESTERDAY</span></span>
     </header>
 
     <main>
       <section class="pc-hero" aria-labelledby="pc-title">
         <div class="pc-intro">
-          <p class="pc-eyebrow"><span></span> 时 光 邮 局 <i>/</i> OPEN FOR ADVENTURE</p>
-          <h1 id="pc-title">把今天，<br>寄给<span>过去<svg viewBox="0 0 245 22" aria-hidden="true"><path d="M3 16C63 2 158 0 239 9M29 20C90 11 161 9 211 12"/></svg></span>。</h1>
-          <p class="pc-description">一张全景，就是一张穿越时光的车票。<br>带着好奇心出发，看看从前的此时此地。</p>
+          <p class="pc-eyebrow"><span></span> TIME POST OFFICE <i>/</i> OPEN FOR ADVENTURE</p>
+          <h1 id="pc-title">Send today<br>to the <span>past<svg viewBox="0 0 245 22" aria-hidden="true"><path d="M3 16C63 2 158 0 239 9M29 20C90 11 161 9 211 12"/></svg></span>.</h1>
+          <p class="pc-description">A panorama is your ticket through time.<br>Follow your curiosity and discover this place in another era.</p>
           <div class="pc-ticket-wrap">
             <button type="button" class="pc-ticket" data-upload>
-              <span class="pc-ticket-main"><small>ONE WAY TO ANOTHER DAY</small><strong>上传全景，即刻出发 <span>↗</span></strong></span>
+              <span class="pc-ticket-main"><small>ONE WAY TO ANOTHER DAY</small><strong>Upload a panorama. Set off. <span>↗</span></strong></span>
               <span class="pc-ticket-stub" aria-hidden="true"><span>ADMIT</span><b>01</b></span>
             </button>
-            <span class="pc-ticket-note"><span class="pc-note-arrow" aria-hidden="true">⤴</span> 行李只需一张照片</span>
+            <span class="pc-ticket-note"><span class="pc-note-arrow" aria-hidden="true">⤴</span> All you need is one photo</span>
           </div>
-          <p class="pc-upload-meta"><span class="pc-upload-dot"></span><span data-filename>还没准备好照片？用这张明信片先出发。</span></p>
+          <p class="pc-upload-meta"><span class="pc-upload-dot"></span><span data-filename>No photo yet? Start with this postcard.</span></p>
         </div>
 
         <div class="pc-visual">
-          <div class="pc-orbit-note" aria-hidden="true"><span>换 个 年 代</span><b>✺</b><span>看 看 世 界</span></div>
+          <div class="pc-orbit-note" aria-hidden="true"><span>ANOTHER ERA</span><b>✺</b><span>A NEW VIEW</span></div>
           <article class="pc-postcard">
             <div class="pc-card-heading"><span>Greetings from</span><strong>PITTSBURGH</strong><span class="pc-spark" aria-hidden="true">✧</span></div>
             <div class="pc-scene" data-compare style="--split:50%">
-              <img src="../assets/pittsburgh.png" alt="匹兹堡河畔城市的概念风景" data-scene draggable="false">
-              <img src="../assets/pittsburgh.png" alt="同一风景的怀旧色调演示" data-scene data-past draggable="false">
+              <img src="../assets/pittsburgh.png" alt="Concept view of Pittsburgh by the river" data-scene draggable="false">
+              <img src="../assets/pittsburgh.png" alt="Nostalgic color treatment of the same view" data-scene data-past draggable="false">
               <div class="pc-scene-shade"></div>
               <div class="pc-image-label"><span>THEN / <span data-year>1920</span></span><span>NOW / 2026</span></div>
               <div class="pc-image-year"><span data-year>1920</span><small>Wish you<br>were here.</small></div>
               <div class="pc-compare-line" aria-hidden="true"><span>‹ ›</span></div>
             </div>
-            <div class="pc-card-bottom"><span>40°26′ N &nbsp; 79°59′ W</span><span class="pc-card-date">一封来自<span data-era-name>摩登年代</span>的问候</span></div>
-            <label class="pc-compare-control"><span>过去</span><input type="range" min="0" max="100" value="50" data-compare-range aria-label="拖动对比过去与现在的风景"><span>现在</span></label>
+            <div class="pc-card-bottom"><span>40°26′ N &nbsp; 79°59′ W</span><span class="pc-card-date">Greetings from the <span data-era-name>Roaring Twenties</span></span></div>
+            <label class="pc-compare-control"><span>Past</span><input type="range" min="0" max="100" value="50" data-compare-range aria-label="Drag to compare past and present views"><span>Now</span></label>
           </article>
-          <div class="pc-stamp" aria-hidden="true"><div><span>TIME TRAVEL CLUB</span><b>CP</b><strong>时光已签收</strong><small>ANYWHERE · ANYWHEN</small></div></div>
-          <button class="pc-explore" type="button" data-preview><span class="pc-explore-icon">↗</span><span>走进这张明信片<small>DRAG TO COMPARE · CLICK TO EXPLORE</small></span></button>
-          <p class="pc-concept">概念影像 · 交互演示</p>
+          <div class="pc-stamp" aria-hidden="true"><div><span>TIME TRAVEL CLUB</span><b>CP</b><strong>Time delivered</strong><small>ANYWHERE · ANYWHEN</small></div></div>
+          <button class="pc-explore" type="button" data-preview><span class="pc-explore-icon">↗</span><span>Step inside this postcard<small>DRAG TO COMPARE · CLICK TO EXPLORE</small></span></button>
+          <p class="pc-concept">Concept imagery · Interactive demo</p>
         </div>
       </section>
 
       <section class="pc-route" id="journey" aria-labelledby="pc-route-title">
-        <div class="pc-route-intro"><span>YOUR NEXT STOP</span><h2 id="pc-route-title">下一站，哪一年？</h2><p>点选年代，盖上新的时光印章。</p></div>
-        <div class="pc-era-list" role="group" aria-label="选择旅行年代">
-          <button type="button" class="pc-era" data-era="1900" aria-pressed="false"><span class="pc-era-dot"></span><strong>1900<span>s</span></strong><small>世纪初的街角</small><span class="pc-era-tag">01 / THE BEGINNING</span></button>
-          <button type="button" class="pc-era active" data-era="1920" aria-pressed="true"><span class="pc-era-dot"></span><strong>1920<span>s</span></strong><small>爵士与摩登的风</small><span class="pc-era-tag">02 / THE ROARING YEARS</span></button>
-          <button type="button" class="pc-era" data-era="1950" aria-pressed="false"><span class="pc-era-dot"></span><strong>1950<span>s</span></strong><small>复古日常进行时</small><span class="pc-era-tag">03 / THE GOLDEN DAYS</span></button>
-          <button type="button" class="pc-era" data-era="1970" aria-pressed="false"><span class="pc-era-dot"></span><strong>1970<span>s</span></strong><small>有胶片感的夏天</small><span class="pc-era-tag">04 / THE COLORFUL DAYS</span></button>
+        <div class="pc-route-intro"><span>YOUR NEXT STOP</span><h2 id="pc-route-title">Which year is next?</h2><p>Choose an era. Add a new stamp to your journey.</p></div>
+        <div class="pc-era-list" role="group" aria-label="Choose your travel era">
+          <button type="button" class="pc-era" data-era="1900" aria-pressed="false"><span class="pc-era-dot"></span><strong>1900<span>s</span></strong><small>A New Century</small><span class="pc-era-tag">01 / THE BEGINNING</span></button>
+          <button type="button" class="pc-era active" data-era="1920" aria-pressed="true"><span class="pc-era-dot"></span><strong>1920<span>s</span></strong><small>The Jazz Age</small><span class="pc-era-tag">02 / THE ROARING YEARS</span></button>
+          <button type="button" class="pc-era" data-era="1950" aria-pressed="false"><span class="pc-era-dot"></span><strong>1950<span>s</span></strong><small>The Golden Days</small><span class="pc-era-tag">03 / THE GOLDEN DAYS</span></button>
+          <button type="button" class="pc-era" data-era="1970" aria-pressed="false"><span class="pc-era-dot"></span><strong>1970<span>s</span></strong><small>Summer on Film</small><span class="pc-era-tag">04 / THE COLORFUL DAYS</span></button>
         </div>
       </section>
     </main>
 
-    <footer class="pc-footer"><span>✳ &nbsp; GOOD VIEWS. GREAT MEMORIES.</span><span>01 上传风景 <i>→</i> 02 选择年代 <i>→</i> 03 今昔对比</span><span>© CENTURY PANO 2026</span></footer>
+    <footer class="pc-footer"><span>✳ &nbsp; GOOD VIEWS. GREAT MEMORIES.</span><span>01 Upload a view <i>→</i> 02 Choose an era <i>→</i> 03 Past and present</span><span>© CENTURY PANO 2026</span></footer>
   </div>
 </body>
 </html>

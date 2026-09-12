@@ -122,7 +122,7 @@ test('relativeOnly preserves arbitrary model axes even with a compass', async ()
   assert.equal(f.controller.getStatus().mode, 'relative');
   assert.equal(f.controller.getStatus().physicalHeading, 90);
   f.send({ alpha: 260, absolute: true }); near(headingFromQuaternion(f.controller.getQuaternion()), 170);
-  assert.doesNotMatch(f.controller.getStatus().message, /指南针跟随/);
+  assert.doesNotMatch(f.controller.getStatus().message, /Compass follow/);
   f.controller.dispose();
 });
 

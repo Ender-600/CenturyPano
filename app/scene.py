@@ -84,7 +84,8 @@ async def _request_scene(image: bytes) -> tuple[dict, int]:
         "keep_structure (camera position, viewing direction, projection and frame only), "
         "sky_fraction (a number 0 through 1). Describe visible architecture, roads, terrain and "
         "land use in summary without assuming they existed in the past. "
-        "Use generic visual descriptions only. Do not transcribe signs, addresses, license plates or names. "
+        "Write all descriptions in English. Use generic visual descriptions only. "
+        "Do not transcribe signs, addresses, license plates or names. "
         "Do not infer location or construction dates. Preserve camera geometry only. Buildings, "
         "roads, land use and the built skyline may need replacement or removal during reconstruction."
     )

@@ -1,10 +1,10 @@
 (() => {
   'use strict';
   const eras = {
-    '1900': { name: '世纪之交', filter: 'sepia(1) saturate(.35) contrast(1.1) brightness(.94)' },
-    '1920': { name: '摩登年代', filter: 'sepia(.85) saturate(.55) contrast(1.05)' },
-    '1950': { name: '复古日常', filter: 'sepia(.32) saturate(.75) hue-rotate(-12deg)' },
-    '1970': { name: '胶片记忆', filter: 'sepia(.2) saturate(.85) contrast(.9) hue-rotate(-8deg)' }
+    '1900': { name: 'Turn of the Century', filter: 'sepia(1) saturate(.35) contrast(1.1) brightness(.94)' },
+    '1920': { name: 'Roaring Twenties', filter: 'sepia(.85) saturate(.55) contrast(1.05)' },
+    '1950': { name: 'Golden Days', filter: 'sepia(.32) saturate(.75) hue-rotate(-12deg)' },
+    '1970': { name: 'Film Memories', filter: 'sepia(.2) saturate(.85) contrast(.9) hue-rotate(-8deg)' }
   };
   let year = '1920';
   let source = document.querySelector('img[data-scene]')?.getAttribute('src') || '../assets/pittsburgh.png';
@@ -27,17 +27,17 @@
   const preview = document.createElement('dialog');
   preview.className = 'demo-dialog';
   preview.setAttribute('aria-labelledby', 'demo-preview-title');
-  preview.innerHTML = `<div class="demo-dialog-top"><div><p>A WINDOW THROUGH TIME</p><h2 id="demo-preview-title">走进 <span data-year>1920</span> 年代</h2></div><button class="demo-close" data-close aria-label="关闭全景预览">×</button></div><div class="demo-viewer" data-compare tabindex="0" aria-label="全景预览，可拖动或使用左右方向键平移"><img data-scene alt="城市概念影像" draggable="false"><div class="demo-viewer-past"><img data-scene data-past alt="年代色调模拟" draggable="false"></div><span class="demo-view-label"><span data-year>1920</span> · 色调模拟</span><span class="demo-view-label now">原始画面</span><span class="demo-viewer-hint">↔ 拖动探索 · 下方滑杆比较今昔</span></div><div class="demo-controls"><label for="demo-modal-compare"><span>过去与现在</span><span data-compare-label>50%</span></label><input id="demo-modal-compare" data-compare-range type="range" min="0" max="100" value="50"><p>当前为前端交互演示，年代变化使用色调模拟。概念图并非历史影像；照片仅在此浏览器预览。</p></div><div class="demo-era-row">${Object.keys(eras).map(era => `<button data-era="${era}" aria-pressed="${era === year}">${era}s</button>`).join('')}</div>`;
+  preview.innerHTML = `<div class="demo-dialog-top"><div><p>A WINDOW THROUGH TIME</p><h2 id="demo-preview-title">Step into the <span data-year>1920</span>s</h2></div><button class="demo-close" data-close aria-label="Close panorama preview">×</button></div><div class="demo-viewer" data-compare tabindex="0" aria-label="Panorama preview. Drag or use the left and right arrow keys to pan"><img data-scene alt="Concept image of the city" draggable="false"><div class="demo-viewer-past"><img data-scene data-past alt="Simulated era color grading" draggable="false"></div><span class="demo-view-label"><span data-year>1920</span> · Simulated color grading</span><span class="demo-view-label now">Original image</span><span class="demo-viewer-hint">↔ Drag to explore · Use the slider below to compare</span></div><div class="demo-controls"><label for="demo-modal-compare"><span>Past and present</span><span data-compare-label>50%</span></label><input id="demo-modal-compare" data-compare-range type="range" min="0" max="100" value="50"><p>This interactive demo uses color grading to simulate different eras. The concept art is not historical imagery. Photos are previewed only in this browser.</p></div><div class="demo-era-row">${Object.keys(eras).map(era => `<button data-era="${era}" aria-pressed="${era === year}">${era}s</button>`).join('')}</div>`;
   const archive = document.createElement('dialog');
   archive.className = 'demo-dialog';
   archive.setAttribute('aria-labelledby', 'demo-archive-title');
-  archive.innerHTML = `<div class="demo-dialog-top"><div><p>THE TIME ARCHIVE</p><h2 id="demo-archive-title">从一张时光明信片开始</h2></div><button class="demo-close" data-close aria-label="关闭时光档案">×</button></div><p class="demo-archive-intro">挑一个年代，体验同一座城市的不同色调。<br>以下为设计示例，使用同一张 AI 概念图，并非真实历史重建。</p><div class="demo-archive-grid">${[['1900','世纪初的河岸'],['1920','钢铁之城的午后'],['1970','一段胶片记忆']].map(([era,title]) => `<button class="demo-archive-card" data-sample="${era}"><img src="${defaultSource}" alt="${title}概念预览"><span>${title}<small>PITTSBURGH · ${era}s ↗</small></span></button>`).join('')}</div>`;
+  archive.innerHTML = `<div class="demo-dialog-top"><div><p>THE TIME ARCHIVE</p><h2 id="demo-archive-title">Start with a postcard from the past</h2></div><button class="demo-close" data-close aria-label="Close Time Archive">×</button></div><p class="demo-archive-intro">Choose an era to see the same city in a different light.<br>These design samples use the same AI concept image and are not historical reconstructions.</p><div class="demo-archive-grid">${[['1900','Riverbanks at the Turn of the Century'],['1920','An Afternoon in the Steel City'],['1970','Memories on Film']].map(([era,title]) => `<button class="demo-archive-card" data-sample="${era}"><img src="${defaultSource}" alt="${title} concept preview"><span>${title}<small>PITTSBURGH · ${era}s ↗</small></span></button>`).join('')}</div>`;
   document.body.append(preview, archive);
   const picker = document.createElement('input');
   picker.type = 'file';
   picker.accept = 'image/jpeg,image/png,image/webp';
   picker.hidden = true;
-  picker.setAttribute('aria-label', '选择本地照片');
+  picker.setAttribute('aria-label', 'Choose a local photo');
   document.body.append(picker);
   function updateImages() {
     document.querySelectorAll('img[data-scene]').forEach(img => { img.src = source; });
@@ -60,7 +60,7 @@
     document.querySelectorAll('[data-compare]').forEach(node => { node.style.setProperty('--split', `${split}%`); });
     document.querySelectorAll('[data-compare-range]').forEach(input => {
       input.value = String(split);
-      input.setAttribute('aria-valuetext', `过去 ${split}%，现在 ${100 - split}%`);
+      input.setAttribute('aria-valuetext', `Past ${split}%, present ${100 - split}%`);
     });
     document.querySelectorAll('[data-compare-label]').forEach(node => { node.textContent = `${split}%`; });
   }
@@ -77,7 +77,7 @@
       source = defaultSource;
       updateImages();
       selectEra(target.dataset.sample);
-      document.querySelectorAll('[data-filename]').forEach(node => { node.textContent = 'Pittsburgh · 概念全景'; });
+      document.querySelectorAll('[data-filename]').forEach(node => { node.textContent = 'Pittsburgh · Concept panorama'; });
       archive.close();
       preview.showModal();
     }
@@ -96,8 +96,8 @@
     const file = picker.files[0];
     if (!file) return;
     picker.value = '';
-    if (!['image/jpeg','image/png','image/webp'].includes(file.type)) return notify('请使用 JPG、PNG 或 WebP 图片。');
-    if (file.size > 40 * 1024 * 1024) return notify('图片请小于 40 MB。');
+    if (!['image/jpeg','image/png','image/webp'].includes(file.type)) return notify('Please use a JPG, PNG, or WebP image.');
+    if (file.size > 40 * 1024 * 1024) return notify('Please choose an image smaller than 40 MB.');
     const version = ++selectionVersion;
     const nextUrl = URL.createObjectURL(file);
     const image = new Image();
@@ -113,10 +113,10 @@
       source = nextUrl;
       updateImages();
       document.querySelectorAll('[data-filename]').forEach(node => { node.textContent = file.name; });
-      notify('照片已载入，仅在本地预览。试试切换年代与拖动滑杆。');
+      notify('Photo loaded for local preview. Try switching eras and dragging the slider.');
     } catch {
       URL.revokeObjectURL(nextUrl);
-      if (version === selectionVersion) notify('这张图片无法读取，请换一张 JPG 或 PNG。');
+      if (version === selectionVersion) notify('Unable to read this image. Try another JPG or PNG.');
     }
   });
   const viewer = preview.querySelector('.demo-viewer');

@@ -4,7 +4,7 @@ export function positionFix(position, now = Date.now()) {
   const age = now - fix.timestamp_ms;
   if (![fix.lat, fix.lon, fix.accuracy_m, fix.timestamp_ms].every(Number.isFinite)
       || Math.abs(fix.lat) > 85 || Math.abs(fix.lon) > 180 || fix.accuracy_m < 0 || fix.accuracy_m > 1000
-      || age > 60000 || age < -10000) throw new Error('设备位置无效或已经过期，请等待新的定位。');
+      || age > 60000 || age < -10000) throw new Error('The device location is invalid or outdated. Please wait for a new location fix.');
   return fix;
 }
 

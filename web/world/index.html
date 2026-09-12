@@ -1,12 +1,12 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
   <meta name="theme-color" content="#32372f">
   <meta name="referrer" content="no-referrer">
-  <title>CENTURY PANO · 时间视窗</title>
-  <link rel="stylesheet" href="/world/style.css">
+  <title>CENTURY PANO · Time Window</title>
+  <link rel="stylesheet" href="/world/style.css?v=english">
   <script type="importmap">{"imports":{"three":"/world-vendor/three/build/three.module.js","three/addons/":"/world-vendor/three/examples/jsm/","@sparkjsdev/spark":"/world-vendor/@sparkjsdev/spark/dist/spark.module.js"}}</script>
 </head>
 <body>
@@ -17,90 +17,106 @@
     <symbol id="i-close" viewBox="0 0 24 24"><path d="m6 6 12 12M6 18 18 6"/></symbol>
   </defs></svg>
 
-  <main class="window workspace" aria-label="时间全景视窗">
-    <div id="viewport" tabindex="0" aria-label="环顾全景，拖动或使用方向键改变视角">
-      <div id="empty"><svg aria-hidden="true"><use href="#i-window"/></svg><p>从此刻，望向过去。</p><small>以手机当前位置为起点</small></div>
-      <img id="flat-preview" alt="生成资产预览" hidden>
-      <div class="move-pad" id="move-pad" hidden aria-label="虚拟移动控制">
-        <button type="button" data-move="forward" aria-label="向前">↑</button>
-        <div><button type="button" data-move="left" aria-label="向左">←</button><button type="button" data-move="back" aria-label="向后">↓</button><button type="button" data-move="right" aria-label="向右">→</button></div>
+  <main class="window workspace" aria-label="Time panorama viewer">
+    <div id="viewport" tabindex="0" aria-label="Look around the panorama. Drag or use arrow keys to change the view">
+      <div id="empty"><svg aria-hidden="true"><use href="#i-window"/></svg><p>Look back from where you stand.</p><small>Start from your current location</small></div>
+      <img id="flat-preview" alt="Generated asset preview" hidden>
+      <div class="move-pad" id="move-pad" hidden aria-label="Virtual movement controls">
+        <button type="button" data-move="forward" aria-label="Forward">↑</button>
+        <div><button type="button" data-move="left" aria-label="Left">←</button><button type="button" data-move="back" aria-label="Backward">↓</button><button type="button" data-move="right" aria-label="Right">→</button></div>
       </div>
       <p id="message" role="status" aria-live="polite"></p>
     </div>
     <div class="window-shade" aria-hidden="true"></div>
     <header class="site-header">
-      <a class="brand" href="/" aria-label="CENTURY PANO 首页"><svg aria-hidden="true"><use href="#i-window"/></svg><span>CENTURY<span class="brand-light"> PANO</span></span></a>
-      <div class="window-place"><svg aria-hidden="true"><use href="#i-location"/></svg><span id="window-location">正在定位…</span></div>
-      <button class="round-button" id="settings-open" type="button" aria-label="打开视窗设置" aria-haspopup="dialog" aria-controls="settings-dialog"><svg aria-hidden="true"><use href="#i-more"/></svg></button>
+      <a class="brand" href="/" aria-label="CENTURY PANO home"><svg aria-hidden="true"><use href="#i-window"/></svg><span>CENTURY<span class="brand-light"> PANO</span></span></a>
+      <div class="window-place"><svg aria-hidden="true"><use href="#i-location"/></svg><span id="window-location">Locating…</span></div>
+      <button class="round-button" id="settings-open" type="button" aria-label="Open viewer settings" aria-haspopup="dialog" aria-controls="settings-dialog"><svg aria-hidden="true"><use href="#i-more"/></svg></button>
     </header>
-    <nav class="view-tabs" aria-label="选择视图">
-      <button type="button" data-view="source" class="active" aria-pressed="true">当前街景</button>
-      <button type="button" data-view="pano" aria-pressed="false" disabled>历史全景</button>
-      <button type="button" data-view="world" aria-pressed="false" disabled>生成世界</button>
+    <nav class="view-tabs" aria-label="Choose a view">
+      <button type="button" data-view="source" class="active" aria-pressed="true">Street View</button>
+      <button type="button" data-view="pano" aria-pressed="false" disabled>Historical panorama</button>
+      <button type="button" data-view="world" aria-pressed="false" disabled>Generated world</button>
     </nav>
     <p id="scene-progress" class="scene-progress" role="status" aria-live="polite" hidden></p>
-    <section class="direction-controls" aria-label="手机朝向与视角对齐">
-      <div class="direction-row"><button id="motion-toggle" type="button" aria-pressed="false" disabled>开启转动跟随</button><span class="direction-divider" aria-hidden="true"></span><button id="align-view" type="button" disabled>对齐眼前</button><output id="heading-readout" aria-label="当前朝向">朝向 —</output></div>
-      <p id="motion-status" role="status">滑动环顾四周</p>
+    <section class="direction-controls" aria-label="Phone orientation and view alignment">
+      <div class="direction-row"><button id="motion-toggle" type="button" aria-pressed="false" disabled>Enable motion</button><span class="direction-divider" aria-hidden="true"></span><button id="align-view" type="button" disabled>Align heading</button><output id="heading-readout" aria-label="Current heading">Heading —</output></div>
+      <p id="motion-status" role="status">Swipe to look around</p>
+      <p id="walking-readout" role="status" hidden></p>
     </section>
-    <section class="journey-controls" aria-label="选择年代与开始旅程">
-      <p id="view-caption" class="view-caption">同一个地方，另一个年代。</p>
+    <section class="journey-controls" aria-label="Choose a year and start your journey">
+      <p id="view-caption" class="view-caption">Same place. Another time.</p>
       <form id="plan-form">
         <input id="year" type="hidden" value="1925">
-        <div class="year-entry"><div id="year-wheel" class="year-wheel" role="spinbutton" tabindex="0" aria-label="目标年份" aria-describedby="year-wheel-hint" aria-valuemin="1800" aria-valuemax="2026" aria-valuenow="1925" aria-valuetext="1925 年"></div><span class="year-suffix" aria-hidden="true">年</span></div>
-        <p id="year-wheel-hint" class="sr-only">上下滑动选择年份；键盘上下键逐年调整，Page Up 和 Page Down 调整十年。</p>
-        <div class="primary-actions"><button class="primary" id="generate" type="button" hidden>生成历史世界 <span aria-hidden="true">→</span></button></div>
+        <div class="year-entry"><div id="year-wheel" class="year-wheel" role="spinbutton" tabindex="0" aria-label="Target year" aria-describedby="year-wheel-hint" aria-valuemin="1800" aria-valuemax="2026" aria-valuenow="1925" aria-valuetext="Year 1925"></div></div>
+        <p id="year-wheel-hint" class="sr-only">Swipe up or down to choose a year. Arrow keys adjust by one year; Page Up and Page Down adjust by ten.</p>
+        <div class="primary-actions"><button class="primary" id="generate" type="button" hidden>Generate historical world <span aria-hidden="true">→</span></button></div>
       </form>
-      <p id="generation-price" class="generation-price" hidden>标准质量 · 1,500 credits，图片处理另计</p>
-      <p class="viewer-note" id="viewer-note">想象重建，非历史影像。</p>
+      <p id="generation-price" class="generation-price" hidden>Standard · 1,500 credits; image editing billed separately</p>
+      <p class="viewer-note" id="viewer-note">An imagined reconstruction, not historical footage.</p>
     </section>
     <p id="scene-attribution" class="scene-attribution"></p>
   </main>
 
   <dialog id="settings-dialog" class="options-sheet" aria-labelledby="settings-title">
     <div class="sheet-handle" aria-hidden="true"></div>
-    <div class="sheet-heading"><div><p class="eyebrow">CENTURY PANO</p><h1 id="settings-title">你的时间视窗</h1></div><button id="settings-close" class="round-button sheet-close" type="button" aria-label="关闭视窗设置"><svg aria-hidden="true"><use href="#i-close"/></svg></button></div>
-    <section class="sheet-section location-section" aria-label="当前位置">
-      <div class="location-title"><h2 id="location-label">手机当前位置</h2><button id="gps" class="text-button" type="button" form="plan-form">重新定位 ↗</button></div>
-      <p id="location-status" class="small" role="status" aria-live="polite">正在请求手机当前位置…</p><p id="location-meta" class="small"></p>
+    <div class="sheet-heading"><div><p class="eyebrow">CENTURY PANO</p><h1 id="settings-title">Your time window</h1></div><button id="settings-close" class="round-button sheet-close" type="button" aria-label="Close viewer settings"><svg aria-hidden="true"><use href="#i-close"/></svg></button></div>
+    <section class="sheet-section location-section" aria-label="Current location">
+      <div class="location-title"><h2 id="location-label">Current location</h2><button id="gps" class="text-button" type="button" form="plan-form">Refresh location ↗</button></div>
+      <p id="location-status" class="small" role="status" aria-live="polite">Requesting your current location…</p><p id="location-meta" class="small"></p>
       <div id="location-help" class="location-help" hidden>
-        <strong>先恢复位置权限</strong><p class="small">重复点定位不会强制弹出权限窗口。请同时检查此网站和手机系统的位置权限。</p>
-        <ol id="location-help-steps"></ol><p class="small">已保存的世界可以继续查看；获取新位置需要先恢复定位权限。</p>
-        <button id="retry-location" class="secondary" type="button">已修改权限，重新定位</button><button id="copy-location-link" class="secondary" type="button">复制演示链接到浏览器</button>
+        <strong>Restore location access</strong><p class="small">Retrying will not force the permission prompt to appear. Check location access for both this website and your phone.</p>
+        <ol id="location-help-steps"></ol><p class="small">Saved worlds remain available. Restore location access to get a new position.</p>
+        <button id="retry-location" class="secondary" type="button">Retry location</button><button id="copy-location-link" class="secondary" type="button">Copy demo link</button>
         <p id="location-copy-note" class="small"></p><p id="location-copy-status" class="small" role="status" aria-live="polite"></p>
       </div>
-      <button class="text-button" id="open-streetview" type="button" form="plan-form">在 Google 地图查看此处街景 ↗</button><p id="streetview-status" class="small"></p>
+      <button class="text-button" id="open-streetview" type="button" form="plan-form">Open this location in Google Street View ↗</button><p id="streetview-status" class="small"></p>
     </section>
-    <section class="sheet-section" aria-label="生成设置">
-      <h2>生成设置</h2>
-      <label>生成质量<select id="world-model" aria-describedby="generation-quality"><option value="marble-1.1">标准质量 · Marble 1.1</option><option value="marble-1.0-draft">快速草稿 · Draft</option></select></label>
-      <p class="small" id="generation-quality">标准质量世界生成 1,500 credits（约 $1.20）；全景图片处理另计。优先显示完整精度资源。</p>
-      <p class="small" id="generation-description">先将实景全景改写为目标年代，再由 World Labs 生成三维世界。画面细节、空间完整性与历史外观需在生成后检查。</p>
+    <section class="sheet-section" aria-label="Generation settings">
+      <h2>Generation settings</h2>
+      <label>Generation quality<select id="world-model" aria-describedby="generation-quality"><option value="marble-1.1">Standard · Marble 1.1</option><option value="marble-1.0-draft">Quick draft</option></select></label>
+      <p class="small" id="generation-quality">Standard world generation costs 1,500 credits (about $1.20). Panorama editing is billed separately. Full resolution assets are preferred.</p>
+      <p class="small" id="generation-description">The Street View panorama is edited for the selected year, then World Labs generates a 3D world. Visual detail, spatial completeness, and historical appearance need review after generation.</p>
     </section>
-    <section class="sheet-section" aria-label="视角与对齐说明">
-      <h2>视角与对齐</h2>
-      <p class="small" id="view-details">获取当前位置的街景后，可以拖动环顾四周，或开启手机转动跟随。</p>
-      <button id="reset-view" class="text-button" type="button">重置视角 ↺</button>
+    <section class="sheet-section" aria-label="View and alignment guide">
+      <h2>View and alignment</h2>
+      <p class="small" id="view-details">Once Street View loads, drag to look around or enable motion to follow your phone.</p>
+      <button id="reset-view" class="text-button" type="button">Reset view ↺</button>
+    </section>
+    <section class="sheet-section walking-section" aria-label="Walking and motion">
+      <h2>Walking and motion</h2>
+      <label for="walk-mode">Walking mode<select id="walk-mode"><option value="auto">Auto · Prefer native tracking</option><option value="gps">GPS walking · Outdoors</option><option value="native">AR tracking · Native app</option></select></label>
+      <p id="walk-status" class="small" role="status" aria-live="polite">Load a generated world to follow your movement with approximate GPS walking.</p>
+      <div id="walk-gps-options">
+        <label for="walk-heading">Actual view heading (°, optional)<input id="walk-heading" type="number" inputmode="decimal" min="0" max="359.9" step="any" placeholder="Leave blank to use the compass"></label>
+        <p class="small">Point your phone and the view at the same landmark. Enable motion to read the compass, or enter the heading: north 0°, east 90°, south 180°, west 270°. Check it again each time you reset the start.</p>
+        <p class="small">GPS movement is smoothed as new fixes arrive, at a rate set by your phone. Location error may hide small steps. Use native spatial tracking to follow individual steps.</p>
+      </div>
+      <label for="walk-scale">World units per real meter<input id="walk-scale" type="number" inputmode="decimal" min="0.000001" max="10000" step="any" placeholder="Enter a positive calibrated scale"></label>
+      <p id="walk-scale-note" class="small"></p>
+      <button id="walk-measure" class="text-button" type="button">Measure scale</button>
+      <div class="walking-actions"><button id="walk-start" class="secondary" type="button">Enable walking</button><button id="walk-reanchor" class="secondary" type="button" disabled>Reset start</button><button id="walk-stop" class="text-button" type="button" disabled>Stop</button></div>
+      <p class="small">Move within a safe, open area. The generated scene has no collision protection, and real obstacles may differ from the historical view. Resetting the start maps your current phone position to the frozen viewpoint.</p>
     </section>
     <section id="plan-panel" class="sheet-section" hidden>
-      <h2>这片土地的过去</h2><p id="plan-location" class="small" role="status"></p>
-      <div id="geometry-stats" class="stats"><div><strong id="modern-count">—</strong><span>现代建筑</span></div><div><strong id="removed-count">—</strong><span>依据年份移除</span></div><div><strong id="historic-count">—</strong><span>保留的粗体块</span></div></div>
+      <h2>The history of this place</h2><p id="plan-location" class="small" role="status"></p>
+      <div id="geometry-stats" class="stats"><div><strong id="modern-count">—</strong><span>Modern buildings</span></div><div><strong id="removed-count">—</strong><span>Removed by date</span></div><div><strong id="historic-count">—</strong><span>Retained massing</span></div></div>
       <div id="changes" class="changes"></div>
-      <details><summary>资料来源与不确定性</summary><div id="sources"></div><ul id="uncertainties"></ul></details>
-      <details id="geometry-edits"><summary>补充旧建筑与结构变化</summary><p class="small">导入包含旧建筑轮廓、高度、来源与变化说明的 JSON。新增和替换的几何会立即重新计算；用户补充资料会标为未核实。</p><label>变化清单 JSON<input id="edits-file" type="file" accept=".json,application/json"></label><a class="small" href="/world/edits-example.json" download>下载格式示例（演示坐标，不代表 CMU 历史）</a></details>
+      <details><summary>Sources and uncertainties</summary><div id="sources"></div><ul id="uncertainties"></ul></details>
+      <details id="geometry-edits"><summary>Add historical buildings and structural changes</summary><p class="small">Import JSON with historical building footprints, heights, sources, and change descriptions. Added and replaced geometry is recalculated immediately. User contributions are marked as unverified.</p><label>Changes JSON<input id="edits-file" type="file" accept=".json,application/json"></label><a class="small" href="/world/edits-example.json" download>Download example format (demo coordinates, not CMU history)</a></details>
     </section>
-    <section id="job-panel" class="sheet-section" hidden><div class="job-title"><span class="pulse" aria-hidden="true"></span><h2 id="job-stage">等待生成</h2></div><p id="job-detail" class="small"></p><p id="job-quality" class="small"></p><div id="job-assets" class="asset-buttons"></div><p id="cost" class="small"></p></section>
+    <section id="job-panel" class="sheet-section" hidden><div class="job-title"><span class="pulse" aria-hidden="true"></span><h2 id="job-stage">Waiting for generation</h2></div><p id="job-detail" class="small"></p><p id="job-quality" class="small"></p><div id="job-assets" class="asset-buttons"></div><p id="cost" class="small"></p></section>
     <details class="sheet-section advanced-settings">
-      <summary>位置与实验选项</summary>
-      <label>位置来源<select id="location-mode" form="plan-form"><option value="device" selected>手机当前位置</option><option value="test">测试模式 · 指定点位</option></select></label>
-      <div class="field-grid"><label>纬度<input id="lat" form="plan-form" type="number" step="any" min="-85" max="85" readonly required></label><label>经度<input id="lon" form="plan-form" type="number" step="any" min="-180" max="180" readonly required></label></div>
-      <label>范围半径<select id="radius" form="plan-form"><option value="50">50 米</option><option value="100" selected>100 米</option><option value="150">150 米</option></select></label>
-      <div id="test-controls" hidden><p class="small">测试模式：使用上方指定坐标，不代表手机当前位置。</p><button class="secondary" id="test-prepare" type="button" form="plan-form">查看测试点位街景</button><button class="secondary" id="snapshot" type="button" form="plan-form">旧几何实验 · CMU 快照 · 2026-09-12</button><button class="secondary" id="geometry-test" type="button" form="plan-form">旧几何实验 · 指定测试点位</button></div>
-      <nav class="experiment-tabs" aria-label="实验视图"><button type="button" data-view="historical" aria-pressed="false">历史粗模型</button><button type="button" data-view="modern" aria-pressed="false">现代粗模型</button><button type="button" data-view="depth" aria-pressed="false">深度全景</button></nav>
-      <p class="small">输入是 Google Street View 的 360° 实景全景照片。历史变化按来源记录；地图粗模型仅保留为测试实验。</p>
+      <summary>Location and experiments</summary>
+      <label>Location source<select id="location-mode" form="plan-form"><option value="device" selected>Current location</option><option value="test">Test mode · Custom location</option></select></label>
+      <div class="field-grid"><label>Latitude<input id="lat" form="plan-form" type="number" step="any" min="-85" max="85" readonly required></label><label>Longitude<input id="lon" form="plan-form" type="number" step="any" min="-180" max="180" readonly required></label></div>
+      <label>Area radius<select id="radius" form="plan-form"><option value="50">50 m</option><option value="100" selected>100 m</option><option value="150">150 m</option></select></label>
+      <div id="test-controls" hidden><p class="small">Test mode: uses the coordinates above, not your current phone location.</p><button class="secondary" id="test-prepare" type="button" form="plan-form">View Street View at test location</button><button class="secondary" id="snapshot" type="button" form="plan-form">Legacy geometry · CMU snapshot · 2026-09-12</button><button class="secondary" id="geometry-test" type="button" form="plan-form">Legacy geometry · Custom test location</button></div>
+      <nav class="experiment-tabs" aria-label="Experimental views"><button type="button" data-view="historical" aria-pressed="false">Historical massing</button><button type="button" data-view="modern" aria-pressed="false">Modern massing</button><button type="button" data-view="depth" aria-pressed="false">Depth panorama</button></nav>
+      <p class="small">Input is a 360° Google Street View photo. Historical changes are documented by source; coarse map models are retained as test experiments.</p>
     </details>
-    <section id="access-panel" class="sheet-section" hidden><label>开发访问码<input id="access" type="password" autocomplete="off"></label><button class="secondary" id="connect" type="button">连接生成服务</button><p class="small">远程访问使用独立访问码，不需要输入 World Labs 密钥。</p></section>
-    <footer class="sheet-footnote"><p class="notice">想象重建，非历史影像。<br>未核实的地块用途与建筑外观仍属推测。</p><span class="connection" id="connection">连接中</span></footer>
+    <section id="access-panel" class="sheet-section" hidden><label>Developer access code<input id="access" type="password" autocomplete="off"></label><button class="secondary" id="connect" type="button">Connect to generation service</button><p class="small">Remote access uses a separate access code. No World Labs API key is needed here.</p></section>
+    <footer class="sheet-footnote"><p class="notice">An imagined reconstruction, not historical footage.<br>Unverified land use and building appearance remain speculative.</p><span class="connection" id="connection">Connecting</span></footer>
   </dialog>
   <script type="module" src="/world/app.js"></script>
 </body>

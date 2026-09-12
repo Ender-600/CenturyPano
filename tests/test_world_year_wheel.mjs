@@ -62,7 +62,7 @@ test('initial selection and server range update keep value, visible selection, a
   const { wheel, element, input, changes } = fixture();
   assert.equal(input.value, '1925');
   assert.equal(element.attributes.role, 'spinbutton');
-  assert.equal(element.attributes['aria-valuetext'], '1925 年');
+  assert.equal(element.attributes['aria-valuetext'], 'Year 1925');
   assert.equal(element.children[0].children[125].classList.contains('is-selected'), true);
   wheel.setRange(1950, 2025);
   assert.equal(input.value, '1950');

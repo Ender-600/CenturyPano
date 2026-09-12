@@ -14,7 +14,7 @@
 | --- | --- | --- |
 | 当前街景 | Google 拍摄的完整全景，拍摄日期见设置；不是实时摄像头画面 | 拖动、方向键或手机转动环视 |
 | 历史全景 | 根据源照片生成的历史想象图 | 同上，切换今昔保留同一查看方向 |
-| 生成世界 | Marble 生成的三维 Gaussian Splat | 环视、虚拟移动，也可开启相对转动跟随并手动校准 |
+| 生成世界 | Marble 生成的三维 Gaussian Splat | 环视、虚拟移动，或校准后开启 GPS 近似行走／原生 AR 追踪；GPS 可与手机转动跟随同时使用 |
 
 前两种使用球面纹理与透视相机，显示当前视角对应的画面；支持滚轮和双指缩放。它们只改变查看方向，没有真实行走的位置视差。旧粗模型和深度诊断保留在实验选项。
 
@@ -24,13 +24,19 @@
 
 校准操作：保持手机后摄对准眼前清晰的地标，点击「校准朝向」，拖动画面找到该地标的方向，再点击「完成对齐」。校准只调整水平朝向偏差；俯仰和倾斜继续来自手机传感器。当前街景与历史全景共享查看方向，切换到生成世界则需要单独开启跟随、校准。
 
-指南针参考磁北，存在传感器误差与磁偏角；GPS 的 `heading` 是相对真北的**行动方向**，静止时可能没有值。页面将有效 GPS 行进方向单独显示，不把它当作摄像头朝向，也不据此移动三维相机。[W3C 姿态参考系](https://www.w3.org/TR/orientation-sensor/#absoluteorientationsensor-model)、[W3C GPS heading](https://www.w3.org/TR/geolocation/#heading-attribute)
+指南针参考磁北，存在传感器误差与磁偏角；GPS 的 `heading` 是相对真北的**行动方向**，静止时可能没有值。页面将有效 GPS 行进方向单独显示，不把它当作摄像头朝向。GPS 行走根据经纬度位移更新相机位置，转动视角仍来自方向传感器。[W3C 姿态参考系](https://www.w3.org/TR/orientation-sensor/#absoluteorientationsensor-model)、[W3C GPS heading](https://www.w3.org/TR/geolocation/#heading-attribute)
+
+生成世界加载后，在设置中选择行走方式。自动模式在原生客户端优先使用 ARKit／ARCore，在普通浏览器使用 GPS 近似跟随。两种方式都需要提供方米制比例，或先完成两点／手动尺度校准。GPS 启动时用当前指南针镜头朝向，或用户输入的已知地理方位，把现实东、北方向与虚拟画面对齐；平移映射随后保持固定，边走边侧看不会改变行进方向。GPS 仅更新水平位置，保持高度。
+
+GPS 适合定位较好的室外区域。跟随会筛选定位精度、过滤抖动，并对画面位置插值；浏览器与设备决定定位更新频率，因此不能承诺每一步立即反映。数据过期或切入后台时冻结位移，返回后需重设起点；切换世界会结束跟随。精度、噪声与延迟仍需实体手机验收。[W3C Geolocation](https://www.w3.org/TR/geolocation/)
 
 ## 对齐依据与边界
 
 源街景像素保留原始方向。查看器将图像中心对应到保存的 `heading`，右侧对应顺时针增加的方位。Google Maps JavaScript 的 `centerHeading` 明确指全景中心方位；Tiles API 仅将 `heading` 描述为相对北方的顺时针方位。两者的对应是**跨接口推断，尚未通过实景测量验证**。目前不额外猜测 `tilt/roll` 的校正矩阵。[Google 全景中心定义](https://developers.google.com/maps/documentation/javascript/reference/street-view#StreetViewTileData)、[Google Tiles 元数据](https://developers.google.com/maps/documentation/tile/streetview#metadata_response)
 
-这套功能提供方向跟随，尚未实现 AR 位置追踪：街景拍摄点与手机 GPS 可能相距数米以上，设置中显示准备时的偏移；AI 历史改图可能改变地标或投影；Marble 的坐标轴、相机原点和地理朝向也未验证。共享视角和手动水平校准不会消除这些位置、几何和图像差异，不能保证与真实摄像头逐像素重合。
+普通浏览器提供 GPS 近似行走和独立的方向跟随；[ARKit／ARCore 客户端](../mobile/README.md) 使用相机与惯性传感器追踪空间位移与朝向，适合需要细小位移跟随的场景。原生客户端需要在实体手机安装，也要设置起点、水平朝向与比例。追踪失效会冻结视点，并要求明确重设起点。原生自动测试和构建已通过；GPS 与 AR 的真机精度均尚待验收。
+
+街景拍摄点与手机 GPS 可能相距数米以上，设置中显示准备时的偏移；AI 历史改图可能改变地标或投影；Marble 的相机原点和地理朝向也未验证。GPS、原生位姿与手动校准不会消除这些位置、几何和图像差异，不能保证与真实摄像头逐像素重合。详细实现见 [真实行走说明](REAL_WALKING.md)。
 
 ## 验证
 

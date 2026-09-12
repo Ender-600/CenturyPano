@@ -60,10 +60,10 @@ async def main():
         raise SystemExit('Set PROVIDER=demo to seed synthetic engineering examples; live runs use make_replay.py.')
     fixture_dir = ROOT / 'data/fixtures'
     fixture_dir.mkdir(parents=True, exist_ok=True)
-    for name, decade, wrap, seed in [('城市街景', '1920s', False, 7), ('校园街区', '1950s', False, 13), ('360 环景', '1900s', True, 21)]:
+    for name, decade, wrap, seed in [('City street', '1920s', False, 7), ('Campus neighborhood', '1950s', False, 13), ('360° panorama', '1900s', True, 21)]:
         path = fixture_dir / f'engineering-{seed}.jpg'
         draw_panorama(path, wrap=wrap, seed=seed)
-        m = await make_replay(path, decade, 'Pittsburgh', baseline=True, is_360=wrap, title=f'{name} · 工程示例')
+        m = await make_replay(path, decade, 'Pittsburgh', baseline=True, is_360=wrap, title=f'{name} · Engineering example')
         update_manifest(m['job_id'], lambda item: item['source'].update(example=True, attribution='Procedural illustration by Century Pano; not a photograph.'))
         print(f'{name}: {m["job_id"]} {m["metrics"]}', flush=True)
 

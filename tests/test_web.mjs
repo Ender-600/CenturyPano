@@ -134,7 +134,7 @@ test('mismatched-year results stop before applying a manifest', async () => {
   view.jobs.set('wrong-year', { job_id: 'wrong-year', target_year: 1950, status: 'done' });
   await view.pollManifest(view.state.generation);
   assert.equal(view.state.manifest, null);
-  assert.match(view.elements.get('generation-title').textContent, /年份与选择不一致/);
+  assert.match(view.elements.get('generation-title').textContent, /year does not match your selection/);
 });
 
 test('historical context includes the reference date and unverified site uncertainty safely', () => {
@@ -145,9 +145,9 @@ test('historical context includes the reference date and unverified site uncerta
     site_history: 'Earlier undeveloped land', uncertainties: ['Exact site history is unknown'],
   } } });
   const content = view.elements.get('historical-context').innerHTML;
-  assert.match(content, /1945 年 7 月 1 日/);
-  assert.match(content, /未经史料核实/);
-  assert.match(content, /未开发/);
+  assert.match(content, /July 1, 1945/);
+  assert.match(content, /Not verified against historical records/);
+  assert.match(content, /Undeveloped/);
   assert.match(content, /Exact site history is unknown/);
   assert.ok(!content.includes('<script>'));
   assert.match(view.document.title, /^1945 · Shanghai/);
@@ -157,10 +157,10 @@ test('unrecognized manual cities are explicitly excluded and history progress ex
   const view = app();
   view.updateMetadata({ target_year: 1945, stage: 'history', place: { name: 'Unknown place', source: 'manual', prompt_safe: false } });
   assert.equal(view.elements.get('place-warning').hidden, false);
-  assert.match(view.elements.get('place-warning').textContent, /手填城市未识别，未用于历史推理/);
-  assert.match(view.elements.get('location-note').textContent, /补充州 \/ 国家或使用照片定位/);
-  assert.equal(view.elements.get('generation-detail').textContent, '正在判断该年份的当地历史与地块变化');
+  assert.match(view.elements.get('place-warning').textContent, /city was not recognized and was excluded from historical inference/);
+  assert.match(view.elements.get('location-note').textContent, /Add a state \/ country or use the photo location/);
+  assert.equal(view.elements.get('generation-detail').textContent, 'Assessing local history and land use changes for this year');
   view.updateMetadata({ target_year: 1945, place: { name: 'Pittsburgh', source: 'manual', prompt_safe: true } });
   assert.equal(view.elements.get('place-warning').hidden, true);
-  assert.match(html, /placeholder="城市，例如 Pittsburgh, PA, US"/);
+  assert.match(html, /placeholder="City, e.g. Pittsburgh, PA, US"/);
 });

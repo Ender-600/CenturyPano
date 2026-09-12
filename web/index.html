@@ -1,11 +1,11 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#242722">
-  <meta name="description" content="CENTURY PANO — 用一张全景，走进另一个年代。">
-  <title>CENTURY PANO · 看见时间的另一面</title>
+  <meta name="description" content="CENTURY PANO — Step into another era with a single panorama.">
+  <title>CENTURY PANO · See the Other Side of Time</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23242722'/%3E%3Cpath d='M24 10a10 10 0 1 0 0 12M7 16h20M16 5v22' stroke='%23d8bf89' fill='none' stroke-width='1.5'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="/style.css">
   <script src="/app.js" defer></script>
@@ -23,79 +23,79 @@
     <symbol id="i-close" viewBox="0 0 24 24"><path d="m6 6 12 12M6 18 18 6"/></symbol>
   </defs></svg>
   <header class="site-header" id="site-header">
-    <a href="/" class="brand" aria-label="CENTURY PANO 首页"><span class="brand-mark"><span></span></span><span>CENTURY<span class="brand-light"> PANO</span></span></a>
-    <div class="header-right"><span class="header-caption">A WINDOW THROUGH TIME</span><span id="connection-status" class="connection"><i></i><span>准备探索</span></span><button class="text-button header-replays" id="nav-replays">时光档案 <span>↗</span></button></div>
+    <a href="/" class="brand" aria-label="CENTURY PANO home"><span class="brand-mark"><span></span></span><span>CENTURY<span class="brand-light"> PANO</span></span></a>
+    <div class="header-right"><span class="header-caption">A WINDOW THROUGH TIME</span><span id="connection-status" class="connection"><i></i><span>Ready to explore</span></span><button class="text-button header-replays" id="nav-replays">Time Archive <span>↗</span></button></div>
   </header>
 
   <main id="main">
     <section id="capture-screen" class="screen capture-screen">
       <div class="landing-copy">
         <div class="eyebrow"><span class="tiny-cross">✳</span> THE PAST IS ALL AROUND YOU</div>
-        <h1>同一个地方。<br>另一个<span class="serif-accent">时代。</span></h1>
+        <h1>The same place.<br>Another <span class="serif-accent">era.</span></h1>
         <p class="hero-english">A different time.<br>The same point of view.</p>
-        <p class="intro">拍下一张全景，让眼前的街景穿越百年。<br>转动手机，看看时间的另一面。</p>
+        <p class="intro">Capture a panorama and send your street view back a century.<br>Turn your phone to see the other side of time.</p>
         <div class="capture-actions">
-          <button class="button button-primary" id="capture-button"><svg><use href="#i-camera"/></svg>拍摄全景<span class="button-arrow">↗</span></button>
-          <button class="button button-secondary" id="album-button"><svg><use href="#i-image"/></svg>从相册选择</button>
+          <button class="button button-primary" id="capture-button"><svg><use href="#i-camera"/></svg>Take a panorama<span class="button-arrow">↗</span></button>
+          <button class="button button-secondary" id="album-button"><svg><use href="#i-image"/></svg>Choose a photo</button>
         </div>
-        <p class="capture-hint">用手机全景模式，慢慢转身约 90 度，5 秒就够</p>
-        <p><a class="text-button" href="/world/">探索历史三维区块 ↗</a></p>
-        <button class="sample-link" id="sample-button"><span class="play-circle">▶</span><span>先来一场时光旅行<small>探索工程示例 · 无需上传</small></span><svg><use href="#i-arrow"/></svg></button>
+        <p class="capture-hint">Use panorama mode and turn slowly about 90° in 5 seconds</p>
+        <p><a class="text-button" href="/world/">Explore a historic 3D block ↗</a></p>
+        <button class="sample-link" id="sample-button"><span class="play-circle">▶</span><span>Try a journey through time<small>Explore the demo · No upload needed</small></span><svg><use href="#i-arrow"/></svg></button>
       </div>
       <div class="hero-visual">
         <div class="hero-frame">
-          <img class="hero-scene" src="/scene.svg" alt="虚构河畔城市的全景建筑插画" draggable="false">
+          <img class="hero-scene" src="/scene.svg" alt="Panoramic illustration of a fictional riverside city" draggable="false">
           <div class="hero-past"></div>
           <div class="hero-topline"><span><i></i> THROUGH THE CENTURY</span><span>40°26′ N &nbsp; 79°59′ W</span></div>
           <div class="hero-date"><span>THEN</span><strong>1925<span>↗</span></strong></div>
           <div class="hero-present"><span>NOW</span><strong>2026</strong></div>
           <div class="hero-divider"><div>‹ <span>›</span></div></div>
-          <div class="hero-bottom"><span>一张全景，无数种时光。</span><span class="illustration-label">概念插画 · 非历史影像</span></div>
+          <div class="hero-bottom"><span>One panorama. Countless moments.</span><span class="illustration-label">Concept art · Not historical imagery</span></div>
         </div>
         <div class="visual-caption"><span>01 — REIMAGINE YOUR SURROUNDINGS</span><span class="little-compass">N ↑</span></div>
-        <div class="decade-rail" aria-label="按年探索历史"><span>CHOOSE ANY YEAR</span><div>1800</div><div class="selected">1925<i></i></div><div>1945</div><div>1950</div></div>
+        <div class="decade-rail" aria-label="Explore history by year"><span>CHOOSE ANY YEAR</span><div>1800</div><div class="selected">1925<i></i></div><div>1945</div><div>1950</div></div>
       </div>
-      <div class="how-it-works"><div><span class="step-number">01</span><p>留住眼前<small>拍摄或上传一张全景</small></p></div><span class="step-connector"></span><div><span class="step-number">02</span><p>选择年份<small>逐年探索此地的历史背景</small></p></div><span class="step-connector"></span><div><span class="step-number">03</span><p>转动，穿越<small>拖动或用手机探索时光</small></p></div><span class="journey-note">YOUR VIEW.<br>ANOTHER CENTURY.</span></div>
+      <div class="how-it-works"><div><span class="step-number">01</span><p>Capture the present<small>Take or upload a panorama</small></p></div><span class="step-connector"></span><div><span class="step-number">02</span><p>Choose a year<small>Explore local history year by year</small></p></div><span class="step-connector"></span><div><span class="step-number">03</span><p>Turn back time<small>Drag or turn your phone to explore</small></p></div><span class="journey-note">YOUR VIEW.<br>ANOTHER CENTURY.</span></div>
     </section>
 
     <section id="preview-screen" class="screen preview-screen" hidden>
-      <div class="section-top"><button class="back-button" id="retake-button">← <span>重拍 / 换一张</span></button><span class="eyebrow">01 / FRAME YOUR JOURNEY</span></div>
-      <div class="preview-heading"><div><p class="eyebrow">EVERY PLACE HAS A PAST</p><h2>从这里，回到过去。</h2></div><p>左右拖动，选好你的视角。<br>眼前的区域会被优先重建。</p></div>
-      <div class="preview-window" id="preview-window" tabindex="0" aria-label="全景预览，使用左右方向键或拖动平移"><img id="preview-image" alt="你上传的全景预览" draggable="false"><span class="preview-crosshair"></span><div class="viewport-hint">↔ &nbsp; 左右拖动，调整视角</div></div>
+      <div class="section-top"><button class="back-button" id="retake-button">← <span>Retake / Choose another</span></button><span class="eyebrow">01 / FRAME YOUR JOURNEY</span></div>
+      <div class="preview-heading"><div><p class="eyebrow">EVERY PLACE HAS A PAST</p><h2>Go back in time, right here.</h2></div><p>Drag left or right to frame your view.<br>This area will be reconstructed first.</p></div>
+      <div class="preview-window" id="preview-window" tabindex="0" aria-label="Panorama preview. Drag or use the left and right arrow keys to pan"><img id="preview-image" alt="Preview of your uploaded panorama" draggable="false"><span class="preview-crosshair"></span><div class="viewport-hint">↔ &nbsp; Drag left or right to adjust your view</div></div>
       <p id="image-warning" class="warning-note" hidden></p>
       <div class="preview-controls">
         <div class="era-control">
-          <label class="field-label" for="year-input"><span>01</span> 想去哪一年？<small>逐年选择</small></label>
-          <div class="year-entry"><input id="year-input" type="number" inputmode="numeric" min="1800" max="2026" step="1" value="1925" required aria-describedby="year-note"><span>年</span></div>
-          <input id="year-range" class="year-range" type="range" min="1800" max="2026" step="1" value="1925" aria-label="选择历史年份" aria-describedby="year-note">
+          <label class="field-label" for="year-input"><span>01</span> Which year?<small>Choose any year</small></label>
+          <div class="year-entry"><input id="year-input" type="number" inputmode="numeric" min="1800" max="2026" step="1" value="1925" required aria-describedby="year-note"><span>year</span></div>
+          <input id="year-range" class="year-range" type="range" min="1800" max="2026" step="1" value="1925" aria-label="Choose a historical year" aria-describedby="year-note">
           <div class="year-scale" aria-hidden="true"><span id="year-min">1800</span><span id="year-max">2026</span></div>
-          <div class="year-options" id="year-options" aria-label="快捷年份"><button data-year="1905" aria-pressed="false">1905</button><button data-year="1925" aria-pressed="true" class="active">1925</button><button data-year="1945" aria-pressed="false">1945</button><button data-year="1950" aria-pressed="false">1950</button></div>
-          <p id="year-note" class="field-note">以当年 7 月 1 日为参考，结合拍摄地点推测当时的历史背景。</p>
+          <div class="year-options" id="year-options" aria-label="Suggested years"><button data-year="1905" aria-pressed="false">1905</button><button data-year="1925" aria-pressed="true" class="active">1925</button><button data-year="1945" aria-pressed="false">1945</button><button data-year="1950" aria-pressed="false">1950</button></div>
+          <p id="year-note" class="field-note">Uses July 1 of that year and the photo location to infer historical context.</p>
         </div>
-        <div class="location-control"><label class="field-label" for="place-input"><span>02</span> 这是哪里？<small>可手填城市覆盖定位</small></label><div class="place-input-wrap"><svg><use href="#i-location"/></svg><input id="place-input" maxlength="160" placeholder="城市，例如 Pittsburgh, PA, US" autocomplete="off"></div><p id="location-note" class="field-note">优先使用照片 GPS，没有时尝试设备定位。手填城市仅提供城市级背景。</p><p class="field-note location-privacy">上传的照片 GPS、设备定位或已识别的手填城市会用于 AI 历史背景推测；具体建筑与土地用途仍需史料核实。</p><label class="check-label"><input id="is-360" type="checkbox">这是一张 360° 等距柱状全景</label></div>
-        <div class="continue-control"><button class="button button-primary" id="generate-button">走进 1925 年<svg><use href="#i-arrow"/></svg></button><p id="provider-note">想象重建，非历史影像</p></div>
+        <div class="location-control"><label class="field-label" for="place-input"><span>02</span> Where is this?<small>Enter a city to override location</small></label><div class="place-input-wrap"><svg><use href="#i-location"/></svg><input id="place-input" maxlength="160" placeholder="City, e.g. Pittsburgh, PA, US" autocomplete="off"></div><p id="location-note" class="field-note">Uses photo GPS first, then device location. An entered city provides city-level context only.</p><p class="field-note location-privacy">Photo GPS, device location, or a recognized city is used to infer historical context with AI. Buildings and land use still need historical verification.</p><label class="check-label"><input id="is-360" type="checkbox">This is a 360° equirectangular panorama</label></div>
+        <div class="continue-control"><button class="button button-primary" id="generate-button">Step into 1925<svg><use href="#i-arrow"/></svg></button><p id="provider-note">An imagined reconstruction, not historical imagery</p></div>
       </div>
     </section>
 
     <section id="result-screen" class="screen result-screen" hidden>
-      <div class="result-top chrome"><button class="back-button" id="new-journey-button">← <span>新的旅程</span></button><div class="result-place"><svg><use href="#i-location"/></svg><span id="result-place">未知城市</span><span id="replay-badge" class="badge" hidden>回放</span></div><span id="result-mode" class="result-mode"></span></div>
+      <div class="result-top chrome"><button class="back-button" id="new-journey-button">← <span>New journey</span></button><div class="result-place"><svg><use href="#i-location"/></svg><span id="result-place">Unknown city</span><span id="replay-badge" class="badge" hidden>Replay</span></div><span id="result-mode" class="result-mode"></span></div>
       <p id="place-warning" class="warning-note chrome" role="status" hidden></p>
-      <div class="result-heading chrome"><div><span class="eyebrow">A WINDOW THROUGH TIME</span><h2>此刻，<span id="result-year">1925</span><span class="year-dot">.</span></h2></div><p id="result-subtitle">旧日的风景，正在眼前展开。</p></div>
-      <div class="pano-viewport" id="pano-viewport" tabindex="0" aria-label="全景对比，拖动或按左右键平移">
+      <div class="result-heading chrome"><div><span class="eyebrow">A WINDOW THROUGH TIME</span><h2>Welcome to <span id="result-year">1925</span><span class="year-dot">.</span></h2></div><p id="result-subtitle">The past is unfolding before your eyes.</p></div>
+      <div class="pano-viewport" id="pano-viewport" tabindex="0" aria-label="Panorama comparison. Drag or use the left and right arrow keys to pan">
         <div class="pano-layer original-layer" id="original-layer"><canvas id="original-canvas"></canvas></div>
         <div class="past-clip" id="past-clip"><div class="pano-layer past-layer" id="past-layer"><canvas id="past-canvas"></canvas></div></div>
         <div class="viewport-gradient"></div>
-        <div class="viewport-label present-label chrome">现在 <span>ORIGINAL</span></div><div class="viewport-label past-label chrome" id="past-label">1925 年 <span>REIMAGINED</span></div>
-        <div class="slider-handle" id="slider-handle" role="slider" tabindex="0" aria-label="过去影像显示比例" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span class="slider-grip">‹<i></i>›</span></div>
-        <div class="generation-overlay" id="generation-overlay"><span class="processing-orbit"></span><strong id="generation-title">让时间慢下来</strong><span id="generation-detail">正在读取你的全景…</span></div>
-        <div class="pan-indicator chrome"><span>↔</span> 拖动探索全景 <i></i> 拖动圆点对比今昔</div>
+        <div class="viewport-label present-label chrome">Now <span>ORIGINAL</span></div><div class="viewport-label past-label chrome" id="past-label">1925 <span>REIMAGINED</span></div>
+        <div class="slider-handle" id="slider-handle" role="slider" tabindex="0" aria-label="Past image visibility" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span class="slider-grip">‹<i></i>›</span></div>
+        <div class="generation-overlay" id="generation-overlay"><span class="processing-orbit"></span><strong id="generation-title">Let time slow down</strong><span id="generation-detail">Reading your panorama…</span></div>
+        <div class="pan-indicator chrome"><span>↔</span> Drag to explore <i></i> Drag the handle to compare</div>
         <div class="reveal-title" id="reveal-title"><span>WELCOME TO</span><strong id="reveal-year">1925</strong></div>
       </div>
-      <div class="progress-strip chrome" id="progress-strip"><div class="progress-track"><span id="progress-fill"></span></div><p><span id="progress-text">准备出发</span><span id="progress-count">0 / 0</span></p></div>
-      <div class="result-toolbar chrome"><div class="gyro-controls"><button class="button button-small" id="gyro-button"><svg><use href="#i-gyro"/></svg>开启转动跟随</button><button class="text-button" id="recenter-button" hidden>以当前朝向为中心</button></div><div class="result-tools"><button class="icon-button" id="audio-button" aria-label="播放年代氛围音" title="播放氛围音"><svg><use href="#i-sound"/></svg></button><a class="button button-small" id="download-button" hidden download="century-pano.jpg"><svg><use href="#i-image"/></svg>保存全景</a></div></div>
+      <div class="progress-strip chrome" id="progress-strip"><div class="progress-track"><span id="progress-fill"></span></div><p><span id="progress-text">Getting ready</span><span id="progress-count">0 / 0</span></p></div>
+      <div class="result-toolbar chrome"><div class="gyro-controls"><button class="button button-small" id="gyro-button"><svg><use href="#i-gyro"/></svg>Enable motion tracking</button><button class="text-button" id="recenter-button" hidden>Center current view</button></div><div class="result-tools"><button class="icon-button" id="audio-button" aria-label="Play era ambience" title="Play ambience"><svg><use href="#i-sound"/></svg></button><a class="button button-small" id="download-button" hidden download="century-pano.jpg"><svg><use href="#i-image"/></svg>Save panorama</a></div></div>
       <p id="gyro-hint" class="gyro-hint chrome" hidden></p>
-      <section id="historical-context" class="historical-context chrome" aria-label="历史背景与不确定性" hidden></section>
-      <div class="result-bottom chrome"><p class="reconstruction-notice"><span>✳</span> 想象重建，非历史影像<small id="result-note">结合所选年份与拍摄地点推测历史场景，建筑和土地用途可能与今天不同。</small></p><button class="text-button" id="metrics-toggle" aria-expanded="false">本次旅程的数据 <span>+</span></button></div>
+      <section id="historical-context" class="historical-context chrome" aria-label="Historical context and uncertainty" hidden></section>
+      <div class="result-bottom chrome"><p class="reconstruction-notice"><span>✳</span> An imagined reconstruction, not historical imagery<small id="result-note">The scene is inferred from the selected year and photo location. Buildings and land use may differ from today.</small></p><button class="text-button" id="metrics-toggle" aria-expanded="false">Journey metrics <span>+</span></button></div>
       <div id="metrics-panel" class="metrics-panel chrome" hidden></div>
     </section>
   </main>
@@ -104,7 +104,7 @@
   <input id="camera-input" type="file" accept="image/*,.heic,.heif" capture="environment" hidden>
   <input id="album-input" type="file" accept="image/*,.heic,.heif" hidden>
   <div class="toast" id="toast" role="status" hidden></div>
-  <dialog id="replay-dialog"><div class="dialog-header"><div><p class="eyebrow">THE TIME ARCHIVE</p><h2>时光档案</h2></div><button class="icon-button" id="close-replays" aria-label="关闭时光档案"><svg><use href="#i-close"/></svg></button></div><p class="dialog-intro">已完成的旅程，可以一遍遍重访。<br>回放使用已保存的结果，不调用生成服务。</p><div id="replay-list" class="replay-list"></div><p class="dialog-footnote">工程示例为程序绘制的虚构场景与本地调色，不代表 AI 重建效果。</p></dialog>
-  <noscript><p class="noscript">请开启 JavaScript 以使用全景预览和时光对比。</p></noscript>
+  <dialog id="replay-dialog"><div class="dialog-header"><div><p class="eyebrow">THE TIME ARCHIVE</p><h2>Time Archive</h2></div><button class="icon-button" id="close-replays" aria-label="Close Time Archive"><svg><use href="#i-close"/></svg></button></div><p class="dialog-intro">Revisit your completed journeys anytime.<br>Replays use saved results without calling the generation service.</p><div id="replay-list" class="replay-list"></div><p class="dialog-footnote">The demo uses an illustrated fictional scene and local color grading. It does not represent AI reconstruction quality.</p></dialog>
+  <noscript><p class="noscript">Enable JavaScript to preview panoramas and compare past and present.</p></noscript>
 </body>
 </html>

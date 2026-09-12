@@ -1,9 +1,9 @@
 (() => {
   'use strict';
   const designs = {
-    cinema: { number: '01', title: '让穿越，像电影开场。', copy: '沉浸式大画面 · 炭黑与日落橙 · 情绪优先', name: '电影感深色' },
-    studio: { number: '02', title: '把时间，放进工作台。', copy: '蓝白极简 · 清晰操作路径 · 工具体验优先', name: '极简工作台' },
-    postcard: { number: '03', title: '给过去，寄一张明信片。', copy: '奶油黄与森林绿 · 票券与邮戳 · 旅行趣味优先', name: '旅行手账' }
+    cinema: { number: '01', title: 'Let time travel begin like a movie.', copy: 'Immersive imagery · Charcoal and sunset orange · Made for atmosphere', name: 'Cinematic Dark' },
+    studio: { number: '02', title: 'Make time your creative workspace.', copy: 'Minimal blue and white · Clear controls · Made for creating', name: 'Minimal Studio' },
+    postcard: { number: '03', title: 'Send a postcard to the past.', copy: 'Butter yellow and forest green · Tickets and postmarks · Made for adventure', name: 'Travel Journal' }
   };
   const frame = document.querySelector('#design-frame');
   function choose(key, writeHash = true) {
@@ -15,7 +15,7 @@
       button.setAttribute('aria-pressed', String(selected));
     });
     if (frame.getAttribute('src') !== `${key}/`) frame.src = `${key}/`;
-    frame.title = `方案 ${direction.number}：${direction.name}`;
+    frame.title = `Design ${direction.number}: ${direction.name}`;
     document.querySelector('#standalone-link').href = `${key}/`;
     document.querySelector('#direction-number').textContent = `${direction.number} / 03`;
     document.querySelector('#direction-title').textContent = direction.title;

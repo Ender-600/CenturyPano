@@ -16,6 +16,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.config import settings
+from app.constraints import PROMPT_VERSION
 from app.temporal import MIN_YEAR, MAX_YEAR
 from app.worlds.profiles import DEFAULT_WORLD_MODEL, WORLD_MODELS, WorldModel
 
@@ -42,18 +43,18 @@ async def shutdown():
 
 def manager():
     if _manager is None:
-        raise HTTPException(503, '世界生成服务尚未启动。')
+        raise HTTPException(503, 'The world generation service has not started yet.')
     return _manager
 
 
 async def require_access(request: Request):
     supplied = request.headers.get('authorization', '')
     if not secrets.compare_digest(supplied.encode(), ('Bearer ' + settings.world_access_token).encode()):
-        raise HTTPException(401, '请连接生成服务；远程访问需要独立访问码。')
+        raise HTTPException(401, 'Please connect to the generation service. Remote access requires a separate access code.')
     if request.method in ('POST', 'PATCH'):
         # Bound the actual body, including requests without Content-Length.
         if len(await request.body()) > 256 * 1024:
-            raise HTTPException(413, '区块请求过大。')
+            raise HTTPException(413, 'The world plan request is too large.')
 
 
 @router.get('/world-config')
@@ -77,7 +78,7 @@ async def local_session(request: Request):
     local_host = request.url.hostname in ('localhost', '127.0.0.1', '::1', 'testserver')
     if (not local or not local_host or request.headers.get('sec-fetch-site') == 'cross-site'
             or origin and origin.rstrip('/') != str(request.base_url).rstrip('/')):
-        raise HTTPException(403, '远程访问需要独立访问码。')
+        raise HTTPException(403, 'Remote access requires a separate access code.')
     return JSONResponse({'access_token': settings.world_access_token}, headers={'Cache-Control': 'no-store'})
 
 
@@ -107,7 +108,7 @@ class EditsRequest(BaseModel):
 
 def plan_dir(plan_id: str) -> Path:
     if not _ID.fullmatch(plan_id):
-        raise HTTPException(404, '找不到这个区块。')
+        raise HTTPException(404, 'World plan not found.')
     return settings.world_dir / 'plans' / plan_id
 
 
@@ -115,7 +116,7 @@ def _read_plan(plan_id: str) -> dict:
     try:
         return json.loads((plan_dir(plan_id) / 'plan.json').read_text())
     except (OSError, ValueError):
-        raise HTTPException(404, '找不到这个区块。') from None
+        raise HTTPException(404, 'World plan not found.') from None
 
 
 def _atomic_json(path: Path, data: dict):
@@ -144,12 +145,12 @@ def _materialize(plan: dict, directory: Path) -> dict:
 def _validate_location(payload: PlanRequest):
     if payload.location_source == 'device':
         if payload.location_timestamp_ms is None or payload.location_accuracy_m is None:
-            raise HTTPException(422, '请允许手机定位并取得当前位置；测试点位需明确切换到测试模式。')
+            raise HTTPException(422, 'Allow location access and retrieve your current phone location. Switch to test mode to use a test location.')
         age_ms = time.time() * 1000 - payload.location_timestamp_ms
         if not -30000 <= age_ms <= 120000:
-            raise HTTPException(422, '定位已过期，请重新获取手机当前位置。')
+            raise HTTPException(422, 'The location has expired. Retrieve your current phone location again.')
     if payload.source in ('osm', 'cmu_snapshot') and payload.location_source != 'test':
-        raise HTTPException(422, '建筑粗模型仅保留为测试实验；正式入口使用 Street View 360° 全景。')
+        raise HTTPException(422, 'Rough building models are available only in test mode. The main experience uses Street View 360° panoramas.')
 
 
 def _location_provenance(payload: PlanRequest) -> dict:
@@ -193,10 +194,11 @@ async def create_plan(payload: PlanRequest):
     _validate_location(payload)
     if payload.source == 'google_streetview':
         if not settings.google_maps_api_key:
-            raise HTTPException(503, 'Google Street View 服务尚未配置，暂时无法获取当前位置的全景。可先打开 Google 街景查看。')
+            raise HTTPException(503, 'Google Street View is not configured, so a panorama of your current location is unavailable. You can open Google Street View to explore.')
         if not settings.google_streetview_ai_authorized:
-            raise HTTPException(503, 'Google 街景的外部 AI 生成接入尚未启用。')
+            raise HTTPException(503, 'External AI generation using Google Street View has not been enabled.')
     values = {k: v for k, v in payload.model_dump().items() if k not in ('location_accuracy_m', 'location_timestamp_ms')}
+    values['history_prompt_version'] = PROMPT_VERSION
     values['generation_profile'] = ('streetview-rgb-history-v1:' + settings.openai_image_model + ':' + settings.openai_image_quality
                                     if payload.source == 'google_streetview' else GENERATION_PROFILE)
     key = sha256(json.dumps(values, sort_keys=True).encode()).hexdigest()
@@ -225,9 +227,9 @@ async def create_plan(payload: PlanRequest):
             code = getattr(exc, 'code', 'plan_unavailable')
             if payload.source == 'google_streetview':
                 if code == 'no_coverage':
-                    raise HTTPException(404, '当前位置附近没有可用的 Google 街景全景，请移动位置后重试。') from None
-                raise HTTPException(502, f'Google 街景暂未获取成功（{code}），没有改用其他位置或粗模型。') from None
-            raise HTTPException(422, f'区块准备失败（{code}）。请检查地点覆盖，或调整观察位置后重试。') from None
+                    raise HTTPException(404, 'No Google Street View panorama is available near your current location. Move to another location and try again.') from None
+                raise HTTPException(502, f'Unable to retrieve Google Street View ({code}). No other location or rough model was substituted.') from None
+            raise HTTPException(422, f'World plan preparation failed ({code}). Check location coverage or adjust your viewpoint and try again.') from None
         _atomic_json(index, {'plan_id': result['plan_id'], 'created_at': time.time()})
         return result
 
@@ -242,22 +244,22 @@ async def edit_plan(plan_id: str, payload: EditsRequest):
     from app.worlds.edits import apply_edits, PlanEditError
     original = _read_plan(plan_id)
     if original.get('input_kind') == 'streetview_panorama':
-        raise HTTPException(422, '当前输入为街景照片，不能对照片应用建筑体块 JSON 编辑。')
+        raise HTTPException(422, 'The current input is a Street View photo. Building geometry JSON edits cannot be applied to photos.')
     try:
         updated = await asyncio.to_thread(apply_edits, original, payload.edits)
         updated.update(plan_id=str(uuid.uuid4()), parent_plan_id=plan_id, created_at=time.time())
         return await asyncio.to_thread(_materialize, updated, plan_dir(updated['plan_id']))
     except PlanEditError as exc:
-        raise HTTPException(422, f'历史几何编辑未应用：{exc}') from None
+        raise HTTPException(422, f'Historical geometry edits were not applied: {exc}') from None
 
 
 @router.get('/world-plans/{plan_id}/assets/{filename}', dependencies=[Depends(require_access)])
 async def plan_asset(plan_id: str, filename: str):
     if filename not in _PLAN_FILES:
-        raise HTTPException(404, '找不到文件。')
+        raise HTTPException(404, 'File not found.')
     path = plan_dir(plan_id) / filename
     if not path.is_file():
-        raise HTTPException(404, '找不到文件。')
+        raise HTTPException(404, 'File not found.')
     return FileResponse(path, media_type='model/gltf-binary' if filename.endswith('.glb') else 'image/jpeg' if filename.endswith('.jpg') else 'image/png',
                         headers={'Cache-Control': 'private, no-store'})
 
@@ -265,15 +267,15 @@ async def plan_asset(plan_id: str, filename: str):
 @router.post('/world-jobs', dependencies=[Depends(require_access)])
 async def generate(payload: GenerateRequest):
     if not settings.worldlab_api_key:
-        raise HTTPException(503, '服务器尚未配置 World Labs 密钥。')
+        raise HTTPException(503, 'The World Labs API key is not configured on the server.')
     plan = _read_plan(payload.plan_id)
     if plan.get('input_kind') == 'streetview_panorama' and not settings.openai_api_key:
-        raise HTTPException(503, '历史全景图像编辑服务尚未配置。')
+        raise HTTPException(503, 'The historical panorama image editing service is not configured.')
     try:
         return await manager().start(plan, model=payload.model)
     except Exception as exc:
         code = getattr(exc, 'code', 'generation_unavailable')
-        raise HTTPException(409, f'无法启动生成（{code}）。') from None
+        raise HTTPException(409, f'Unable to start generation ({code}).') from None
 
 
 @router.get('/world-jobs/{job_id}', dependencies=[Depends(require_access)])
@@ -283,7 +285,7 @@ async def get_job(job_id: str):
     except ValueError:
         job = None
     if job is None:
-        raise HTTPException(404, '找不到世界任务。')
+        raise HTTPException(404, 'World job not found.')
     return job
 
 
@@ -294,9 +296,9 @@ async def resume_job(job_id: str):
         return await manager().resume(job_id)
     except MarbleError as exc:
         status = {'job_not_found': 404, 'missing_key': 503}.get(exc.code, 409)
-        raise HTTPException(status, f'此任务暂不能继续（{exc.code}）。不会重复提交生成。') from None
+        raise HTTPException(status, f'This job cannot resume yet ({exc.code}). Generation will not be submitted again.') from None
     except (ValueError, FileNotFoundError):
-        raise HTTPException(409, '此任务无法安全继续；不会重新提交已收费的生成。') from None
+        raise HTTPException(409, 'This job cannot safely resume. The generation that was already billed will not be submitted again.') from None
 
 
 @router.get('/world-jobs/{job_id}/assets/{filename}', dependencies=[Depends(require_access)])
@@ -306,5 +308,5 @@ async def job_asset(job_id: str, filename: str):
     except ValueError:
         path = None
     if path is None or not path.is_file():
-        raise HTTPException(404, '资产尚未就绪。')
+        raise HTTPException(404, 'The asset is not ready yet.')
     return FileResponse(path, headers={'Cache-Control': 'private, no-store'})

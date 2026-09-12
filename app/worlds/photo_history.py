@@ -44,6 +44,6 @@ async def photo_history(lat: float, lon: float, year: int) -> dict:
         sources = [source for source in curated['sources'] if source['id'] in used]
     history['curated_site_rules'] = rules
     return {'history_context': history, 'sources': sources, 'changes': rules,
-            'uncertainties': ['街景拍摄点可能与手机位置不同，拍摄日期也不等于今天。',
-                              '历史规则仅在对应建筑能从照片中识别时适用；目前没有逐建筑视觉识别验收。',
-                              '图像的年代、首尾连续性与生成世界几何仍需检查，不能据此认定准确历史复原。']}
+            'uncertainties': ['The Street View capture point may differ from your phone location, and the image may have been captured on an earlier date.',
+                              'Historical rules apply only when the corresponding buildings can be identified in the photo; individual building identification has not been verified.',
+                              'The historical appearance, panorama seam continuity, and generated world geometry still need review. These results do not establish an accurate historical reconstruction.']}

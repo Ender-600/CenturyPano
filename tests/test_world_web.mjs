@@ -4,9 +4,12 @@ import test from 'node:test';
 import vm from 'node:vm';
 import * as THREE from 'three';
 import { createPanoramaMesh, PanoramaLookControls, panoramaHeading, setCameraBearing, cameraBearing } from '../web/world/panorama.js';
-import { createOrientationController } from '../web/world/orientation.js';
+import { createOrientationController, headingFromQuaternion } from '../web/world/orientation.js';
 import { createLiveLocation, positionFix, locationDistance } from '../web/world/location.js';
 import { createYearWheel } from '../web/world/year-wheel.js';
+import { createMotionController } from '../web/world/motion.js';
+import { createGPSWalkingController } from '../web/world/gps-walking.js';
+import { createScaleCalibration } from '../web/world/scale.js';
 
 const source = readFileSync(new URL('../web/world/app.js', import.meta.url), 'utf8');
 const html = readFileSync(new URL('../web/world/index.html', import.meta.url), 'utf8');
@@ -38,6 +41,7 @@ class Element {
   scrollIntoView(options) { this.scrolls = [...(this.scrolls || []), options]; }
   remove() {}
   click() {}
+  focus() {}
   setPointerCapture() {}
 }
 
@@ -83,9 +87,11 @@ function app(options = {}) {
   };
   const context = vm.createContext({
     THREE, createPanoramaMesh, PanoramaLookControls, panoramaHeading, setCameraBearing, cameraBearing,
-    createOrientationController, createLiveLocation, positionFix, locationDistance, createYearWheel, SplatMesh: SplatStub, SparkRenderer: class {},
+    createOrientationController, headingFromQuaternion, createGPSWalkingController, createLiveLocation, positionFix, locationDistance, createYearWheel,
+    createMotionController, createScaleCalibration, SplatMesh: SplatStub, SparkRenderer: class {},
     GLTFLoader: class { async parseAsync() { return { scene: options.gltf || new THREE.Group() }; } },
-    document, window: { DeviceOrientationEvent: options.orientation,
+    document, window: { DeviceOrientationEvent: options.orientation, CenturyMotion: options.nativeBridge,
+      crypto: { randomUUID: () => `native-session-${++objectId}-00000000` },
       setTimeout(callback, milliseconds) { const id = ++timerId; timers.set(id, { callback, milliseconds }); return id; },
       clearTimeout(id) { timers.delete(id); },
       addEventListener(type, handler) { (windowEvents[type] ||= []).push(handler); },
@@ -122,9 +128,10 @@ function app(options = {}) {
   });
   document.defaultView = context.window;
   for (const element of elements.values()) element.ownerDocument = document;
-  const hooks = '{state,api,safeAssetURL,safeSourceURL,initialiseAccess,boot,bindEvents,preparePlan,renderPlan,startGeneration,pollJob,applyJob,restoreSaved,showView,semanticsTransform,importEdits,resumeJob,changeReason,refreshLocation,setLocationMode,resolveLocation,openStreetView,toggleMotion,calibrateView,manualLook,generateForYear,moveCamera,startLiveLocation,stopLiveLocation,maybePrepareCurrent}';
+  const hooks = '{state,api,safeAssetURL,safeSourceURL,initialiseAccess,boot,bindEvents,preparePlan,renderPlan,startGeneration,pollJob,applyJob,restoreSaved,showView,semanticsTransform,importEdits,resumeJob,changeReason,refreshLocation,setLocationMode,resolveLocation,openStreetView,toggleMotion,calibrateView,manualLook,generateForYear,moveCamera,startWalking,stopWalking,applyNativeWalking,applyGPSWalking,nativeWalkingLocked,gpsWalkingLocked,walkingLocked,updateWalkingUI,startLiveLocation,stopLiveLocation,maybePrepareCurrent}';
   vm.runInContext(source.replace(/^import .*;\n/gm, '').replace('void boot();', `globalThis.hooks = ${hooks};`), context);
   return { ...context.hooks, elements, tabs, moves, requests, timers, storage, rewrites, objects, revoked,
+    window: context.window,
     gpsCalls: () => gpsCalls, gpsOptions, popups, document, SplatStub, workspace, watches,
     async emitDocument(type) { for (const callback of documentEvents[type] || []) await callback(); },
     async emitWindow(type, event = {}) { for (const callback of [...(windowEvents[type] || [])]) await callback(event); } };
@@ -165,7 +172,7 @@ test('external asset and source URLs cannot receive a service token', async () =
   assert.throws(() => view.safeAssetURL('https://evil.example/world-jobs/a/assets/scene.spz'));
   assert.throws(() => view.safeAssetURL(`/world-jobs/${JOB}/assets/../../secret`));
   assert.throws(() => view.safeAssetURL(`/world-jobs/${JOB}/assets/scene.spz?access=${TOKEN}`));
-  await assert.rejects(view.api('https://evil.example'), /地址/);
+  await assert.rejects(view.api('https://evil.example'), /URL/);
   assert.equal(view.requests.length, 0);
   assert.equal(view.safeSourceURL('javascript:alert(1)'), null);
   assert.equal(view.safeSourceURL('https://user:pass@example.com'), null);
@@ -173,7 +180,7 @@ test('external asset and source URLs cannot receive a service token', async () =
 });
 
 test('OSM failure exits loading without silently switching to a snapshot', async () => {
-  const view = app({ fetch: (url) => url === '/world-plans' ? response({ detail: '地图来源不可用。' }, 422) : undefined });
+  const view = app({ fetch: (url) => url === '/world-plans' ? response({ detail: 'Map source unavailable.' }, 422) : undefined });
   authorised(view); await view.setLocationMode('test');
   view.elements.get('lat').value = '40.44'; view.elements.get('lon').value = '-79.94';
   await view.preparePlan('osm');
@@ -181,7 +188,7 @@ test('OSM failure exits loading without silently switching to a snapshot', async
   assert.equal(JSON.parse(view.requests[0].body).source, 'osm');
   assert.equal(view.state.planBusy, false);
   assert.equal(view.elements.get('test-prepare').disabled, false);
-  assert.match(view.elements.get('message').textContent, /地图来源/);
+  assert.match(view.elements.get('message').textContent, /Map source/);
 });
 
 test('explicit CMU snapshot retains chosen year and never starts paid generation', async () => {
@@ -224,25 +231,25 @@ test('standard is the default and choosing Draft changes the visible cost and su
   await view.startGeneration();
   assert.equal(JSON.parse(view.requests[0].body).model, 'marble-1.0-draft');
   assert.equal(select.disabled, true);
-  assert.match(view.elements.get('job-quality').textContent, /快速草稿/);
+  assert.match(view.elements.get('job-quality').textContent, /Quick draft/);
 });
 
 test('saved Draft and reduced SPZ keep their actual quality labels without triggering an upgrade', () => {
   const view = app(); authorised(view); view.renderPlan(plan());
   view.applyJob({ job_id: JOB, stage: 'ready', model: 'marble-1.0-draft',
     assets: [{ kind: 'spz', filename: 'scene.spz', lod: '100k', validation: { num_points: 100000 } }] });
-  assert.match(view.elements.get('job-quality').textContent, /快速草稿.*精简精度 100k.*100,000 点/);
-  assert.doesNotMatch(view.elements.get('job-quality').textContent, /标准质量|完整精度/);
+  assert.match(view.elements.get('job-quality').textContent, /Quick draft.*Reduced resolution 100k.*100,000 points/);
+  assert.doesNotMatch(view.elements.get('job-quality').textContent, /Standard|Full resolution/);
   assert.equal(view.elements.get('world-model').value, 'marble-1.0-draft');
   assert.equal(view.elements.get('world-model').disabled, true);
   assert.equal(view.requests.length, 0);
   view.applyJob({ job_id: JOB, stage: 'ready', model: 'marble-1.1',
     assets: [{ kind: 'spz', filename: 'scene.spz', lod: 'full_res', validation: { num_points: 2000000 } }] });
-  assert.match(view.elements.get('job-quality').textContent, /标准质量.*完整精度.*2,000,000 点/);
+  assert.match(view.elements.get('job-quality').textContent, /Standard.*Full resolution.*2,000,000 points/);
   assert.equal(view.requests.length, 0);
   view.applyJob({ job_id: JOB, stage: 'ready', assets: [{ kind: 'spz', filename: 'scene.spz' }] });
-  assert.match(view.elements.get('job-quality').textContent, /模型未记录.*资源精度未记录/);
-  assert.doesNotMatch(view.elements.get('generation-quality').textContent, /标准质量/);
+  assert.match(view.elements.get('job-quality').textContent, /Model not recorded.*Asset resolution not recorded/);
+  assert.doesNotMatch(view.elements.get('generation-quality').textContent, /Standard/);
 });
 
 test('lost generation submission response is persisted and never retried automatically', async () => {
@@ -296,7 +303,7 @@ test('malformed world query does not load an unrelated saved task', async () => 
     storage: { 'century.world.resume': JSON.stringify({ job_id: JOB, plan_id: PLAN }) } });
   authorised(view); await view.restoreSaved();
   assert.equal(view.requests.length, 0);
-  assert.match(view.elements.get('message').textContent, /链接无效/);
+  assert.match(view.elements.get('message').textContent, /Invalid world job link/);
 });
 
 test('later selected preview wins over an earlier slow asset response', async () => {
@@ -311,7 +318,7 @@ test('later selected preview wins over an earlier slow asset response', async ()
   const old = view.showView('depth');
   await view.showView('pano'); release(); await old;
   assert.equal(view.state.view, 'pano');
-  assert.match(view.elements.get('view-caption').textContent, /历史想象全景/);
+  assert.match(view.elements.get('view-caption').textContent, /Reimagined panorama/);
   assert.equal(view.objects.size, 1);
   assert.equal(await [...view.objects.values()][0].text(), 'new panorama');
 });
@@ -337,7 +344,7 @@ test('SPZ receives real bytes and metric transform precedes the X180 axis conver
   const transformed = new THREE.Vector3(2, 3, 4).applyMatrix4(splat.matrixWorld);
   assert.ok(transformed.distanceTo(new THREE.Vector3(4, -5.58, -8)) < 1e-10);
   assert.equal(view.state.engine.metric, true);
-  assert.match(view.elements.get('view-details').textContent, /未核实/);
+  assert.match(view.elements.get('view-details').textContent, /unverified/i);
 });
 
 test('missing or partial scale metadata keeps model units and does not guess ground', async () => {
@@ -348,25 +355,25 @@ test('missing or partial scale metadata keeps model units and does not guess gro
   const splat = view.state.engine.current.children[0];
   assert.equal(splat.scale.x, 1); assert.equal(Math.abs(splat.position.y), 0);
   assert.equal(view.state.engine.metric, false);
-  assert.match(view.elements.get('view-details').textContent, /模型单位/);
+  assert.match(view.elements.get('view-details').textContent, /Model units/);
 });
 
 test('failed historical review stays explicit while genuine SPZ assets remain viewable', async () => {
   const view = app({ fetch: () => response() }); authorised(view); view.state.engine = fakeEngine();
   const job = { job_id: JOB, stage: 'ready', review: { status: 'rejected', scope: 'historical_appearance',
-    notes: ['出现现代双黄线与大型广告，与 1925 年地点不符。'] },
+    notes: ['Modern double yellow lines and large advertisements do not match this location in 1925.'] },
     validation: { historical_accuracy: 'failed_visual_review' },
     assets: [{ kind: 'spz', filename: 'scene.spz', url: `/world-jobs/${JOB}/assets/scene.spz` }] };
   view.applyJob(job);
-  assert.match(view.elements.get('job-stage').textContent, /历史外观未通过检查/);
-  assert.match(view.elements.get('job-detail').textContent, /现代双黄线/);
+  assert.match(view.elements.get('job-stage').textContent, /Historical appearance failed review/);
+  assert.match(view.elements.get('job-detail').textContent, /Modern double yellow lines/);
   assert.equal(view.tabs.find((tab) => tab.dataset.view === 'world').disabled, false);
   await view.showView('world');
   assert.ok(view.state.engine.current.children[0] instanceof view.SplatStub);
-  assert.match(view.elements.get('view-caption').textContent, /历史外观未通过检查/);
-  assert.match(view.elements.get('view-details').textContent, /现代双黄线/);
+  assert.match(view.elements.get('view-caption').textContent, /Historical appearance failed review/);
+  assert.match(view.elements.get('view-details').textContent, /Modern double yellow lines/);
   view.applyJob(job);
-  assert.equal(view.elements.get('viewer-note').textContent.match(/历史外观未通过检查/g).length, 1);
+  assert.equal(view.elements.get('viewer-note').textContent.match(/Historical appearance failed review/g).length, 1);
 });
 
 test('coarse overview fits buildings instead of the enormous GLB ground plane', async () => {
@@ -413,7 +420,7 @@ test('plan evidence is text-only and unknown geometry never claims verified hist
     sources: [{ title: 'Unsafe link', url: 'javascript:attack()' }, { title: '<b>CMU</b>', url: 'https://www.cmu.edu/' }],
     uncertainties: ['Unverified modern footprint'] }));
   const entry = view.elements.get('changes').children[0];
-  assert.equal(entry.children[0].textContent, '年代未核实');
+  assert.equal(entry.children[0].textContent, 'Date unverified');
   assert.equal(entry.children[1].textContent, '<img onerror=attack()>');
   assert.equal(view.elements.get('sources').children[0].tagName, 'P');
   assert.equal(view.elements.get('sources').children[1].rel, 'noopener noreferrer');
@@ -422,8 +429,8 @@ test('plan evidence is text-only and unknown geometry never claims verified hist
 test('only recognised planning reasons are translated; user explanations remain verbatim', () => {
   const view = app();
   const official = 'Official CMU completion/opening evidence postdates 1925. Remove the completed modern building; earlier structures and construction-stage geometry remain unknown.';
-  assert.match(view.changeReason({ reason: official }), /1925 年后/);
-  assert.match(view.changeReason({ reason: 'No bound archival date or target-year footprint. Retained only as an unverified modern massing placeholder.' }), /未核实/);
+  assert.match(view.changeReason({ reason: official }), /after 1925/);
+  assert.match(view.changeReason({ reason: 'No bound archival date or target-year footprint. Retained only as an unverified modern massing placeholder.' }), /unverified/i);
   const custom = 'My archive says the old shop stood here until 1926.';
   assert.equal(view.changeReason({ reason: custom }), custom);
   assert.equal(view.changeReason({ reason: official, origin: 'user_edit' }), official);
@@ -482,7 +489,7 @@ test('GPS denial blocks live preparation and does not fall back to old or CMU co
   assert.equal(view.elements.get('lat').value, '');
   assert.equal(view.elements.get('lon').value, '');
   assert.equal(view.state.locationFix, null);
-  assert.match(view.elements.get('location-status').textContent, /权限被拒绝/);
+  assert.match(view.elements.get('location-status').textContent, /Location permission denied/);
   assert.equal(view.state.planBusy, false);
   await view.preparePlan('cmu_snapshot');
   assert.equal(view.requests.length, 0);
@@ -498,12 +505,12 @@ test('iPhone denial shows both permission settings and explicit retry recovers f
       : failure({ code: 1 }),
   });
   view.bindEvents();
-  await assert.rejects(view.refreshLocation(), /权限被拒绝/);
+  await assert.rejects(view.refreshLocation(), /Location permission denied/);
   assert.equal(view.elements.get('location-help').hidden, false);
   const instructions = view.elements.get('location-help-steps').children.map((element) => element.textContent).join(' ');
-  assert.match(instructions, /网站设置/);
-  assert.match(instructions, /隐私与安全性/);
-  assert.match(instructions, /精确位置/);
+  assert.match(instructions, /Website Settings/);
+  assert.match(instructions, /Privacy & Security/);
+  assert.match(instructions, /Precise Location/);
   assert.equal(view.state.locationFix, null);
   allowed = true;
   await view.elements.get('retry-location').emit('click');
@@ -605,7 +612,7 @@ test('a fresh request rejects stale coordinates even when the browser supplies t
     coords: { latitude: 40.4433, longitude: -79.9436, accuracy: 12 }, timestamp: Date.now() - 120000 }) });
   authorised(view); await view.preparePlan();
   assert.equal(view.requests.length, 0);
-  assert.match(view.elements.get('location-status').textContent, /过期/);
+  assert.match(view.elements.get('location-status').textContent, /outdated/);
   assert.equal(view.state.locationFix, null);
 });
 
@@ -614,7 +621,7 @@ test('insecure context and unsupported GPS block live requests with actionable l
     const view = app(options); authorised(view); await view.preparePlan();
     assert.equal(view.requests.length, 0);
     assert.equal(view.gpsCalls(), 0);
-    assert.match(view.elements.get('location-status').textContent, /HTTPS|不支持定位/);
+    assert.match(view.elements.get('location-status').textContent, /HTTPS|does not support location/);
   }
 });
 
@@ -626,7 +633,7 @@ test('explicit manual test mode sends test provenance and never calls GPS', asyn
   assert.equal(view.gpsCalls(), 0);
   assert.equal(view.elements.get('lat').readOnly, false);
   assert.equal(view.elements.get('test-controls').hidden, false);
-  assert.match(view.elements.get('location-status').textContent, /测试模式/);
+  assert.match(view.elements.get('location-status').textContent, /Test mode/);
   const payload = JSON.parse(view.requests[0].body);
   assert.equal(payload.location_source, 'test');
   assert.equal(payload.lat, 40.442);
@@ -651,7 +658,7 @@ test('replaying an old world leaves current GPS and year inputs independent', as
   assert.equal(view.elements.get('year').value, '1925');
   assert.equal(view.elements.get('radius').value, '100');
   assert.equal(view.state.locationMode, 'device');
-  assert.match(view.elements.get('plan-location').textContent, /已保存.*40.443300.*1900 年.*测试点位.*独立/);
+  assert.match(view.elements.get('plan-location').textContent, /saved.*40.443300.*1900.*test location.*separate/);
   assert.ok(view.requests.every((request) => request.method === 'GET'));
 });
 
@@ -662,7 +669,7 @@ test('switching to test mode discards a late pending GPS success', async () => {
   await view.setLocationMode('test');
   view.elements.get('lat').value = '40'; view.elements.get('lon').value = '-79';
   deliver({ coords: { latitude: 10, longitude: 20, accuracy: 2 }, timestamp: Date.now() });
-  await assert.rejects(pending, /模式已切换/);
+  await assert.rejects(pending, /Location mode changed/);
   assert.equal(view.state.locationMode, 'test');
   assert.equal(view.elements.get('lat').value, '40');
   assert.equal(view.state.locationFix, null);
@@ -671,13 +678,13 @@ test('switching to test mode discards a late pending GPS success', async () => {
 
 
 test('live preparation requests Google street-view photographs and does not fall back to OSM', async () => {
-  const view = app({ fetch: (url) => url === '/world-plans' ? response({ detail: '街景服务未配置。' }, 503) : undefined });
+  const view = app({ fetch: (url) => url === '/world-plans' ? response({ detail: 'Street View service is not configured.' }, 503) : undefined });
   authorised(view); await view.preparePlan();
   assert.equal(view.requests.length, 1);
   const payload = JSON.parse(view.requests[0].body);
   assert.equal(payload.source, 'google_streetview');
   assert.equal(payload.location_source, 'device');
-  assert.match(view.elements.get('message').textContent, /未配置/);
+  assert.match(view.elements.get('message').textContent, /not configured/);
   await view.preparePlan('osm');
   assert.equal(view.requests.length, 1);
 });
@@ -694,8 +701,8 @@ test('source-photo plan shows the genuine private panorama and hides geometry to
   assert.equal(view.elements.get('geometry-stats').hidden, true);
   assert.equal(view.elements.get('geometry-edits').hidden, true);
   assert.ok(view.tabs.filter((tab) => ['historical', 'modern', 'depth'].includes(tab.dataset.view)).every((tab) => tab.hidden));
-  assert.match(view.elements.get('view-caption').textContent, /当前街景/);
-  assert.match(view.elements.get('view-details').textContent, /2024-06.*照片/);
+  assert.match(view.elements.get('view-caption').textContent, /Street View/);
+  assert.match(view.elements.get('view-details').textContent, /2024-06.*photograph/);
   assert.equal(await [...view.objects.values()][0].text(), 'source photograph');
   assert.equal(view.requests.filter((request) => request.method === 'POST').length, 1);
 });
@@ -720,14 +727,14 @@ test('denied location closes the pending official Street View tab without a test
   await view.openStreetView();
   assert.equal(view.popups[0].closed, true);
   assert.equal(view.popups[0].url, undefined);
-  assert.match(view.elements.get('location-status').textContent, /权限被拒绝/);
+  assert.match(view.elements.get('location-status').textContent, /Location permission denied/);
 });
 
 test('photo generation separates image-edit charges from World Labs credits', () => {
   const view = app(); authorised(view); view.state.plan = plan({ input_kind: 'streetview_panorama' });
   view.applyJob({ job_id: JOB, stage: 'ready', generation_calls: { image_edit: 1, world: 1 },
     cost_credits: { depth: null, world: 150, total: 150 }, assets: [] });
-  assert.match(view.elements.get('cost').textContent, /OpenAI 图片改写另行计费.*世界：150 credits.*总计：150 credits/);
+  assert.match(view.elements.get('cost').textContent, /OpenAI image editing billed separately.*world: 150 credits.*total: 150 credits/);
 });
 
 test('fresh location automatically prepares the source scene once without starting AI generation', async () => {
@@ -784,10 +791,10 @@ test('sensor permission is user initiated; GPS course stays separate and calibra
   assert.equal(view.watches.size, 1);
   const watch = [...view.watches.values()][0];
   watch.success({ coords: { heading: 90, speed: 1.4, accuracy: 8 }, timestamp: Date.now() });
-  assert.match(view.elements.get('heading-readout').textContent, /镜头约 0°.*行进 90°/);
+  assert.match(view.elements.get('heading-readout').textContent, /View ~0°.*Travel 90°/);
   assert.ok(view.state.orientation.getQuaternion().angleTo(before) < 1e-7);
   watch.success({ coords: { heading: 90, speed: 0, accuracy: 8 }, timestamp: Date.now() });
-  assert.doesNotMatch(view.elements.get('heading-readout').textContent, /行进/);
+  assert.doesNotMatch(view.elements.get('heading-readout').textContent, /Travel/);
   view.manualLook(); setCameraBearing(view.state.engine.camera, 123); view.calibrateView();
   assert.equal(view.state.calibrating, false);
   assert.equal(view.state.orientation.getStatus().mode, 'calibrated');
@@ -857,7 +864,7 @@ test('back-forward cache preserves panorama rendering and allows an explicit sen
 
 test('a failed panorama switch stops sensors and the location watch', async () => {
   const view = await followingPanorama({ fetch: (url) => url.endsWith('historical_panorama.jpg')
-    ? response({ detail: '图片不可用' }, 422) : response('source') });
+    ? response({ detail: 'Image unavailable' }, 422) : response('source') });
   view.state.job = { assets: [{ kind: 'historical_pano', url: `/world-jobs/${JOB}/assets/historical_panorama.jpg` }] };
   await view.showView('pano');
   assert.equal(view.state.engine.current, null);
@@ -873,7 +880,7 @@ test('queued location-watch callbacks cannot restore stopped travel or overwrite
   const fix = (heading) => ({ coords: { heading, speed: 1.2, accuracy: 5 }, timestamp: Date.now() });
   view.toggleMotion(); oldWatch.success(fix(70));
   assert.equal(view.state.travel, null);
-  assert.doesNotMatch(view.elements.get('heading-readout').textContent, /行进/);
+  assert.doesNotMatch(view.elements.get('heading-readout').textContent, /Travel/);
   view.toggleMotion(); await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
   const newWatch = [...view.watches.values()][0]; newWatch.success(fix(80));
   oldWatch.success(fix(70)); assert.equal(view.state.travel.heading, 80);
@@ -881,6 +888,91 @@ test('queued location-watch callbacks cannot restore stopped travel or overwrite
   await view.setLocationMode('test'); newWatch.success(fix(90));
   assert.equal(view.state.travel, null); assert.equal(view.watches.size, 0);
   view.state.orientation.stop();
+});
+
+
+function walkingApp() {
+  const commands = [];
+  const view = app({ visibility: 'visible', nativeBridge: { version: 1, platform: 'ios',
+    postMessage(json) { commands.push(JSON.parse(json)); } }, fetch: () => response() });
+  authorised(view); view.state.engine = fakeEngine(); view.state.engine.current = new THREE.Group();
+  view.state.engine.camera.position.set(10, 2, 20); view.state.engine.look = { enabled: false, pointers: new Map() };
+  view.state.view = 'world'; view.bindEvents(); view.updateWalkingUI();
+  const send = async (sequence, overrides = {}) => view.emitWindow('century:motion', { detail: {
+    version: 1, sessionId: commands.findLast((item) => item.action === 'start').sessionId,
+    sequence, timestampMs: Date.now(), state: 'tracking', position: [0, 1.6, 0], quaternion: [0, 0, 0, 1], ...overrides,
+  } });
+  return { ...view, commands, send };
+}
+
+test('native walking requires an explicit unknown-scale value and then owns all camera input', async () => {
+  const view = walkingApp();
+  assert.equal(view.commands.length, 0);
+  view.startWalking();
+  assert.equal(view.commands.length, 0);
+  assert.match(view.elements.get('walk-status').textContent, /scale/);
+  view.elements.get('walk-scale').value = '2';
+  view.startWalking();
+  assert.equal(view.commands.length, 1);
+  assert.equal(view.nativeWalkingLocked(), true);
+  assert.equal(view.elements.get('motion-toggle').disabled, true);
+  assert.equal(view.elements.get('reset-view').disabled, true);
+  assert.equal(view.elements.get('walk-scale').disabled, true);
+  assert.equal(view.elements.get('move-pad').hidden, true);
+  await view.send(1);
+  assert.equal(view.applyNativeWalking(view.state.engine), true);
+  const first = view.state.engine.camera.position.clone();
+  view.state.keys.add('forward'); view.moveCamera(view.state.engine, 1);
+  assert.ok(view.state.engine.camera.position.equals(first));
+  await view.emitWindow('keydown', { code: 'KeyW', target: {}, preventDefault() {} });
+  await view.moves[0].emit('pointerdown');
+  assert.equal(view.state.touchMoves.size, 0);
+  const side = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), -Math.PI / 2);
+  await view.send(2, { position: [0, 1.6, -.3], quaternion: side.toArray() });
+  view.applyNativeWalking(view.state.engine);
+  assert.ok(view.state.engine.camera.position.distanceTo(new THREE.Vector3(10, 2, 19.4)) < 1e-8);
+  assert.ok(view.state.engine.controls.target.clone().sub(view.state.engine.camera.position)
+    .distanceTo(new THREE.Vector3(1, 0, 0)) < 1e-8);
+  assert.equal(view.state.engine.controls.enabled, false);
+  assert.equal(view.requests.length, 0);
+  view.stopWalking();
+  assert.equal(view.nativeWalkingLocked(), false);
+});
+
+test('provider metric scale uses one meter and ignores an obsolete manual input', async () => {
+  const view = walkingApp(); view.state.engine.metric = true;
+  view.elements.get('walk-scale').value = '99'; view.updateWalkingUI();
+  assert.equal(view.elements.get('walk-scale').disabled, true);
+  view.startWalking(); await view.send(1);
+  await view.send(2, { position: [0, 1.6, -.3] }); view.applyNativeWalking(view.state.engine);
+  assert.ok(view.state.engine.camera.position.distanceTo(new THREE.Vector3(10, 2, 19.7)) < 1e-8);
+  view.stopWalking();
+});
+
+test('native tracking loss freezes the camera and background return never restarts tracking', async () => {
+  const view = walkingApp(); view.state.engine.metric = true; view.startWalking(); await view.send(1);
+  view.applyNativeWalking(view.state.engine);
+  await view.send(2, { state: 'limited' });
+  assert.equal(view.state.walking.getStatus().needsReanchor, true);
+  assert.equal(view.elements.get('walk-reanchor').disabled, false);
+  const before = view.state.engine.camera.position.clone();
+  await view.send(3, { position: [3, 1.6, 0] }); view.applyNativeWalking(view.state.engine);
+  assert.ok(view.state.engine.camera.position.equals(before));
+  view.document.visibilityState = 'hidden'; await view.emitDocument('visibilitychange');
+  view.document.visibilityState = 'visible'; await view.emitDocument('visibilitychange');
+  assert.equal(view.commands.filter((item) => item.action === 'start').length, 1);
+  view.stopWalking();
+});
+
+test('switching scene stops native movement and a different world clears manual scale', async () => {
+  const view = walkingApp(); view.elements.get('walk-scale').value = '2'; view.startWalking(); await view.send(1);
+  view.state.plan = plan({ assets: { 'source_panorama.jpg': `/world-plans/${PLAN}/assets/source_panorama.jpg` } });
+  await view.showView('source');
+  assert.equal(view.commands.at(-1).action, 'stop');
+  assert.equal(view.nativeWalkingLocked(), false);
+  view.state.job = { assets: [{ kind: 'spz', url: `/world-jobs/${JOB}/assets/scene.spz` }] };
+  await view.showView('world');
+  assert.equal(view.elements.get('walk-scale').value, '');
 });
 
 function liveLocationApp(options = {}) {
@@ -934,12 +1026,12 @@ test('live GPS preserves historical views, running jobs, native tracking and sca
   view.state.view = 'source'; view.state.scaleCalibration = { isActive: () => true };
   await view.feed(1.004); assert.equal(view.posts().length, 0);
   assert.equal(view.elements.get('lat').value, '1.004000');
-  view.state.scaleCalibration = null;
-  view.state.walking = { getStatus: () => ({ locked: true }) };
-  const camera = view.state.engine.camera.position.clone();
-  await view.feed(1.005);
-  assert.equal(view.elements.get('lat').value, '1.005000');
-  assert.equal(view.posts().length, 0); assert.ok(view.state.engine.camera.position.equals(camera));
+  const walking = walkingApp(); walking.state.bootReady = true; walking.state.config.streetview = { available: true };
+  walking.elements.get('walk-scale').value = '2'; walking.startWalking(); await walking.send(1);
+  const camera = walking.state.engine.camera.position.clone(); walking.startLiveLocation();
+  [...walking.watches.values()][0].success({ coords: { latitude: 40, longitude: -79, accuracy: 5 }, timestamp: Date.now() });
+  assert.equal(walking.elements.get('lat').value, '40.000000');
+  assert.ok(walking.state.engine.camera.position.equals(camera)); assert.equal(walking.nativeWalkingLocked(), true);
 });
 
 test('a late automatic source response cannot replace a newly chosen view', async () => {
@@ -969,9 +1061,9 @@ test('live updates pause in background, resume once, and reject old watch callba
 });
 
 test('poor GPS accuracy defers source refresh and failed requests have a retry cooldown', async () => {
-  const view = liveLocationApp({ prepare: () => response({ detail: '附近没有街景' }, 404) });
+  const view = liveLocationApp({ prepare: () => response({ detail: 'No nearby Street View' }, 404) });
   await view.feed(1.001, { accuracy: 100 });
-  assert.equal(view.posts().length, 0); assert.match(view.elements.get('location-status').textContent, /更准确/);
+  assert.equal(view.posts().length, 0); assert.match(view.elements.get('location-status').textContent, /more accurate/);
   await view.feed(1.001); assert.equal(view.posts().length, 1);
   await view.feed(1.0011); assert.equal(view.posts().length, 1);
   assert.equal(view.state.plan.plan_id, PLAN);
@@ -995,7 +1087,7 @@ test('generation at a moved location must successfully prepare the new location 
   for (const fails of [false, true]) {
     const view = app({ gps: (success) => success({ coords: { latitude: 1.001, longitude: 2, accuracy: 5 }, timestamp: Date.now() }),
       fetch: (url, init) => {
-        if (url === '/world-plans') return fails ? response({ detail: '没有街景' }, 404)
+        if (url === '/world-plans') return fails ? response({ detail: 'No Street View' }, 404)
           : response(plan({ location: { lat: JSON.parse(init.body).lat, lon: 2 }, input_kind: 'streetview_panorama' }));
         if (url === '/world-jobs') return response({ job_id: JOB, stage: 'queued', assets: [] });
       } });
@@ -1021,4 +1113,171 @@ test('automatic refresh cannot clear a job that became active during the source 
   view.state.job.stage = 'submission_unknown'; await view.feed(1.002);
   view.state.job.stage = 'error'; await view.feed(1.003);
   assert.equal(view.posts().length, 1);
+});
+
+function gpsWalkingApp(options = {}) {
+  const view = app({ visibility: 'visible', fetch: () => response('asset'), ...options });
+  authorised(view); view.state.engine = fakeEngine(); view.state.engine.current = new THREE.Group();
+  view.state.engine.camera.position.set(10, 2, 20); view.state.engine.look = { enabled: false, pointers: new Map() };
+  view.state.engine.metric = true; view.state.view = 'world'; view.bindEvents();
+  view.elements.get('walk-heading').value = '0';
+  let time = Date.now();
+  view.state.gpsWalking = createGPSWalkingController({ window: view.window, document: view.document,
+    now: () => time, onChange: () => view.updateWalkingUI() });
+  view.updateWalkingUI();
+  const feed = (northMeters, { elapsed = 0, accuracy = 2 } = {}) => {
+    time += elapsed;
+    [...view.watches.values()][0].success({ coords: {
+      latitude: 1 + northMeters / 6371000 * 180 / Math.PI, longitude: 2, accuracy,
+    }, timestamp: time });
+  };
+  return { ...view, feed };
+}
+
+test('browser GPS starts explicitly, preserves scale and heading requirements, and exposes position lock', () => {
+  const view = gpsWalkingApp();
+  assert.equal(view.elements.get('walk-start').disabled, false);
+  assert.equal(view.watches.size, 0);
+  view.state.engine.metric = false; view.startWalking();
+  assert.match(view.elements.get('walk-status').textContent, /scale/); assert.equal(view.watches.size, 0);
+  view.elements.get('walk-scale').value = '2'; view.elements.get('walk-heading').value = '';
+  view.startWalking(); assert.match(view.elements.get('walk-status').textContent, /actual heading/);
+  assert.equal(view.watches.size, 0);
+  view.elements.get('walk-heading').value = '0'; view.startWalking(); view.feed(0);
+  assert.equal(view.gpsWalkingLocked(), true); assert.equal(view.nativeWalkingLocked(), false);
+  assert.equal(view.elements.get('motion-toggle').disabled, false);
+  assert.equal(view.elements.get('reset-view').disabled, true);
+  assert.equal([...view.watches.values()][0].settings.maximumAge, 0);
+  view.feed(4, { elapsed: 2000 });
+  for (let frame = 0; frame < 80; frame++) view.applyGPSWalking(view.state.engine, .05);
+  assert.ok(Math.abs(view.state.engine.camera.position.z - 12) < .001);
+  assert.equal(view.state.engine.camera.position.y, 2);
+  assert.match(view.elements.get('walking-readout').textContent, /Accuracy ~±2 m.*4.0 m/);
+  assert.equal(view.requests.length, 0); view.stopWalking();
+});
+
+test('GPS translation keeps a fixed direction through phone turns and blocks virtual movement', async () => {
+  const view = gpsWalkingApp(); view.startWalking(); view.feed(0);
+  const side = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), -Math.PI / 2);
+  view.state.engine.camera.quaternion.copy(side);
+  view.feed(4, { elapsed: 2000 });
+  for (let frame = 0; frame < 80; frame++) view.applyGPSWalking(view.state.engine, .05);
+  assert.ok(Math.abs(view.state.engine.camera.position.z - 16) < .001);
+  assert.ok(Math.abs(view.state.engine.camera.position.x - 10) < .001);
+  assert.ok(view.state.engine.camera.quaternion.angleTo(side) < 1e-7);
+  const before = view.state.engine.camera.position.clone();
+  await view.emitWindow('keydown', { code: 'KeyW', target: {}, preventDefault() {} });
+  await view.moves[0].emit('pointerdown'); view.state.keys.add('forward'); view.moveCamera(view.state.engine, 1);
+  assert.ok(view.state.engine.camera.position.equals(before));
+  assert.equal(view.state.touchMoves.size, 0);
+  view.stopWalking();
+  const direction = view.state.engine.controls.target.clone().sub(view.state.engine.camera.position).normalize();
+  assert.ok(direction.distanceTo(new THREE.Vector3(1, 0, 0)) < 1e-7);
+});
+
+test('GPS can use the live compass while retaining active orientation tracking', async () => {
+  const view = gpsWalkingApp({ orientation: { requestPermission: async () => 'granted' } });
+  view.elements.get('walk-heading').value = '';
+  view.toggleMotion(); await Promise.resolve(); await Promise.resolve();
+  await view.emitWindow('deviceorientation', { alpha: 0, beta: 90, gamma: 0, absolute: true });
+  const orientation = view.state.orientation.getStatus(); assert.equal(orientation.physicalHeading, 0);
+  view.startWalking();
+  assert.equal(view.gpsWalkingLocked(), true);
+  assert.equal(view.state.orientation.getStatus().enabled, true);
+  view.toggleMotion();
+  assert.equal(view.gpsWalkingLocked(), true); assert.equal(view.state.orientation.getStatus().enabled, false);
+  assert.equal(view.state.engine.controls.enabled, false); assert.equal(view.state.engine.look.enabled, true);
+  view.stopWalking();
+});
+
+test('GPS background return freezes, rejects old callbacks and only reanchors on explicit start', async () => {
+  const view = gpsWalkingApp(); view.startWalking(); view.feed(0);
+  const watch = [...view.watches.values()][0], before = view.state.engine.camera.position.clone();
+  view.document.visibilityState = 'hidden'; await view.emitDocument('visibilitychange');
+  assert.equal(view.watches.size, 0); assert.equal(view.state.gpsWalking.getStatus().needsReanchor, true);
+  view.document.visibilityState = 'visible'; await view.emitDocument('visibilitychange');
+  view.feed(4, { elapsed: 2000 }); view.applyGPSWalking(view.state.engine, .1);
+  assert.ok(view.state.engine.camera.position.equals(before));
+  view.startWalking();
+  watch.success({ coords: { latitude: 50, longitude: 20, accuracy: 1 }, timestamp: Date.now() });
+  assert.equal(view.state.gpsWalking.getStatus().phase, 'waiting');
+  view.feed(4); view.applyGPSWalking(view.state.engine, .1);
+  assert.ok(view.state.engine.camera.position.equals(before));
+  view.stopWalking();
+});
+
+test('GPS ignores poor fixes and stops when leaving the world or choosing test coordinates', async () => {
+  const view = gpsWalkingApp(); view.startWalking(); view.feed(0);
+  view.feed(5, { elapsed: 2000, accuracy: 100 });
+  assert.equal(view.state.gpsWalking.getStatus().needsReanchor, true);
+  assert.equal(view.elements.get('walk-reanchor').disabled, false);
+  assert.equal(view.elements.get('walk-heading').disabled, false);
+  await view.setLocationMode('test'); assert.equal(view.gpsWalkingLocked(), false);
+  view.startWalking(); assert.equal(view.gpsWalkingLocked(), false);
+  view.state.locationMode = 'device'; view.startWalking();
+  view.state.plan = plan({ assets: { 'source_panorama.jpg': `/world-plans/${PLAN}/assets/source_panorama.jpg` } });
+  await view.showView('source'); assert.equal(view.gpsWalkingLocked(), false);
+  assert.equal(view.elements.get('walking-readout').hidden, true);
+});
+
+test('switching walking modes releases one owner before enabling another', async () => {
+  const view = walkingApp(); view.state.engine.metric = true;
+  view.startWalking(); assert.equal(view.nativeWalkingLocked(), true);
+  view.elements.get('walk-mode').value = 'gps'; await view.elements.get('walk-mode').emit('change');
+  assert.equal(view.nativeWalkingLocked(), false); assert.equal(view.commands.at(-1).action, 'stop');
+  view.elements.get('walk-heading').value = '0'; view.startWalking(); assert.equal(view.gpsWalkingLocked(), true);
+  view.elements.get('walk-mode').value = 'native'; await view.elements.get('walk-mode').emit('change');
+  assert.equal(view.gpsWalkingLocked(), false);
+  view.startWalking(); assert.equal(view.nativeWalkingLocked(), true); view.stopWalking();
+});
+
+test('walking settings remain reachable in webviews without native dialog methods', async () => {
+  const view = app(); view.bindEvents();
+  await view.elements.get('settings-open').emit('click');
+  assert.equal(view.elements.get('settings-dialog').attributes.open, '');
+  await view.elements.get('settings-close').emit('click');
+  assert.equal(view.elements.get('settings-dialog').attributes.open, undefined);
+});
+
+test('an explicitly served LAN host obtains its own session without a pasted access code', async () => {
+  for (const hostname of ['10.0.0.2', '172.26.43.152', '192.168.1.10']) {
+    const view = app({ location: { hostname } });
+    await view.initialiseAccess();
+    assert.equal(view.state.token, TOKEN);
+    assert.equal(view.elements.get('access-panel').hidden, true);
+    assert.deepEqual(view.requests.map((request) => request.url), ['/world-session']);
+    assert.equal(view.requests[0].headers.has('Authorization'), false);
+  }
+});
+
+test('public and deceptive hostnames do not attempt LAN auto login; rejected LAN sessions stay locked', async () => {
+  for (const hostname of ['example.test', '172.15.1.1', '172.32.1.1', '192.169.1.1', '10.256.0.1', '10.0.0.2.evil.test']) {
+    const view = app({ location: { hostname } });
+    await view.initialiseAccess();
+    assert.equal(view.state.token, ''); assert.equal(view.requests.length, 0);
+  }
+  const view = app({ location: { hostname: '172.26.43.152' }, fetch: () => response({}, 403) });
+  await view.initialiseAccess();
+  assert.equal(view.state.token, ''); assert.equal(view.elements.get('access-panel').hidden, false);
+});
+
+test('an explicit HTTPS viewer link opens the public viewer session without an access fragment', async () => {
+  const view = app({ location: { hostname: 'viewer.example', search: '?viewer=1' } });
+  await view.initialiseAccess();
+  assert.equal(view.elements.get('access-panel').hidden, true);
+  assert.deepEqual(view.requests.map((request) => request.url), ['/world-session']);
+  assert.equal(view.requests[0].headers.has('Authorization'), false);
+  assert.equal(view.rewrites.length, 0);
+});
+
+test('public viewer mode hides generation and disables generation-year changes', async () => {
+  const view = app({ location: { hostname: 'viewer.example', search: '?viewer=1' }, fetch: (url) => {
+    if (url === '/world-config') return response({ configured: false, viewer_only: true,
+      min_year: 1800, max_year: 2026, streetview: { available: false } });
+  } });
+  await view.boot();
+  assert.equal(view.elements.get('access-panel').hidden, true);
+  assert.equal(view.elements.get('generate').hidden, true);
+  assert.equal(view.elements.get('year-wheel').attributes['aria-disabled'], 'true');
+  assert.ok(view.requests.every((request) => request.method === 'GET'));
 });

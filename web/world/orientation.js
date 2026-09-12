@@ -79,7 +79,7 @@ export function createOrientationController({
   staleMs = 15000,
   maxCompassAccuracy = 35,
 } = {}) {
-  let status = { enabled: false, phase: 'idle', mode: null, reference: null, heading: null, physicalHeading: null, accuracy: null, relativeOnly: false, message: '拖动查看 · 可开启手机跟随' };
+  let status = { enabled: false, phase: 'idle', mode: null, reference: null, heading: null, physicalHeading: null, accuracy: null, relativeOnly: false, message: 'Drag to look around · Enable motion to follow your phone' };
   let epoch = 0, pending = null, timer = null, latest = null, target = null, disposed = false;
   let yawOffset = new THREE.Quaternion(), calibrated = false, hasAnchor = false;
   let startedAt = 0, receivedAt = 0, lastEventTime = -Infinity, absoluteAt = -Infinity;
@@ -94,7 +94,7 @@ export function createOrientationController({
     clearTimer();
     timer = (win?.setTimeout?.bind(win) || setTimeout)(() => {
       timer = null;
-      if (status.enabled) publish({ phase: 'stale', heading: null, physicalHeading: null, message: '方向暂未更新，请转动手机；也可关闭跟随后拖动' });
+      if (status.enabled) publish({ phase: 'stale', heading: null, physicalHeading: null, message: 'No recent orientation updates. Turn your phone, or tap “Pause motion” and drag to look around.' });
     }, staleMs);
   };
   const eventClock = (stamp, current) => {
@@ -109,7 +109,7 @@ export function createOrientationController({
       if (calibrated || status.relativeOnly || !sample.absolute) {
         const alignment = yawAlignment(sample.quaternion, target || getCameraQuaternion());
         if (!alignment) {
-          publish({ phase: 'waiting', message: '请举起手机朝向前方，再对齐视角' });
+          publish({ phase: 'waiting', message: 'Hold your phone upright and point it forward, then tap “Align heading” to align the view.' });
           return;
         }
         yawOffset.copy(alignment);
@@ -120,9 +120,9 @@ export function createOrientationController({
     target = yawOffset.clone().multiply(sample.quaternion).normalize();
     publish({ phase: 'tracking', mode: calibrated ? 'calibrated' : sample.absolute && !status.relativeOnly ? 'absolute' : 'relative',
       reference: sample.reference, heading: sample.heading, physicalHeading: sample.heading, accuracy: sample.accuracy,
-      message: calibrated ? '已手动对齐 · 转动手机查看'
-        : sample.absolute && !status.relativeOnly ? `指南针跟随（近似）${sample.accuracy === null ? '' : ` · ±${Math.round(sample.accuracy)}°`}`
-          : sample.compassUnreliable ? '指南针不稳定 · 相对跟随，可手动对齐' : '相对跟随 · 可手动对齐真实方向' });
+      message: calibrated ? 'Manually aligned · Turn your phone to look around'
+        : sample.absolute && !status.relativeOnly ? `Compass follow (approximate)${sample.accuracy === null ? '' : ` · ±${Math.round(sample.accuracy)}°`}`
+          : sample.compassUnreliable ? 'Compass is unstable · Relative follow; tap “Align heading” to align manually' : 'Relative follow · Tap “Align heading” to align with your real direction' });
   };
   function handleOrientation(event) {
     if (!status.enabled || doc?.visibilityState === 'hidden') return;
@@ -175,19 +175,19 @@ export function createOrientationController({
     latest = null; target = null; lastEvent = null; calibrated = false; hasAnchor = false;
     absoluteAt = -Infinity; lastEventTime = -Infinity;
     publish({ enabled: false, phase, mode: null, reference: null, heading: null, physicalHeading: null, accuracy: null,
-      message: phase === 'paused' ? '手机跟随已暂停，点击重新开启' : '拖动查看 · 可开启手机跟随' });
+      message: phase === 'paused' ? 'Motion paused. Tap “Enable motion” to resume.' : 'Drag to look around · Enable motion to follow your phone' });
   }
   function startFromGesture({ relativeOnly = false } = {}) {
     if (disposed) return Promise.resolve(false);
     if (pending) return pending;
     if (status.enabled) return Promise.resolve(true);
     if (win?.isSecureContext === false || !win?.DeviceOrientationEvent) {
-      publish({ phase: 'unsupported', message: win?.isSecureContext === false ? '手机跟随需要 HTTPS 页面' : '此浏览器不支持方向传感器，请拖动查看' });
+      publish({ phase: 'unsupported', message: win?.isSecureContext === false ? 'Motion requires HTTPS.' : 'This browser does not support orientation sensors. Drag to look around.' });
       return Promise.resolve(false);
     }
     const requestEpoch = ++epoch;
     attachLifecycle();
-    publish({ enabled: true, phase: 'requesting', relativeOnly: !!relativeOnly, message: '正在请求手机方向权限' });
+    publish({ enabled: true, phase: 'requesting', relativeOnly: !!relativeOnly, message: 'Requesting phone orientation permission…' });
     let permission;
     try {
       // Do not insert awaits, timers or permission queries before this call.
@@ -199,7 +199,7 @@ export function createOrientationController({
       pending = null;
       if (result !== 'granted') {
         detach();
-        publish({ enabled: false, phase: 'denied', message: '方向权限未开启，仍可拖动查看' });
+        publish({ enabled: false, phase: 'denied', message: 'Orientation permission is off. You can still drag to look around.' });
         return false;
       }
       if (doc?.visibilityState === 'hidden') { stop('paused'); return false; }
@@ -210,14 +210,14 @@ export function createOrientationController({
       win.addEventListener('orientationchange', handleScreenChange);
       win.screen?.orientation?.addEventListener?.('change', handleScreenChange);
       listening = true;
-      publish({ phase: 'waiting', message: '请举起并转动手机，正在读取方向' });
+      publish({ phase: 'waiting', message: 'Hold up and turn your phone. Reading orientation…' });
       armTimer();
       return true;
     }).catch(() => {
       if (epoch !== requestEpoch || disposed) return false;
       pending = null;
       detach();
-      publish({ enabled: false, phase: 'denied', message: '方向权限不可用，仍可拖动查看' });
+      publish({ enabled: false, phase: 'denied', message: 'Orientation permission is unavailable. You can still drag to look around.' });
       return false;
     });
     return pending;

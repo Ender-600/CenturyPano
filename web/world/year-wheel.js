@@ -17,7 +17,7 @@ export function createYearWheel({ element, input, min = 1800, max = new Date().g
     preview = year;
     rows[year - lower]?.classList.add('is-selected');
     element.setAttribute('aria-valuenow', String(year));
-    element.setAttribute('aria-valuetext', `${year} 年`);
+    element.setAttribute('aria-valuetext', `Year ${year}`);
   }
 
   function publish(year, emit) {

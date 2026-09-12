@@ -3,12 +3,12 @@
     {
       "building_id": "example-unverified-structure",
       "action": "add",
-      "label": "格式示例：虚构体块，不是 CMU 历史建筑",
+      "label": "Format example: fictional massing, not a historic CMU building",
       "footprint": [[80, 80], [90, 80], [90, 90], [80, 90]],
       "height_m": 6,
-      "reason": "这只是 JSON 格式示例。请用实际查证的历史建筑轮廓、高度和史料链接替换后再导入。",
+      "reason": "This is a JSON format example only. Replace it with verified historic building footprints, heights, and source links before importing.",
       "source_url": "https://example.com/replace-with-your-historical-source",
-      "source_title": "占位链接：尚无历史依据"
+      "source_title": "Placeholder link: no historical evidence yet"
     }
   ]
 }

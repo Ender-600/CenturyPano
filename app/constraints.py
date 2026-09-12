@@ -17,7 +17,7 @@ from app.temporal import decade_for_year, resolve_year
 
 
 # Also versions the pre-model request cache: old decade-only images cannot replay.
-PROMPT_VERSION = "location-year-history-v2"
+PROMPT_VERSION = "location-year-history-v3-en"
 SITE_STATES = {"undeveloped", "agricultural", "built", "mixed", "unknown"}
 GEOMETRY_POLICY = (
     "Keep the camera position, viewing direction, projection and complete input frame fixed. "
@@ -41,7 +41,7 @@ HISTORY_SYSTEM = (
     "site_state (undeveloped, agricultural, built, mixed or unknown), site_history (a short account "
     "of land use and development at the actual site), reconstruction_changes (1 to 8 concrete "
     "changes to the present-day scene), uncertainties (1 to 8 strings). Each string <= 600 characters; "
-    "each era_fact <= 240 characters. Write user-facing descriptions in Simplified Chinese. "
+    "each era_fact <= 240 characters. Write all user-facing descriptions in English. "
     "Reason for the exact year, never a fixed decade or twenty-year cycle. Use July 1 of the selected "
     "year as the explicit snapshot date because only a year was supplied. When events change the "
     "city within that year, distinguish before/after the reference date; do not visually combine "
@@ -139,16 +139,16 @@ def _fallback_history(year: int) -> dict:
             "Choose street furniture and signs only if this site was already developed at the reference date.",
             "Date every visible structure; do not preserve present-day development by default.",
         ],
-        "period_summary": f"{year} 年当地历史背景尚未确认",
-        "local_context": [f"以 {year}-07-01 为参考，尚未获得可靠的当地事件与历史时期判断。"],
+        "period_summary": f"Local historical context for {year} has not been verified",
+        "local_context": [f"Local events and historical conditions as of {year}-07-01 have not been reliably established."],
         "site_state": "unknown",
-        "site_history": "尚未确认该地块当年的土地用途、开发时间或建筑更替。现代照片不代表历史状态。",
+        "site_history": "Land use, development dates, and building changes at this site have not been verified. A modern photo does not establish its historical state.",
         "reconstruction_changes": [
-            "逐项判断建筑、道路和设施在参考时点是否存在；不能只给现代建筑添加旧材质。",
-            "若可确认尚未开发或用于农业，应表现相应地貌、植被或农田；证据不足时不虚构特定前身建筑。",
+            "Assess whether each building, road, and facility existed at the reference date; do not simply add old textures to modern buildings.",
+            "Where undeveloped or agricultural land use is confirmed, show the corresponding terrain, vegetation, or fields. Do not invent specific predecessor buildings without evidence.",
         ],
-        "uncertainties": ["历史推理服务不可用或当前处于演示模式；仅应用通用年份约束。",
-                          "地块用途与建筑变化须用历史地图、照片或档案核实。"],
+        "uncertainties": ["The historical reasoning service is unavailable or demo mode is active; only general constraints for the selected year are applied.",
+                          "Land use and building changes require verification against historical maps, photos, or archives."],
     }
 
 
@@ -242,13 +242,13 @@ async def build_constraints(place: dict, decade: str | int, scene: dict, *, prov
         facts = conservative["era_facts"]
         history["reconstruction_changes"] = conservative["reconstruction_changes"]
         history["site_state"] = "unknown"
-        history["site_history"] = "缺少精确拍摄位置，无法确认具体地块在参考年份的开发状态或建筑前身。"
-        history["uncertainties"].append("城市级背景不能证明具体地块的历史；需提供拍摄位置并核对档案。")
-    history["uncertainties"].append("默认采用当年 7 月 1 日为参考时点；年内转折前后的景象可能不同。")
+        history["site_history"] = "Without the exact camera location, the development state or predecessor buildings at this site cannot be established for the selected year."
+        history["uncertainties"].append("City-wide context cannot establish the history of a specific site; the camera location and archival verification are needed.")
+    history["uncertainties"].append("July 1 of the selected year is used as the reference date; conditions may differ before and after events within that year.")
     context = {**history, "target_year": year, "reference_date": f"{year}-07-01", "location": location,
                "evidence_basis": "fallback" if fallback else "model_knowledge_unverified"}
     if not fallback:
-        context["uncertainties"].append("模型历史知识未经史料检索验证；建筑更替与地块用途需要历史地图或照片佐证。")
+        context["uncertainties"].append("Model historical knowledge has not been checked against archival sources; building changes and land use need supporting historical maps or photos.")
     return ConstraintSpec(
         decade=decade_for_year(year), anchor_year=year, target_year=year, era_facts=tuple(facts),
         prompt_global=_prompt(year, {**context, "present_day_scene": _scene_data(scene)}, facts),

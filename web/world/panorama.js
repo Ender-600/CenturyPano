@@ -20,7 +20,7 @@ export function cameraBearing(camera) {
 
 export function createPanoramaMesh(image, metadata = {}) {
   const width = image.naturalWidth || image.width, height = image.naturalHeight || image.height;
-  if (!width || !height || width !== height * 2) throw new Error('全景必须是完整的 2:1 图像。');
+  if (!width || !height || width !== height * 2) throw new Error('The panorama must be a complete 2:1 image.');
   const texture = new THREE.Texture(image);
   texture.colorSpace = THREE.SRGBColorSpace;
   texture.minFilter = THREE.LinearFilter; texture.magFilter = THREE.LinearFilter;
