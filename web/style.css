@@ -704,9 +704,8 @@ body.clean .slider-handle { visibility: hidden; }
 .capture-guide .eyebrow { color: #f4f1ea99; }
 .capture-hint { margin: 0 0 14px; font-size: .85rem; color: #f4f1eacc; }
 .capture-progress {
-  height: 4px; border-radius: 999px; background: #f4f1ea2e; overflow: hidden;
+  height: 6px; border-radius: 999px; background: #f4f1ea2e; overflow: hidden;
 }
-.capture-progress i { display: block; height: 100%; width: 0; background: #f4f1ea; transition: width .12s linear; }
 .capture-readout {
   display: flex; justify-content: space-between; align-items: baseline; gap: 12px;
   margin: 8px 0 0; font-size: .8rem; color: #f4f1eacc;
@@ -723,15 +722,16 @@ body.clean .slider-handle { visibility: hidden; }
 /* The landing screen's primary action is the camera, not a menu item. */
 .shoot-button svg:first-child { width: 20px; height: 20px; }
 
-/* Coverage only grows, so the fill never recedes. The cursor is where the lens
-   points right now and moves both ways inside the coverage it has earned. */
+/* Two spans on one fixed track, the starting heading at its middle. The dim
+   span is the ground captured so far and only ever grows outward; the bright
+   span is where the lens points now, and it never leaves the dim one. */
 .capture-progress { position: relative; }
-.capture-progress i { background: #f4f1ea66; }
-.capture-cursor-live i { background: #f4f1ea; }
-.capture-progress b {
-  position: absolute; top: -4px; bottom: -4px; width: 2px; left: 50%;
-  margin-left: -1px; border-radius: 2px; background: #f4f1ea;
-  box-shadow: 0 0 0 2px #0b0f0d66; transition: left .12s linear;
+.capture-progress i, .capture-progress b {
+  position: absolute; top: 0; bottom: 0; left: 50%; width: 0; border-radius: 999px;
+  transition: left .12s linear, width .12s linear;
 }
+.capture-progress i { background: #f4f1ea66; }
+.capture-progress b { background: #f4f1ea; }
+.capture-cursor-live b { box-shadow: 0 0 6px #f4f1eacc; }
 .capture-readout { flex-wrap: wrap; }
 .capture-readout #capture-facing { color: #f4f1ea99; }

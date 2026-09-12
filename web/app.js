@@ -172,19 +172,27 @@
   // pointing, and CenturyCapture lays each frame's centre column onto a cylinder
   // at the heading it belongs to. Falls back to the file picker wherever the
   // camera or the orientation sensor is unavailable.
-  const capture = { session: null, stream: null, listener: null, timer: 0, target: 120 };
+  const capture = { session: null, stream: null, listener: null, timer: 0, frame: 0, target: 120 };
 
   function captureProgress(progress) {
     const degrees = Math.round(progress.degrees);
     text('capture-degrees', `${degrees}° captured`);
-    $('capture-progress-fill').style.width = `${Math.round(progress.fraction * 100)}%`;
     $('capture-progress').setAttribute('aria-valuenow', String(degrees));
-    // The cursor sits inside the coverage earned so far. At an edge, turning that
-    // way is the only thing that adds to the panorama; in the middle, you are
-    // looking back over ground already captured.
-    $('capture-cursor').style.left = `${(progress.cursor * 100).toFixed(1)}%`;
+    // One bar, two spans, both on a fixed track whose middle is the heading the
+    // capture started at. The dim span is the ground captured so far: it begins
+    // as one field of view in the centre and grows outward, never shrinking. The
+    // bright span is the lens right now, and it lives inside the dim one -- at an
+    // edge the two move together, which is when a turn adds to the panorama; in
+    // the middle it slides back over what is already captured.
+    const percent = (fraction) => `${(Math.max(0, Math.min(1, fraction)) * 100).toFixed(2)}%`;
+    const region = $('capture-progress-fill'), lens = $('capture-cursor');
+    region.style.left = percent(progress.region.start);
+    region.style.width = percent(progress.region.end - progress.region.start);
+    lens.style.left = percent(progress.lens.start);
+    lens.style.width = percent(progress.lens.end - progress.lens.start);
     $('capture-progress').classList.toggle('capture-cursor-live', progress.edge !== null);
-    text('capture-facing', progress.edge === 'right' ? 'at the leading edge — keep turning'
+    text('capture-facing', progress.edge === 'both' ? 'turn either way to widen the shot'
+      : progress.edge === 'right' ? 'at the leading edge — keep turning'
       : progress.edge === 'left' ? 'at the other edge — keep turning this way'
       : 'looking back over what you have');
     text('capture-target', progress.useful ? 'wide enough — turn further for more'
@@ -193,12 +201,18 @@
   }
 
   function closeCapture() {
+    if (capture.frame) {
+      const video = $('capture-video');
+      if (video.cancelVideoFrameCallback) video.cancelVideoFrameCallback(capture.frame);
+      else cancelAnimationFrame(capture.frame);
+    }
     if (capture.listener) window.removeEventListener('deviceorientation', capture.listener);
     if (capture.timer) clearTimeout(capture.timer);
     if (capture.stream) for (const track of capture.stream.getTracks()) track.stop();
     const video = $('capture-video');
     video.srcObject = null;
     capture.listener = null; capture.stream = null; capture.session = null; capture.timer = 0;
+    capture.frame = 0;
     $('capture-overlay').hidden = true;
   }
 
@@ -241,12 +255,38 @@
       capture.session = engine.start({ video, heading: CenturyMotion.headingFromOrientation, onProgress: captureProgress });
     } catch { closeCapture(); showToast('The camera did not start. Please try again.'); return; }
     captureProgress(capture.session.progress());
-    capture.listener = (event) => capture.session && capture.session.accept(event);
+    // The sensor says where the phone points; the camera says when a new frame
+    // exists. Only the camera may trigger a strip, or one frame gets pasted
+    // across every heading the phone passed through while it was on screen.
+    capture.listener = (event) => capture.session && capture.session.record(event);
     window.addEventListener('deviceorientation', capture.listener);
+    // requestVideoFrameCallback fires once per delivered frame, which is exactly
+    // the clock a strip should follow. Without it, requestAnimationFrame runs at
+    // display rate -- around twice the camera's -- so it is throttled to roughly
+    // a frame interval, or every other strip would repeat a frame.
+    const paced = !video.requestVideoFrameCallback;
+    let lastDraw = 0;
+    const onFrame = (now, metadata) => {
+      if (!capture.session) return;
+      if (!paced || now - lastDraw >= 30) {
+        lastDraw = now;
+        capture.session.draw(metadata ? metadata.mediaTime : undefined);
+      }
+      queueFrame();
+    };
+    const queueFrame = () => {
+      if (!capture.session) return;
+      capture.frame = paced
+        ? requestAnimationFrame((now) => onFrame(now, null))
+        : video.requestVideoFrameCallback(onFrame);
+    };
+    queueFrame();
     // Without a heading there is nowhere to put the strips, so say so rather
     // than leaving the viewfinder running and nothing happening.
     capture.timer = setTimeout(() => {
-      if (capture.session && capture.session.sweptDegrees() <= 0) {
+      // Coverage is a whole field of view the moment one frame lands, so it can
+      // no longer stand in for "the sensor is silent". Count the readings.
+      if (capture.session && capture.session.readings() === 0) {
         closeCapture();
         showToast('No orientation readings arrived, so the sweep cannot be tracked. Choose a panorama instead.', 8000);
         $('album-input').click();
@@ -1000,6 +1040,7 @@
   function metricNumber(value, suffix = ' s') { return typeof value === 'number' && Number.isFinite(value) ? value.toFixed(2) + suffix : '—'; }
   function renderMetrics(manifest) {
     const metrics = manifest.metrics || {}, seam = metrics.seam_err || {}, align = metrics.alignment || {};
+    const whole = metrics.integrity || {};
     const cells = [
       ['First view', metricNumber(metrics.first_view_s), 'the first reconstructed view to finish'],
       ['Whole journey', metricNumber(metrics.total_s), 'wall-clock time for this run'],
@@ -1010,7 +1051,13 @@
       ['Pixel alignment · before / after', `${metricNumber(align.score_before, '')} / ${metricNumber(align.score_after, '')}`,
         align.mean_shift_px == null ? 'not measured yet' : `mean drift ${metricNumber(align.mean_shift_px, ' px')} · ${align.applied ?? 0} corrected`],
     ];
-    $('metrics-panel').innerHTML = cells.map(([name, value, note]) => `<div class="metric"><span>${escapeHTML(name)}</span><strong>${escapeHTML(value)}</strong><small>${escapeHTML(note)}</small></div>`).join('') + `<p class="metrics-note">${isDemo(manifest) ? 'These figures come from the local demo pipeline and say nothing about the speed or quality of an AI service.' : 'Measured on this journey\'s actual run. A replay is not re-timed.'} A dash means not yet measured. Seam difference is a Lab distance, and lower means two tiles agree more closely; it says nothing about historical accuracy. The final figure is measured along the path we actually cut: where neighbouring tiles drew different objects we do not average them into a ghost, we cut along the one vertical line where they agree most.${manifest.scene?.fallback ? ' Scene parsing fell back to defaults.' : ''}${manifest.anchor?.status === 'skipped' ? ' No era reference was generated, so colour matching was skipped.' : ''}${manifest.scene?.is_outdoor === false ? ' This is an interior: the reconstruction only changes materials and furnishings, which reads more weakly than an outdoor street.' : ''} Pixel alignment is the correlation between the edge structure of the original and the generation, where 1 means they coincide exactly.</p>`;
+    if (whole.tested) {
+      cells.push(['Broken tiles · detected / still broken',
+        `${whole.splits_detected ?? 0} / ${whole.unresolved ?? 0}`,
+        whole.splits_detected ? `${whole.retries ?? 0} regenerated · worst break ${metricNumber(whole.worst_step_de, '')}`
+          : `all ${whole.tested} tiles came back as one picture`]);
+    }
+    $('metrics-panel').innerHTML = cells.map(([name, value, note]) => `<div class="metric"><span>${escapeHTML(name)}</span><strong>${escapeHTML(value)}</strong><small>${escapeHTML(note)}</small></div>`).join('') + `<p class="metrics-note">${isDemo(manifest) ? 'These figures come from the local demo pipeline and say nothing about the speed or quality of an AI service.' : 'Measured on this journey\'s actual run. A replay is not re-timed.'} A dash means not yet measured. Seam difference is a Lab distance, and lower means two tiles agree more closely; it says nothing about historical accuracy. The final figure is measured along the path we actually cut: where neighbouring tiles drew different objects we do not average them into a ghost, we cut along the one vertical line where they agree most.${manifest.scene?.fallback ? ' Scene parsing fell back to defaults.' : ''}${manifest.anchor?.status === 'skipped' ? ' No era reference was generated, so colour matching was skipped.' : ''}${manifest.scene?.is_outdoor === false ? ' This is an interior: the reconstruction only changes materials and furnishings, which reads more weakly than an outdoor street.' : ''} Pixel alignment is the correlation between the edge structure of the original and the generation, where 1 means they coincide exactly.${whole.unresolved ? ' One tile came back as two pictures joined along a hard vertical line, and asking again did not fix it, so that break is still in this panorama.' : ''}</p>`;
   }
   $('metrics-toggle').addEventListener('click', () => {
     const open = $('metrics-panel').hidden;
