@@ -103,7 +103,7 @@ function app(options = {}) {
   const instrumented = source.replace(/\}\)\(\);\s*$/, 'globalThis.hooks = { state, setTargetYear, yearOf, locate, updateMetadata, pollManifest };\n})();');
   vm.runInContext(readFileSync(new URL('../web/motion.js', import.meta.url), 'utf8'), context);
   vm.runInContext(instrumented, context);
-  return { ...context.hooks, elements, document, requests, jobs };
+  return { ...context.hooks, elements, document, requests, jobs, photo: context.window.CenturyPhoto, window: context.window };
 }
 
 function photoGPS() {
@@ -318,4 +318,34 @@ test('archive world map clusters pins and opens place trips for replay', async (
   assert.match(view.elements.get('archive-place-title').textContent, /Pittsburgh/);
   assert.equal(view.elements.get('archive-place-trips').children.length, 2);
   assert.equal(view.elements.get('replay-list').children.length, 3);
+});
+
+test('a delayed photo POST retains the chosen Camera tab and preserves the submitted job across modes', async () => {
+  let completePost;
+  const pendingPost = new Promise((resolve) => { completePost = resolve; });
+  const viewer = app({ fetch: async (url) => url === '/jobs' ? pendingPost : null });
+  let mode = 'camera';
+  const changes = [];
+  viewer.window.CenturyModes = {
+    syncPhotoControls() {}, resetCameraHeading() {}, onMotionState() {},
+    onPhotoState(change) { changes.push(change); if (change.activate && change.screen !== 'capture') mode = 'photo'; },
+  };
+  const photo = new File(['photo'], 'street.jpg', { type: 'image/jpeg' });
+  await viewer.elements.get('album-input').emit('change', { target: { files: [photo] } });
+  assert.equal(mode, 'photo');
+  const submit = viewer.elements.get('generate-button').emit('click');
+  await Promise.resolve();
+  mode = 'camera'; viewer.photo.setActive(true, 'camera');
+  viewer.jobs.set('late-job', { job_id: 'late-job', target_year: viewer.state.targetYear, status: 'queued', tiles: [] });
+  completePost({ ok: true, json: async () => ({ job_id: 'late-job' }) });
+  await submit;
+  assert.equal(mode, 'camera');
+  assert.equal(changes.at(-1).activate, false);
+  assert.equal(viewer.state.screen, 'result');
+  assert.equal(viewer.state.jobId, 'late-job');
+  const generation = viewer.state.generation, source = viewer.state.file;
+  viewer.photo.setActive(false, 'world'); viewer.photo.setActive(true, 'photo');
+  assert.equal(viewer.state.generation, generation);
+  assert.equal(viewer.state.file, source);
+  assert.equal(viewer.state.jobId, 'late-job');
 });

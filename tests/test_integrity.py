@@ -3,7 +3,7 @@ import pytest
 from PIL import Image
 
 from app.config import H, TILE
-from app.integrity import FULL_HEIGHT, ROW_DE, STEP_DE, split_check, worse
+from app.integrity import FULL_HEIGHT, STEP_DE, split_check, worse
 from app.metrics import integrity_metrics
 
 

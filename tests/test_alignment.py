@@ -1,5 +1,5 @@
 import numpy as np
-from PIL import Image, ImageEnhance
+from PIL import Image
 
 from app import alignment
 from app.alignment import align_tile, edge_agreement, estimate_shift, preserve_structure

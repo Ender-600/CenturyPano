@@ -56,7 +56,8 @@ def test_upload_replay_and_private_original(client):
         assert asset.status_code == 200, suffix
     assert client.get('/' + m['source']['path']).status_code == 404
     assert client.get(f'/out/{job_id}/manifest.json').status_code == 404
-    second = client.post('/jobs', files={'image': ('pano.jpg', data, 'image/jpeg')}).json()['job_id']
+    second = client.post('/jobs', files={'image': ('pano.jpg', data, 'image/jpeg')},
+                         data={'decade': '1920s'}).json()['job_id']
     cached = wait_done(client, second)
     assert cached['mode'] == 'replay'
     assert cached['metrics'] == m['metrics']
@@ -164,3 +165,32 @@ def test_create_job_accepts_weather_enabled(client, monkeypatch):
         data={'target_year': '1925', 'weather_enabled': 'true', 'weathers': 'fog'},
     )
     assert bad.status_code == 422
+
+
+def test_openai_health_and_missing_key_block_upload(client, monkeypatch):
+    monkeypatch.setattr(settings, 'provider', 'openai')
+    monkeypatch.setattr(settings, 'openai_api_key', '')
+    health = client.get('/health').json()
+    assert health['provider'] == 'openai' and health['configured'] is False
+    response = client.post('/jobs', files={'image': ('pano.jpg', panorama(), 'image/jpeg')})
+    assert response.status_code == 503
+    assert not list(settings.in_dir.iterdir())
+
+
+def test_openai_key_accepts_upload_without_exposing_credentials(client, monkeypatch):
+    from app import pipeline
+
+    monkeypatch.setattr(settings, 'provider', 'openai')
+    monkeypatch.setattr(settings, 'openai_api_key', 'test-only-private-key')
+
+    async def complete_without_network(job_id):
+        update_manifest(job_id, lambda m: m.update(status='done'))
+
+    monkeypatch.setattr(pipeline, 'run_job', complete_without_network)
+    health = client.get('/health')
+    assert health.json()['configured'] is True
+    response = client.post('/jobs', files={'image': ('pano.jpg', panorama(), 'image/jpeg')})
+    assert response.status_code == 201
+    manifest = wait_done(client, response.json()['job_id'])
+    assert manifest['provider'] == 'openai' and manifest['demo'] is False
+    assert settings.openai_api_key not in health.text + str(manifest) + repr(settings)

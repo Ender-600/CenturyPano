@@ -51,8 +51,13 @@ def check_response(response: httpx.Response, provider: str) -> None:
     # a disabled API or a retired model name: retrying and failing over to a
     # second provider cannot help, and it hides the real cause behind timeouts.
     fatal = status in {400, 401, 403, 404}
-    hint = {401: " (check GEMINI_API_KEY)", 403: " (key lacks access to this API)",
-            404: " (model name unavailable — check GEMINI_IMAGE_MODEL / GEMINI_TEXT_MODEL)",
+    credential = {"gemini": "GEMINI_API_KEY", "openai": "OPENAI_API_KEY", "grok": "XAI_API_KEY",
+                  "fal": "FAL_KEY", "qwen": "K2_API_KEY", "k2": "K2_API_KEY"}.get(provider, "the provider API key")
+    model_setting = {"gemini": "GEMINI_IMAGE_MODEL / GEMINI_TEXT_MODEL", "openai": "OPENAI_IMAGE_MODEL",
+                     "grok": "GROK_IMAGE_MODEL", "fal": "FAL_MODEL", "qwen": "QWEN_IMAGE_MODEL",
+                     "k2": "K2_MODEL"}.get(provider, "the provider model")
+    hint = {401: f" (check {credential})", 403: " (key lacks access to this API)",
+            404: f" (model name unavailable — check {model_setting})",
             400: " (malformed request or unsupported parameter)"}.get(status, "")
     raise ProviderError(
         f"{provider} returned HTTP {status}{hint}", provider=provider,
@@ -197,7 +202,7 @@ class EditorPool:
     async def edit(
         self, image: bytes, prompt: str, *, reference: bytes | None = None,
         strength: float | None = None, seed: int | None = None,
-        negative: str | None = None, timeout_s: float = 120.0,
+        negative: str | None = None, timeout_s: float | None = None,
         structure_lock: bool = False,
     ) -> EditResult:
         attempts = 0
@@ -221,7 +226,8 @@ class EditorPool:
                 try:
                     result = await self._invoke(
                         editor, image, prompt, reference=reference, strength=strength,
-                        seed=seed, negative=current_negative, timeout_s=timeout_s,
+                        seed=seed, negative=current_negative,
+                        timeout_s=timeout_s if timeout_s is not None else getattr(editor, "default_timeout_s", 60.0),
                         structure_lock=structure_lock,
                     )
                     if editor is self.primary:

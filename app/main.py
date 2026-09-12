@@ -12,12 +12,13 @@ from PIL import Image, ImageOps, UnidentifiedImageError
 from pillow_heif import register_heif_opener
 from pydantic import BaseModel, Field
 
-from .config import DECADE_ANCHOR, DEFAULT_DECADE, MAX_UPLOAD_MB, ROOT, settings
+from .config import DECADE_ANCHOR, MAX_UPLOAD_MB, ROOT, settings
 from .hotspots import explain_hotspot
 from .location import city_from_latlon, coords_for_place, exif_gps, resolve_place
 from .manifest import create_manifest, job_dir, read_manifest, update_manifest
 from .temporal import DEFAULT_YEAR, MAX_YEAR, MIN_YEAR, decade_for_year, manifest_year, resolve_year
 from .weather import DEFAULT_WEATHER_IDS, parse_weather_ids, weather_subdir
+from .worlds.router import router as world_router
 
 register_heif_opener()
 Image.MAX_IMAGE_PIXELS = 100_000_000
@@ -38,11 +39,22 @@ async def lifespan(app):
                 update_manifest(path.parent.name, lambda m: m.update(baseline_status='error'))
         except (OSError, ValueError):
             continue
-    yield
-    pending = list(_tasks.values()) + list(_baselines.values())
-    for task in pending:
-        task.cancel()
-    await asyncio.gather(*pending, return_exceptions=True)
+    from .worlds import router as world_routes
+    await world_routes.startup()
+    try:
+        yield
+    finally:
+        await world_routes.shutdown()
+        from .pipeline import _hotspot_tasks
+        loop = asyncio.get_running_loop()
+        pending = [task for registry in (_tasks, _baselines, _hotspot_tasks)
+                   for task in registry.values() if not task.done() and task.get_loop() is loop]
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+        _tasks.clear()
+        _baselines.clear()
+        _hotspot_tasks.clear()
 
 
 app = FastAPI(title='Century Pano', version='0.1.0', lifespan=lifespan)
@@ -51,6 +63,13 @@ app = FastAPI(title='Century Pano', version='0.1.0', lifespan=lifespan)
 @app.middleware('http')
 async def security_headers(request, call_next):
     length = request.headers.get('content-length')
+    if request.url.path.startswith(('/world-plans', '/world-jobs', '/world-prefetch')) and request.method in ('POST', 'PATCH'):
+        body = bytearray()
+        async for chunk in request.stream():
+            body.extend(chunk)
+            if len(body) > 256 * 1024:
+                return PlainTextResponse('The world plan request is too large.', status_code=413)
+        request._body = bytes(body)
     if request.url.path in ('/jobs', '/preview') and length:
         try:
             if int(length) > (MAX_UPLOAD_MB + 1) * 1024 * 1024:
@@ -64,13 +83,16 @@ async def security_headers(request, call_next):
     # requests and could result in 403 responses.
     response.headers['Referrer-Policy'] = 'strict-origin-when-cross-origin'
     response.headers['Permissions-Policy'] = 'geolocation=(self), accelerometer=(self), gyroscope=(self), magnetometer=(self)'
-    if request.url.path in ('/sw.js', '/health', '/replays') or request.url.path.endswith('/manifest'):
+    if (request.url.path in ('/sw.js', '/health', '/replays') or request.url.path.endswith('/manifest')
+            or request.url.path.startswith(('/world-session', '/world-plans', '/world-jobs', '/world-config', '/world-prefetch'))):
         response.headers['Cache-Control'] = 'no-store'
     return response
 
 
 @app.exception_handler(HTTPException)
 async def plain_error(request, exc):
+    if request.url.path.startswith('/world-'):
+        return JSONResponse({'detail': str(exc.detail)}, status_code=exc.status_code, headers=exc.headers)
     return PlainTextResponse(str(exc.detail), status_code=exc.status_code, headers=exc.headers)
 
 
@@ -164,7 +186,7 @@ async def _run(job_id):
 
 @app.post('/jobs', status_code=201)
 async def create_job(
-    image: UploadFile = File(...), decade: str = Form(DEFAULT_DECADE),
+    image: UploadFile = File(...), decade: str | None = Form(None),
     target_year: str | None = Form(None),
     lat: float | None = Form(None, ge=-90, le=90), lon: float | None = Form(None, ge=-180, le=180),
     place: str = Form('', max_length=160), heading: float = Form(0.5, ge=0, le=1),
@@ -173,7 +195,7 @@ async def create_job(
     weathers: str | None = Form(None),
 ):
     try:
-        if target_year is None and decade not in DECADE_ANCHOR:
+        if target_year is None and decade is not None and decade not in DECADE_ANCHOR:
             raise ValueError('Unsupported legacy era')
         # Validate the raw form value so 1945.0, scientific notation and era
         # aliases cannot be silently coerced into an exact calendar year.
@@ -181,7 +203,7 @@ async def create_job(
             raise ValueError('Expected an integer year')
         if target_year is not None and not target_year.strip().isdigit():
             raise ValueError('Expected an integer year')
-        year = resolve_year(decade if target_year is None else target_year)
+        year = resolve_year((decade if decade is not None else DEFAULT_YEAR) if target_year is None else target_year)
     except ValueError:
         raise HTTPException(422, f'Choose a whole year between {MIN_YEAR} and {MAX_YEAR}.') from None
     if (lat is None) != (lon is None):
@@ -195,10 +217,7 @@ async def create_job(
             raise HTTPException(422, str(exc)) from None
     if len(_tasks) >= 4:
         raise HTTPException(429, 'Another job is already processing. Please try again shortly.')
-    if settings.provider != 'demo' and not {
-        'gemini': settings.gemini_api_key, 'grok': settings.grok_api_key, 'fal': settings.fal_key,
-        'qwen': settings.k2_api_key, 'openai': settings.openai_api_key,
-    }.get(settings.provider):
+    if not settings.provider_configured():
         raise HTTPException(503, 'Set an image service API key in the server .env and restart, or use a replay example.')
     raw = await read_upload(image)
     fmt, gps, w, h = await asyncio.to_thread(inspect_upload, raw)
@@ -383,13 +402,12 @@ async def resolve(coords: Coordinates):
 
 @app.get('/health')
 async def health():
-    configured = settings.provider == 'demo' or bool({
-        'gemini': settings.gemini_api_key, 'grok': settings.grok_api_key,
-        'fal': settings.fal_key, 'qwen': settings.k2_api_key, 'openai': settings.openai_api_key,
-    }.get(settings.provider))
+    configured = settings.provider_configured()
     return {'status': 'ok', 'provider': settings.provider, 'configured': configured, 'version': '0.1.0',
             'min_year': MIN_YEAR, 'max_year': MAX_YEAR, 'default_year': DEFAULT_YEAR,
             'weather_enabled': settings.weather_enabled, 'weather_ids': list(DEFAULT_WEATHER_IDS)}
 
 
+app.include_router(world_router)
+app.mount('/world-vendor', StaticFiles(directory=ROOT / 'node_modules', check_dir=False), name='world-vendor')
 app.mount('/', StaticFiles(directory=ROOT / 'web', html=True), name='web')

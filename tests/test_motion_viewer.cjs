@@ -298,3 +298,21 @@ test('pure mode keeps following while an open options sheet pauses and recenters
   app.sensor(315); app.frames();
   assert.ok(app.x() < paused - 10);
 });
+
+test('the Camera tab shares phone orientation and pauses it while a world tab is active', async () => {
+  const app = viewer({ ios: true }); await app.settle();
+  const headings = [];
+  app.window.CenturyModes = { onPhotoState() {}, syncPhotoControls() {}, resetCameraHeading() {}, onMotionState() {}, onCameraHeading(value) { headings.push(value); } };
+  app.window.CenturyPhoto.setActive(true, 'camera');
+  await app.window.CenturyPhoto.toggleMotion(); await app.settle();
+  app.sensor(0); app.sensor(350);
+  assert.deepEqual(headings, [0, 10]);
+  assert.equal(app.permissionCalls(), 1);
+  app.window.CenturyPhoto.setActive(false, 'world');
+  assert.equal(app.window.count('deviceorientation'), 0);
+  app.sensor(340); assert.deepEqual(headings, [0, 10]);
+  app.window.CenturyPhoto.setActive(true, 'camera');
+  assert.equal(app.window.count('deviceorientation'), 1);
+  assert.equal(app.permissionCalls(), 1, 'returning to a granted sensor does not prompt again');
+  app.sensor(330); assert.equal(headings.at(-1), 30);
+});

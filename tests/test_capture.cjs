@@ -1,7 +1,12 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
 
-const capture = require('../web/capture.js');
+const { readFileSync } = require('node:fs');
+const vm = require('node:vm');
+// The shared package uses ES modules for the world viewer. Exercise the actual
+// browser UMD entry point while retaining this test's canvas and sensor globals.
+const capture = vm.runInThisContext(`(function(module) { ${readFileSync(require.resolve('../web/capture.js'), 'utf8')}\nreturn globalThis.CenturyCapture; })(undefined)`);
+delete global.CenturyCapture;
 
 // A canvas stub that records every drawImage so the strip geometry can be
 // checked without a browser. It is deliberately dumb: the test asserts where

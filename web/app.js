@@ -7,7 +7,7 @@
   const defaultTitle = document.title;
   const motionDevice = matchMedia('(pointer: coarse)').matches || navigator.maxTouchPoints > 0;
   const state = {
-    screen: 'capture', file: null, fileURL: null, targetYear: 1920,
+    screen: 'capture', file: null, fileURL: null, targetYear: 1926,
     minYear: 1800, maxYear: new Date().getFullYear(), yearEdited: false, yearDraft: null, expectedYear: null,
     imageWidth: 0, imageHeight: 0, location: null, locationSource: null,
     manualPlace: false, locationPromise: null, locationRevision: 0,
@@ -23,16 +23,24 @@
     viewRevision: 0, viewportWidth: 0, cachePending: false, fileOrigin: null,
     activeHotspot: null, hotspotKey: '', explaining: false, hotspotHintShown: false,
     activeWeather: null, weatherRevision: 0,
+    modeActive: true, activeMode: 'photo', resumeGyro: false,
   };
 
   function text(id, value) { $(id).textContent = value; }
   function escapeHTML(value) { return String(value ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
   function assetURL(path) { if (!path) return ''; return path.startsWith('/') ? path : '/' + path; }
+  function updateReplayURL(jobId = null) {
+    const query = new URLSearchParams(location.search);
+    if (jobId) query.set('replay', jobId); else query.delete('replay');
+    const activeMode = window.CenturyModes?.getState?.().mode;
+    if (activeMode) query.set('mode', activeMode);
+    history.replaceState(null, '', `${location.pathname}${query.size ? `?${query}` : ''}${location.hash || ''}`);
+  }
   function showToast(message, duration = 5500) {
     text('toast', message); $('toast').hidden = false;
     clearTimeout(showToast.timer); showToast.timer = setTimeout(() => { $('toast').hidden = true; }, duration);
   }
-  function showScreen(screen) {
+  function showScreen(screen, { activate = screen !== 'result' } = {}) {
     closeOptions();
     state.screen = screen;
     screens.forEach((name) => { $(name + '-screen').hidden = name !== screen; });
@@ -42,6 +50,7 @@
     syncChrome();
     window.scrollTo({ top: 0, behavior: 'instant' });
     requestAnimationFrame(resizeViewport);
+    window.CenturyModes?.onPhotoState({ screen, year: state.targetYear, reason: 'screen', activate });
   }
   function stopJourney() {
     state.generation++; clearTimeout(state.pollTimer); resetMotionOrigin();
@@ -62,7 +71,7 @@
     state.yearDraft = null; document.title = defaultTitle;
     clearHotspots();
     showScreen('capture');
-    if (location.search) history.replaceState(null, '', location.pathname);
+    updateReplayURL();
   }
 
   function closeOptions() { if ($('options-dialog').open) { $('options-dialog').close(); resetMotionOrigin(); } }
@@ -81,6 +90,7 @@
     const available = result && (!!state.loadedTiles.size || state.finalLoaded);
     const busy = state.submitting || state.loadingSource;
     const displayYear = result ? yearOf(state.manifest) ?? state.expectedYear : state.targetYear;
+    const changedYear = result && displayYear !== null && state.targetYear !== displayYear;
     document.querySelectorAll('[data-year]').forEach((button) => {
       const year = Number(button.dataset.year);
       const active = !original && year === displayYear;
@@ -89,6 +99,8 @@
       button.disabled = busy || year < state.minYear || year > state.maxYear;
     });
     syncYearControls();
+    window.CenturyModes?.syncPhotoControls({ year: state.targetYear, min: state.minYear, max: state.maxYear,
+      disabled: busy, displayedYear: result ? yearOf(state.manifest) ?? state.expectedYear : null });
     $('year-input').disabled = busy; $('year-range').disabled = busy; $('year-picker-button').disabled = busy;
     $('present-button').classList.toggle('active', original);
     $('present-button').setAttribute('aria-pressed', String(original));
@@ -97,9 +109,9 @@
     $('compare-button').title = available ? 'Drag the divider to compare' : 'Ready once the view is generated';
     $('slider-handle').hidden = !result || state.viewMode !== 'compare';
     document.querySelectorAll('.viewport-label').forEach((label) => { label.hidden = !result || state.viewMode !== 'compare'; });
-    $('generate-button').hidden = !failed && (!preview || original);
+    $('generate-button').hidden = !failed && !changedYear && (!preview || original);
     $('generate-button').disabled = busy;
-    $('generate-button').innerHTML = `${failed ? 'Preview this photo again' : state.submitting ? 'Submitting…' : `Step into ${state.targetYear}`}<svg><use href="#i-arrow"/></svg>`;
+    $('generate-button').innerHTML = `${failed ? 'Preview this photo again' : state.submitting ? 'Submitting…' : changedYear ? `Prepare ${state.targetYear}` : `Step into ${state.targetYear}`}<svg><use href="#i-arrow"/></svg>`;
     const showWeatherOptIn = preview && !original && !failed;
     $('weather-opt-in').hidden = !showWeatherOptIn;
     $('weather-enabled').disabled = busy;
@@ -116,7 +128,7 @@
     $('journey-info').hidden = !result;
     $('retake-button').hidden = !preview;
     $('new-journey-button').hidden = !result;
-    text('window-year', original ? 'Today' : displayYear ?? '—');
+    text('window-year', original ? 'Today' : result ? `Showing ${displayYear ?? '—'}` : 'Target year');
     $('year-picker-button').setAttribute('aria-label', `Choose a specific year. Currently ${original ? 'today' : displayYear ?? 'to be confirmed'}.`);
     $('window-year-suffix').hidden = original;
     text('window-place', result ? placeName(state.manifest?.place) : preview ? $('place-input').value.trim() || 'your viewpoint' : 'Pittsburgh');
@@ -325,7 +337,10 @@
   $('album-input').addEventListener('change', (event) => acceptFile(event.target.files[0]));
   $('retake-button').addEventListener('click', goHome);
   $('new-journey-button').addEventListener('click', goHome);
-  document.querySelector('.brand').addEventListener('click', (event) => { event.preventDefault(); goHome(); });
+  document.querySelector('.brand').addEventListener('click', (event) => {
+    event.preventDefault();
+    if (window.CenturyModes) window.CenturyModes.setMode('camera'); else goHome();
+  });
   $('place-input').addEventListener('input', () => {
     state.manualPlace = true;
     text('location-note', $('place-input').value.trim() ? 'A city you type overrides the photo GPS and device location, and gives only city-level context. Add a state or country to pin it down.' : 'With no city, the photo GPS is used first. You can also use your device location.');
@@ -349,7 +364,9 @@
     state.targetYear = Math.max(state.minYear, Math.min(state.maxYear, year));
     if (state.screen === 'preview') document.title = `${state.targetYear} · CENTURY PANO`;
     state.yearEdited ||= edited; state.yearDraft = null;
-    syncChrome(); return true;
+    syncChrome();
+    window.CenturyModes?.onPhotoState({ screen: state.screen, year: state.targetYear, reason: edited ? 'year' : 'default-year' });
+    return true;
   }
   async function selectYear(value) {
     if (state.submitting || state.loadingSource) return;
@@ -424,7 +441,7 @@
       text('image-warning', 'This photo looks narrow. You can still continue, though a wide panorama opens up much further.');
       text('location-note', 'Reading the photo location… you can also type the city yourself.');
       showScreen('preview');
-      if (location.search) history.replaceState(null, '', location.pathname);
+      updateReplayURL();
       requestAnimationFrame(() => { resizeViewport(); state.offset = Math.max(0, (state.renderWidth - $('preview-window').clientWidth) / 2); resetMotionOrigin(); render(); });
       if (narrow) showToast('Opened. A wide panorama gives a much broader view.');
       state.locationPromise = locate(file, request);
@@ -467,7 +484,7 @@
       $('image-warning').hidden = !recovered;
       text('image-warning', 'Reusing the archived working image. It may already be cropped or scaled.');
       showScreen('preview');
-      history.replaceState(null, '', location.pathname);
+      updateReplayURL();
       requestAnimationFrame(() => { resizeViewport(); state.offset = constrainOffset(heading * state.renderWidth - $('preview-window').clientWidth / 2); resetMotionOrigin(); render(); });
       showToast(recovered ? 'Archived working image opened. Generate to explore another year.' : 'Your original is kept. Generate to explore another year.');
     } catch (error) {
@@ -637,6 +654,7 @@
     }
   }
   function frame() {
+    if (!state.modeActive || state.activeMode === 'camera') { requestAnimationFrame(frame); return; }
     if (state.velocity && !state.drag && !state.revealing) {
       state.velocity *= .94;
       if (Math.abs(state.velocity) < .2) state.velocity = 0;
@@ -746,6 +764,7 @@
   window.addEventListener('resize', resizeViewport);
 
   $('generate-button').addEventListener('click', async () => {
+    if (state.screen === 'result' && state.targetYear !== yearOf(state.manifest)) { await editJourney(state.targetYear); return; }
     if (state.screen === 'result' && (state.manifest?.status === 'error' || state.yearMismatch)) { await editJourney(state.expectedYear ?? state.targetYear); return; }
     if (!state.file || state.screen !== 'preview' || state.submitting || state.loadingSource) return;
     if (!$('year-input').checkValidity()) {
@@ -822,8 +841,8 @@
     $('past-label').innerHTML = `${escapeHTML(targetYear ?? 'pending')} <span>REIMAGINED</span>`;
     document.title = `${targetYear ?? 'Loading'} · CENTURY PANO`;
     for (const canvas of [$('original-canvas'), $('past-canvas')]) { canvas.width = 1; canvas.height = 1; }
-    showScreen('result');
-    history.replaceState(null, '', `?replay=${encodeURIComponent(jobId)}`);
+    showScreen('result', { activate: replay });
+    updateReplayURL(jobId);
     if (!replay && state.fileURL) {
       try {
         const image = await loadImage(state.fileURL);
@@ -972,7 +991,7 @@
   function updateMetadata(manifest) {
     const demo = isDemo(manifest), replay = manifest.mode === 'replay' || state.viewingReplay;
     const year = yearOf(manifest);
-    if (year !== null) state.targetYear = year;
+    if (year !== null && !window.CenturyModes) state.targetYear = year;
     if (state.receiptStatus !== manifest.status) { rememberJob(manifest); state.receiptStatus = manifest.status; }
     const unrecognizedCity = manifest.place?.source === 'manual' && manifest.place?.prompt_safe === false;
     $('place-warning').hidden = !unrecognizedCity;
@@ -1360,12 +1379,14 @@
   }
   function resetMotionOrigin() {
     state.gyroHeading = null; state.gyroTarget = state.offset;
+    window.CenturyModes?.resetCameraHeading();
   }
   function motionPrompt(label, message = '') {
     clearTimeout(enableGyro.hideTimer);
     text('motion-label', label); $('motion-button').hidden = !motionDevice;
     $('gyro-hint').hidden = !message; text('gyro-hint', message);
     if (motionDevice) $('gesture-hint').hidden = true;
+    window.CenturyModes?.onMotionState({ label, message, enabled: state.gyro, pending: state.gyroPending });
   }
   function disableGyro() {
     state.gyroRequest++; state.gyroPending = false; state.gyro = false; state.gyroSeen = false;
@@ -1376,6 +1397,7 @@
     $('gyro-button').disabled = false; $('motion-button').disabled = false;
     $('gyro-button').setAttribute('aria-pressed', 'false'); $('recenter-button').hidden = true;
     $('motion-button').hidden = true;
+    window.CenturyModes?.onMotionState({ label: 'Follow my phone', message: '', enabled: false, pending: false });
   }
   function gyroFallback(message) {
     disableGyro();
@@ -1383,7 +1405,7 @@
     showToast(message, 7000);
   }
   function onOrientation(event) {
-    if (!state.gyro) return;
+    if (!state.gyro || !state.modeActive) return;
     if (Number.isFinite(event.alpha)) state.gyroSignal = true;
     const heading = CenturyMotion.headingFromOrientation(event);
     // Some phones initially emit null readings, or point their camera straight up.
@@ -1393,6 +1415,10 @@
       $('gyro-button').innerHTML = '<svg><use href="#i-check"/></svg>Following your phone';
       motionPrompt('On · turn the phone to explore');
       enableGyro.hideTimer = setTimeout(() => { $('motion-button').hidden = true; }, 2800);
+    }
+    if (state.activeMode === 'camera') {
+      if (document.hidden || $('options-dialog').open || $('replay-dialog').open) { resetMotionOrigin(); return; }
+      window.CenturyModes?.onCameraHeading(heading); return;
     }
     if (state.drag || state.revealing || document.hidden || $('options-dialog').open || $('replay-dialog').open) {
       resetMotionOrigin(); return;
@@ -1667,6 +1693,43 @@
   $('replay-dialog').addEventListener('click', (event) => { if (event.target === $('replay-dialog')) { const rect = $('replay-dialog').getBoundingClientRect(); if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) { closeArchivePlace(); $('replay-dialog').close(); } } });
   window.addEventListener('offline', connectionStatus);
   window.addEventListener('online', () => { checkHealth(); if (state.finalLoaded && state.manifest) cacheJourney(state.manifest); });
+  window.CenturyPhoto = {
+    getState: () => ({ screen: state.screen, year: state.targetYear, min: state.minYear, max: state.maxYear }),
+    capture: () => { closeOptions(); return startCapture(); },
+    upload: () => { closeOptions(); $('album-input').click(); },
+    archive: openReplays,
+    options: () => { syncChrome(); $('options-dialog').showModal(); },
+    toggleMotion: () => { if (state.gyro) disableGyro(); else return enableGyro(); },
+    getMotionState: () => ({ enabled: state.gyro, pending: state.gyroPending, label: $('motion-label').textContent || 'Follow my phone' }),
+    selectYear,
+    setTargetYear: (year) => setTargetYear(year, true),
+    setActive(active, mode = 'photo') {
+      const wasActive = state.modeActive;
+      state.modeActive = !!active;
+      state.activeMode = mode;
+      if (!active) {
+        if (state.clean) setClean(false, false);
+        if (wasActive) state.resumeGyro = state.gyro;
+        closeCapture(); disableGyro();
+        if ($('options-dialog').open) $('options-dialog').close();
+        if ($('replay-dialog').open) $('replay-dialog').close();
+        state.velocity = 0;
+        if (state.drag) {
+          const { target, pointerId } = state.drag;
+          if (target.hasPointerCapture(pointerId)) target.releasePointerCapture(pointerId);
+          target.classList.remove('dragging'); state.drag = null;
+        }
+      } else {
+        resetMotionOrigin(); requestAnimationFrame(resizeViewport);
+        if (!wasActive && state.resumeGyro) {
+          state.resumeGyro = false; state.gyro = true; state.gyroSeen = false;
+          window.addEventListener('deviceorientation', onOrientation);
+          $('gyro-button').setAttribute('aria-pressed', 'true'); $('recenter-button').hidden = false;
+          motionPrompt('On · turn the phone to explore');
+        }
+      }
+    },
+  };
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => { /* HTTPS or localhost is needed for offline mode. */ });
   checkHealth();
   showScreen('capture');

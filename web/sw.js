@@ -1,8 +1,8 @@
 'use strict';
-const SHELL_CACHE = 'century-shell-v6';
+const SHELL_CACHE = 'century-shell-v7-four-modes';
 const JOURNEY_CACHE = 'century-journeys-v1';
 const SHELL = [
-  '/', '/index.html', '/capture.js', '/motion.js', '/app.js', '/style.css', '/window-scene.png',
+  '/', '/index.html', '/capture.js', '/motion.js', '/app.js', '/mode-tabs.js', '/world/year-wheel.js', '/style.css', '/window-scene.png',
   '/vendor/leaflet/leaflet.css', '/vendor/leaflet/leaflet.js',
 ];
 

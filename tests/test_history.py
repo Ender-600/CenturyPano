@@ -113,7 +113,7 @@ def test_site_history_can_replace_present_day_buildings(live_history, monkeypatc
         **scene.DEFAULT_SCENE_SPEC,
         "keep_structure": ["building footprints and heights", "skyline silhouette", "horizon"],
     }
-    result = asyncio.run(constraints.build_constraints(PLACE, year, current_scene))
+    result = asyncio.run(constraints.build_constraints(PLACE, year, current_scene, structure_lock=True))
     saved = result.to_dict()["historical_context"]
     assert not result.fallback
     assert saved["site_state"] == history["site_state"]
@@ -140,7 +140,8 @@ def test_history_failure_records_uncertainty_without_leaking_provider_details(li
         raise RuntimeError("secret-provider-key and private response")
 
     monkeypatch.setattr(constraints, "_request_facts", failed)
-    result = asyncio.run(constraints.build_constraints(PLACE, 1945, scene.DEFAULT_SCENE_SPEC))
+    result = asyncio.run(constraints.build_constraints(PLACE, 1945, scene.DEFAULT_SCENE_SPEC,
+                                                       structure_lock=True))
     saved = result.to_dict()["historical_context"]
     assert result.fallback and result._tokens == 0
     assert saved["target_year"] == 1945 and saved["site_state"] == "unknown"

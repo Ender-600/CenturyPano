@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
@@ -13,8 +13,9 @@
   <script src="/capture.js" defer></script>
   <script src="/motion.js" defer></script>
   <script src="/app.js" defer></script>
+  <script type="module" src="/mode-tabs.js"></script>
 </head>
-<body data-screen="capture">
+<body data-screen="capture" data-mode="camera">
   <svg class="icon-defs" aria-hidden="true"><defs>
     <symbol id="i-window" viewBox="0 0 24 24"><path d="M3 9V3h6m6 0h6v6M3 15v6h6m6 0h6v-6"/></symbol>
     <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M4 12h15m-6-6 6 6-6 6"/></symbol>
@@ -35,10 +36,22 @@
     <symbol id="i-snow" viewBox="0 0 24 24"><path d="M12 3v18M5.6 6.6l12.8 12.8M18.4 6.6 5.6 19.4"/><path d="m9.5 4.8 2.5 1.4 2.5-1.4M9.5 19.2l2.5-1.4 2.5 1.4M4.2 10.2l1.8 2.3-1.8 2.3M19.8 10.2l-1.8 2.3 1.8 2.3"/></symbol>
   </defs></svg>
 
-  <main id="main" class="window" aria-label="Panoramic window onto time">
+  <nav class="mode-tabs chrome" aria-label="Choose a mode" role="tablist">
+    <button id="tab-camera" role="tab" type="button" data-mode="camera" aria-selected="true" aria-controls="camera-mode-panel">Camera</button>
+    <button id="tab-photo" role="tab" type="button" data-mode="photo" aria-selected="false" aria-controls="main" tabindex="-1">Photo history</button>
+    <button id="tab-streetview" role="tab" type="button" data-mode="streetview" aria-selected="false" aria-controls="world-mode-panel" tabindex="-1">Street View</button>
+    <button id="tab-world" role="tab" type="button" data-mode="world" aria-label="Immersive world" aria-selected="false" aria-controls="world-mode-panel" tabindex="-1"><span class="desktop-tab-label">Immersive world</span><span class="mobile-tab-label" aria-hidden="true">World</span></button>
+  </nav>
+  <main id="main" class="window mode-panel" role="tabpanel" aria-labelledby="tab-photo" hidden>
     <section id="capture-screen" class="screen capture-screen" tabindex="0" aria-label="Concept panorama. Drag sideways or use the arrow keys to explore.">
       <img id="hero-image" class="hero-image" src="/window-scene.png" alt="Concept panorama of the Pittsburgh riverfront and its golden bridges" draggable="false">
       <div id="hero-past" class="hero-past" aria-hidden="true"></div>
+      <div class="photo-empty">
+        <p class="eyebrow">YOUR VIEWPOINT</p><h1>Your photo.<br>Another time.</h1>
+        <p>Capture or upload a panorama, then choose a year to see its history.</p>
+        <button class="generate-button" id="photo-empty-upload" type="button">Choose a panorama <svg><use href="#i-arrow"/></svg></button>
+        <div class="photo-empty-actions"><button class="subtle-button" id="photo-empty-capture" type="button">Capture this place</button><button class="subtle-button" id="photo-empty-archive" type="button">Open the archive</button></div>
+      </div>
     </section>
 
     <section id="preview-screen" class="screen preview-screen" hidden aria-label="Preview your panorama">
@@ -90,13 +103,10 @@
         <p id="window-caption">The same place, another era.</p>
         <h1><button id="year-picker-button" aria-label="Choose a specific year" aria-haspopup="dialog"><span id="window-year">1920</span><span class="year-suffix" id="window-year-suffix"></span></button></h1>
       </div>
-      <div class="year-options" id="year-options" role="group" aria-label="Jump to a year">
-        <button data-year="1900" aria-pressed="false">1900<span class="era-dot" aria-hidden="true"></span></button>
-        <button data-year="1920" aria-pressed="false">1920<span class="era-dot" aria-hidden="true"></span></button>
-        <button data-year="1950" aria-pressed="false">1950<span class="era-dot" aria-hidden="true"></span></button>
-        <button data-year="1970" aria-pressed="false">1970<span class="era-dot" aria-hidden="true"></span></button>
-        <button id="present-button" aria-pressed="false">Today<span class="era-dot" aria-hidden="true"></span></button>
-      </div>
+      <p class="wheel-label" id="photo-target-caption" hidden>Target year</p>
+      <div class="year-wheel-entry"><input id="photo-wheel-year" type="hidden" value="1926"><div id="photo-year-wheel" class="year-wheel" tabindex="0" role="spinbutton" aria-label="Target year" aria-describedby="year-wheel-hint"></div></div>
+      <p id="year-wheel-hint" class="sr-only">Swipe up or down to choose a year. Arrow keys adjust by one year. Page Up and Page Down adjust by ten.</p>
+      <div class="year-options" id="year-options" role="group" aria-label="Original photo"><button id="present-button" aria-pressed="false">Today<span class="era-dot" aria-hidden="true"></span></button></div>
       <button class="generate-button shoot-button" id="shoot-button" hidden><svg><use href="#i-camera"/></svg>Capture this place<svg><use href="#i-arrow"/></svg></button>
       <div class="weather-switch chrome" id="weather-options" role="group" aria-label="Weather" hidden></div>
       <label class="weather-opt-in chrome" id="weather-opt-in" hidden>
@@ -118,6 +128,23 @@
     <button class="round-button restore-button" id="restore-button" aria-label="Leave clean mode and show the interface" hidden><svg><use href="#i-eye"/></svg></button>
   </main>
 
+  <section id="camera-mode-panel" class="window mode-panel camera-mode-panel" role="tabpanel" aria-labelledby="tab-camera">
+    <div id="camera-viewport" class="screen camera-viewport" tabindex="0" aria-label="Concept panorama. Drag sideways or use arrow keys to explore."><img id="camera-hero" src="/window-scene.png" alt="Concept panorama of Pittsburgh's riverfront" draggable="false"><div class="camera-era-filter" id="camera-era-filter" aria-hidden="true"></div></div>
+    <div class="window-shade" aria-hidden="true"></div>
+    <header class="site-header"><a href="/" class="brand" data-camera-home aria-label="CENTURY PANO home"><svg><use href="#i-window"/></svg><span>CENTURY<span class="brand-light"> PANO</span></span></a><div class="window-place"><svg><use href="#i-location"/></svg><span>Pittsburgh</span></div><button class="round-button" id="camera-options" type="button" aria-label="Open window options"><svg><use href="#i-more"/></svg></button></header>
+    <div class="gesture-hint" id="camera-gesture-hint"><span aria-hidden="true">↔</span> Swipe sideways to explore this place</div>
+    <button class="gesture-hint motion-button" id="camera-motion" type="button" aria-pressed="false"><svg><use href="#i-gyro"/></svg><span id="camera-motion-label">Follow my phone</span></button>
+    <section class="journey-controls camera-journey-controls" aria-label="Capture a panorama">
+      <div class="time-caption"><p>Your phone, as a window onto time.</p></div>
+      <div class="year-wheel-entry"><input id="camera-wheel-year" type="hidden" value="1926"><div id="camera-year-wheel" class="year-wheel" tabindex="0" role="spinbutton" aria-label="Target year" aria-describedby="camera-year-wheel-hint"></div></div>
+      <p id="camera-year-wheel-hint" class="sr-only">Swipe up or down to choose a year. Arrow keys adjust by one year. Page Up and Page Down adjust by ten.</p>
+      <button class="generate-button" id="camera-shoot" type="button"><svg><use href="#i-camera"/></svg>Capture this place<svg><use href="#i-arrow"/></svg></button>
+      <div class="action-row"><button class="subtle-button" id="camera-upload" type="button"><svg><use href="#i-image"/></svg>Use a photo instead</button><button class="subtle-button" id="camera-archive" type="button"><svg><use href="#i-archive"/></svg>The archive</button></div>
+      <p class="provider-note">Concept image · capture this place to begin</p>
+    </section>
+  </section>
+  <section id="world-mode-panel" class="mode-panel world-mode-panel" role="tabpanel" aria-labelledby="tab-streetview" hidden><p id="world-loading" class="world-loading" role="status">Opening this view…</p></section>
+
   <dialog id="options-dialog" class="options-sheet" aria-labelledby="options-title">
     <div class="sheet-handle" aria-hidden="true"></div>
     <div class="sheet-heading">
@@ -126,8 +153,8 @@
     </div>
 
     <section id="year-settings" class="sheet-section year-settings" aria-labelledby="year-settings-title">
-      <div class="year-heading"><label id="year-settings-title" for="year-input">Choose a year</label><span class="year-entry"><input id="year-input" type="number" inputmode="numeric" min="1800" max="2026" step="1" value="1920" required></span></div>
-      <input id="year-range" class="year-range" type="range" min="1800" max="2026" step="1" value="1920" aria-label="Choose a specific year">
+      <div class="year-heading"><label id="year-settings-title" for="year-input">Choose a year</label><span class="year-entry"><input id="year-input" type="number" inputmode="numeric" min="1800" max="2026" step="1" value="1926" required></span></div>
+      <input id="year-range" class="year-range" type="range" min="1800" max="2026" step="1" value="1926" aria-label="Choose a specific year">
       <div class="year-scale"><span id="year-min">1800</span><span id="year-max">2026</span></div>
       <p class="field-note">Every year is read as 1 July. You can also type a year directly.</p>
     </section>

@@ -2,7 +2,7 @@
 
 ## 自动化
 
-执行 `pytest -q`：**47 passed**，17.50 秒。`ruff check app scripts tests`、`node --check web/app.js`、`node --check web/sw.js` 均通过。
+接入 GPT Image 2.5 Sunburst 后执行 `pytest -q`：**82 passed**，26.09 秒。`ruff check app scripts tests` 与 `git diff --check` 通过。前端此次未改动，先前的 `node --check web/app.js`、`node --check web/sw.js` 均通过。
 
 两条警告来自 Starlette 测试客户端依赖的弃用提示，不是应用功能失败。
 
@@ -13,6 +13,10 @@
 - 完整 demo 流水线、4 个时间戳、原始瓦片和匹配瓦片、真实磁盘缓存与隔离基线。
 - 缓存命中不调用任何图像或文本模型；旧 demo 任务不受未来 live 配置影响。
 - Gemini、fal、IFM 请求契约，拒绝重试、熔断、双限流后并发降至 3。
+- OpenAI 多图编辑 multipart 契约、JPEG / base64 响应、宽幅锚点尺寸还原、拒绝、配额不足、限流、超时与错误脱敏，使用模拟 HTTP 响应验证。
+- OpenAI 每次调用默认 180 秒，其他提供方保持自身超时；显式超时仍可覆盖。
+- OpenAI 模型和画质快照、不同配置的缓存隔离、切回旧配置的零调用回放、串行基线沿用原配置。
+- OpenAI 缺失密钥时上传返回 503；健康状态与 manifest 不暴露密钥；探针缺少密钥或配置无效时调用计数为 0。
 - 真实 HEIC 编码和 GPS EXIF、JPEG 预览、完整上传处理、原文件字节保留、公开图像元数据移除。
 - 浏览器定位 → EXIF → 手动城市 → 无的优先级；未识别街道文本不进入提示词。
 - 非法图片、上传大小、坐标和年代校验、私有上传不可通过 HTTP 访问。
@@ -36,8 +40,8 @@
 
 ## 尚未验证的真实条件
 
-- 没有收到真实服务密钥。Gemini 与 fal 单次真实探针明确显示 SKIPPED，未视为通过。
-- 未提供实拍全景。三份预置回放是程序插画和本地调色，不能用于声明 AI 重建效果。
+- 没有收到真实服务密钥。OpenAI 探针明确显示 `SKIPPED`、调用次数 0；先前 Gemini 与 fal 探针也因缺少密钥跳过。均未视为真实服务验收通过。
+- 已收到实拍全景，但现有运行使用 demo；三份预置回放是程序插画和本地调色，均不能用于声明 AI 重建效果。
 - 没有宣称真实任务的 `raw > after_color_match`、4–6 秒首屏或真实服务的并行加速。
 - iPhone Safari/Chrome 的实际相机、陀螺仪方向、权限交互和音频播放需实机完成。
 - 离线检查验证了源服务断开时缓存恢复；首次访问仍需要联网，物理手机完全断网的验收仍需现场操作。

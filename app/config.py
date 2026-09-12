@@ -1,4 +1,5 @@
-﻿import os
+import os
+import secrets
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -58,6 +59,11 @@ class Settings:
     fal_key: str = field(default_factory=lambda: os.getenv('FAL_KEY', ''), repr=False)
     k2_api_key: str = field(default_factory=lambda: os.getenv('K2_API_KEY', ''), repr=False)
     openai_api_key: str = field(default_factory=lambda: os.getenv('OPENAI_API_KEY', ''), repr=False)
+    worldlab_api_key: str = field(default_factory=lambda: os.getenv('WORLDLAB_API_KEY', ''), repr=False)
+    google_maps_api_key: str = field(default_factory=lambda: os.getenv('GOOGLE_MAPS_API_KEY', ''), repr=False)
+    google_streetview_ai_authorized: bool = field(default_factory=lambda: os.getenv('GOOGLE_STREETVIEW_AI_AUTHORIZED', '').lower() == 'true')
+    world_dir: Path = field(default_factory=lambda: Path(os.getenv('WORLD_DIR', str(ROOT / 'data/worlds'))).resolve())
+    world_access_token: str = field(default_factory=lambda: os.getenv('WORLD_ACCESS_TOKEN') or secrets.token_urlsafe(32), repr=False)
     gemini_image_model: str = field(default_factory=lambda: os.getenv('GEMINI_IMAGE_MODEL', 'gemini-3.1-flash-image'))
     gemini_text_model: str = field(default_factory=lambda: os.getenv('GEMINI_TEXT_MODEL', 'gemini-3.6-flash'))
     grok_image_model: str = field(default_factory=lambda: os.getenv('GROK_IMAGE_MODEL', 'grok-imagine-image-2.0'))
@@ -66,12 +72,14 @@ class Settings:
     k2_base_url: str = field(default_factory=lambda: os.getenv('K2_BASE_URL', 'https://api.ifm.ai/v1'))
     qwen_image_model: str = field(default_factory=lambda: os.getenv('QWEN_IMAGE_MODEL', 'qwen-image-edit'))
     openai_image_model: str = field(default_factory=lambda: os.getenv('OPENAI_IMAGE_MODEL', 'gpt-image-1.5'))
+    # Full 2:1 Street View edits use their own model, independent of photo tiles.
+    world_openai_image_model: str = field(default_factory=lambda: os.getenv('WORLD_OPENAI_IMAGE_MODEL', 'gpt-image-2.5-sunburst'))
     openai_image_quality: str = field(default_factory=lambda: os.getenv('OPENAI_IMAGE_QUALITY', 'medium'))
     openai_text_model: str = field(default_factory=lambda: os.getenv('OPENAI_TEXT_MODEL', 'gpt-4o-mini'))
     openai_image_timeout_s: float = field(default_factory=lambda: max(30.0, float(os.getenv('OPENAI_IMAGE_TIMEOUT_S', '180'))))
     fal_model: str = field(default_factory=lambda: os.getenv('FAL_MODEL', 'fal-ai/flux/dev/image-to-image'))
-    # Soft composition lock: allow historical reshape; nudge overlap margins for seams.
-    structure_lock: bool = field(default_factory=lambda: os.getenv('STRUCTURE_LOCK', '1') not in {'0', 'false', 'no'})
+    # Optional pixel lock; default reconstruction allows historically justified structural changes.
+    structure_lock: bool = field(default_factory=lambda: os.getenv('STRUCTURE_LOCK', '0') not in {'0', 'false', 'no'})
     lean_locked_prompt: bool = field(default_factory=lambda: os.getenv('LEAN_LOCKED_PROMPT', '1') not in {'0', 'false', 'False'})
     # Head start for the tile the viewer is facing, so viewport priority is real
     # even when every tile fits inside the concurrency budget at once.
@@ -91,6 +99,13 @@ class Settings:
         if self.weather_concurrency is None:
             return count
         return max(1, min(count, int(self.weather_concurrency)))
+
+    def provider_configured(self, provider: str | None = None) -> bool:
+        selected = provider if provider is not None else self.provider
+        return selected == 'demo' or bool({
+            'openai': self.openai_api_key, 'gemini': self.gemini_api_key, 'fal': self.fal_key,
+            'grok': self.grok_api_key, 'qwen': self.k2_api_key,
+        }.get(selected))
 
 
 settings = Settings()

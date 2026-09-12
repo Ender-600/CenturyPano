@@ -2,7 +2,8 @@ const assert = require('node:assert/strict');
 const { test } = require('node:test');
 const { readFileSync } = require('node:fs');
 const vm = require('node:vm');
-const { headingFromOrientation, shortestDelta } = require('../web/motion.js');
+const { headingFromOrientation, shortestDelta } = vm.runInThisContext(`(function(module) { ${readFileSync(require.resolve('../web/motion.js'), 'utf8')}\nreturn globalThis.CenturyMotion; })(undefined)`);
+delete global.CenturyMotion;
 
 function close(actual, expected) {
   assert.notEqual(actual, null);

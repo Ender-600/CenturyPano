@@ -4,7 +4,7 @@ import re
 
 MIN_YEAR = 1800
 MAX_YEAR = datetime.now().year
-DEFAULT_YEAR = 1920
+DEFAULT_YEAR = 1926
 DECADE_ANCHOR = {'1900s': 1905, '1920s': 1925, '1950s': 1955, '1970s': 1975}
 
 

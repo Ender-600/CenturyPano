@@ -89,10 +89,18 @@ COMPOSITION_LOCK_POLICY = (
     "transplant a famous landmark from elsewhere in the city. Use consistent lighting, sky and "
     "palette across the full scene."
 )
-INDOOR_POLICY = (
+INDOOR_POLICY_LOCKED = (
     "This is an interior. Keep the room geometry, furniture footprints and openings fixed. Re-dress "
     "surfaces, furniture styles, lighting fixtures, appliances and decoration for the reference date; "
     "do not restage the room as a street or invent windows onto an outdoor scene."
+)
+INDOOR_POLICY_OPEN = (
+    "This is an interior. Keep the camera position, viewing direction, projection and complete input "
+    "frame fixed. Allow historically justified changes to room geometry, walls, openings, layout and "
+    "furniture footprints when required by the site history. Reconstruct surfaces, furniture, lighting "
+    "fixtures, appliances and decoration for the reference date, keeping neighbouring panorama views "
+    "spatially coherent. Keep the scene indoors; do not convert it to a street or an outdoor scene, "
+    "and do not invent unsupported exterior views through openings."
 )
 
 HISTORY_SYSTEM = (
@@ -325,7 +333,7 @@ def _prompt(year: int, context: dict, facts: list[str], *, structure_lock: bool 
             anachronistic_names: list[dict] | None = None) -> str:
     policy = STRUCTURE_LOCK_POLICY if structure_lock else COMPOSITION_LOCK_POLICY
     if not is_outdoor:
-        policy = policy + " " + INDOOR_POLICY
+        policy = policy + " " + (INDOOR_POLICY_LOCKED if structure_lock else INDOOR_POLICY_OPEN)
     policy = policy + _name_policy(anachronistic_names or [], year)
     if structure_lock and lean:
         context = _lean_context(context)
@@ -350,7 +358,9 @@ def generic_decade_prompt(decade: str | int) -> str:
     facts = history.pop("era_facts")
     context = {**history, "target_year": year, "reference_date": f"{year}-07-01",
                "location": location_context({}), "evidence_basis": "fallback"}
-    return _prompt(year, context, facts)
+    from app.config import settings
+    return _prompt(year, context, facts, structure_lock=settings.structure_lock,
+                   lean=settings.lean_locked_prompt)
 
 
 async def _request_facts(location: dict, year: int, scene: dict, *, prefer_gemini: bool = False,

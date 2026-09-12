@@ -5,3 +5,6 @@ data
 tests
 __pycache__
 .pytest_cache
+node_modules
+.ruff_cache
+.DS_Store

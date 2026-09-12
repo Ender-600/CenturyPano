@@ -37,7 +37,8 @@ def test_gemini_sends_two_images_and_normalizes_output():
         }}]}}]})
 
     editor = GeminiEditor(api_key="test-only-key", transport=httpx.MockTransport(respond))
-    output = asyncio.run(editor.edit(source, "One frozen prompt", reference=reference, negative="LED signs"))
+    output = asyncio.run(editor.edit(source, "One frozen prompt", reference=reference, negative="LED signs",
+                                     structure_lock=True))
     payload = json.loads(requests[0].content)
     parts = payload["contents"][0]["parts"]
     assert len([part for part in parts if "inlineData" in part]) == 2
@@ -215,6 +216,29 @@ def test_pool_enforces_timeout():
         pool = EditorPool(SlowEditor(), fallback, max_attempts=1, backoff=())
         result = await pool.edit(picture(), "test", timeout_s=0.01)
         assert result.provider == "fal"
+    asyncio.run(run())
+
+
+def test_pool_uses_each_providers_timeout_when_falling_back():
+    async def run():
+        primary = ScriptedEditor('openai', [ProviderError('unavailable', retryable=False)])
+        primary.default_timeout_s = 180.0
+        fallback = ScriptedEditor('gemini', [picture()])
+        pool = EditorPool(primary, fallback, backoff=())
+        result = await pool.edit(picture(), 'test')
+        assert result.provider == 'gemini'
+        assert primary.calls[0][2]['timeout_s'] == 180.0
+        assert fallback.calls[0][2]['timeout_s'] == 60.0
+    asyncio.run(run())
+
+
+def test_pool_explicit_timeout_overrides_provider_default():
+    async def run():
+        primary = ScriptedEditor('openai', [picture()])
+        primary.default_timeout_s = 180.0
+        pool = EditorPool(primary, fallback='', backoff=())
+        await pool.edit(picture(), 'test', timeout_s=12.0)
+        assert primary.calls[0][2]['timeout_s'] == 12.0
     asyncio.run(run())
 
 

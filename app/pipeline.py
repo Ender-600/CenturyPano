@@ -116,9 +116,12 @@ def _request_key(image: bytes, manifest: dict, provider: str) -> str:
     context = json.dumps({
         "target_year": manifest_year(manifest), "provider": provider,
         "prompt_version": PROMPT_VERSION,
+        "structure_lock": settings.structure_lock,
+        "lean_locked_prompt": settings.lean_locked_prompt,
         "place": manifest.get("place", {}),
         "is_360": manifest["source"].get("is_360"),
         **_weather_cache_fields(manifest),
+        **({"image_config": manifest["image_config"]} if "image_config" in manifest else {}),
     }, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(image + context.encode()).hexdigest()
 
@@ -164,10 +167,12 @@ def _required_job_files(cached: dict) -> list[str]:
     return required
 
 
-def _reuse_key(image: bytes, year: int, provider: str, weather_fields: dict) -> str:
+def _reuse_key(image: bytes, year: int, provider: str, weather_fields: dict, image_config: dict | None = None) -> str:
     """Same photo + year + provider (+ weather) may reuse a prior finished result."""
     context = json.dumps(
-        {"target_year": year, "provider": provider, **weather_fields},
+        {"target_year": year, "provider": provider, **weather_fields,
+         "structure_lock": settings.structure_lock,
+         **({"image_config": image_config} if image_config is not None else {})},
         sort_keys=True, separators=(",", ":"),
     )
     return hashlib.sha256(image + context.encode()).hexdigest()
@@ -205,14 +210,24 @@ def _apply_cached_job(job_id: str, cached: dict, current: dict) -> bool:
     return True
 
 
-def _replay_hit(job_id: str, request_key: str, original: bytes, current: dict, provider: str) -> bool:
+def _replay_hit(job_id: str, request_key: str, original: bytes, current: dict, provider: str,
+                *, allow_unverified: bool = False) -> bool:
     directory = settings.out_dir / ".cache"
     weather_fields = _weather_cache_fields(current)
     year = manifest_year(current)
     try:
         index = json.loads((directory / "requests" / f"{request_key}.json").read_text())
-        cached_index = json.loads((directory / f"{index['cache_key']}.json").read_text())
-        cached = read_manifest(cached_index["job_id"])
+        cached_id = index.get("job_id")
+        if cached_id is None:
+            # Older indexes used this shared secondary pointer. New requests
+            # point to their own job so equal prompts cannot cross profiles.
+            cached_index = json.loads((directory / f"{index['cache_key']}.json").read_text())
+            cached_id = cached_index["job_id"]
+        cached = read_manifest(cached_id)
+        if cached.get("image_config") != current.get("image_config"):
+            return False
+        if cached.get("provider", provider) != provider or cached["decade"] != current["decade"]:
+            return False
         prompt = cached["constraints"]["prompt_global"]
         if cached["constraints"].get("prompt_version") != PROMPT_VERSION:
             raise KeyError("prompt version")
@@ -234,8 +249,12 @@ def _replay_hit(job_id: str, request_key: str, original: bytes, current: dict, p
     # Same image + same year: reopen the last successful reconstruction instead of
     # re-running history (and instead of surfacing a transient historian failure).
     try:
-        reuse = json.loads((directory / "reuse" / f"{_reuse_key(original, year, provider, weather_fields)}.json").read_text())
+        reuse = json.loads((directory / "reuse" / f"{_reuse_key(original, year, provider, weather_fields, current.get('image_config'))}.json").read_text())
         cached = read_manifest(reuse["job_id"])
+        if provider != "demo" and cached.get("constraints", {}).get("fallback", True) and not allow_unverified:
+            return False  # A retry gives the historian a chance to recover.
+        if cached.get("image_config") != current.get("image_config"):
+            return False
         if cached.get("status") != "done" or cached.get("baseline_of"):
             return False
         if manifest_year(cached) != year:
@@ -266,6 +285,12 @@ async def run_job(job_id: str, *, concurrency: int | None = None, use_cache: boo
     started = time.time()
     manifest = read_manifest(job_id)
     provider = manifest.get("provider") or settings.provider
+    image_config = None
+    if provider == "openai":
+        saved_config = manifest.get("image_config") or {}
+        image_config = {"model": saved_config.get("model", settings.openai_image_model),
+                        "quality": saved_config.get("quality", settings.openai_image_quality)}
+        manifest["image_config"] = image_config
     directory = job_dir(job_id)
     directory.mkdir(parents=True, exist_ok=True)
     stage = "preprocess"
@@ -274,6 +299,8 @@ async def run_job(job_id: str, *, concurrency: int | None = None, use_cache: boo
     def start(m):
         m.update(status="running", stage=stage, mode="live", provider=provider,
                  is_demo=provider == "demo", demo=provider == "demo", cache_hit=False)
+        if image_config is not None:
+            m["image_config"] = dict(image_config)
         m["metrics"] = {"started_at": started, "anchor_done_at": None, "first_tile_at": None,
                         "finished_at": None, "first_view_s": None, "total_s": None,
                         "seam_err": {"raw": None, "after_color_match": None, "originals_floor": None,
@@ -320,7 +347,11 @@ async def run_job(job_id: str, *, concurrency: int | None = None, use_cache: boo
         primary_id = lanes[0].id if isinstance(lanes[0], WeatherSpec) else None
         tile_limit = 1 if serial else settings.resolve_tile_concurrency(geometry["n"], override=concurrency)
         weather_limit = 1 if serial else settings.resolve_weather_concurrency(len(lanes))
-        pool = EditorPool(primary=provider, fallback=settings.provider_fallback,
+        primary = provider
+        if provider == "openai":
+            from .editors.openai import OpenAIImageEditor
+            primary = OpenAIImageEditor(model=image_config["model"], quality=image_config["quality"])
+        pool = EditorPool(primary=primary, fallback=settings.provider_fallback,
                           max_concurrency=weather_limit * tile_limit)
         seed = int(manifest.get("job_seed", 0))
         structure_lock = settings.structure_lock
@@ -688,13 +719,13 @@ async def run_job(job_id: str, *, concurrency: int | None = None, use_cache: boo
         history_cacheable = provider == "demo" or not constraint_data.get("fallback", True)
         if use_cache and final["status"] == "done":
             cache_dir = settings.out_dir / ".cache"
-            reuse = _reuse_key(original_bytes, year, provider, _weather_cache_fields(final))
+            reuse = _reuse_key(original_bytes, year, provider, _weather_cache_fields(final), image_config)
             await asyncio.to_thread(_atomic_json, cache_dir / "reuse" / f"{reuse}.json",
                                     {"job_id": job_id, "cache_key": final.get("cache_key")})
             if history_cacheable:
                 await asyncio.to_thread(_atomic_json, cache_dir / f"{final['cache_key']}.json", {"job_id": job_id})
                 await asyncio.to_thread(_atomic_json, cache_dir / "requests" / f"{request_hash}.json",
-                                        {"cache_key": final["cache_key"]})
+                                        {"cache_key": final["cache_key"], "job_id": job_id})
         return final
     except Exception as exc:
         # Same photo + year already finished once: reopen that result instead of leaving the user on an error.
@@ -702,7 +733,7 @@ async def run_job(job_id: str, *, concurrency: int | None = None, use_cache: boo
             try:
                 current = read_manifest(job_id)
                 recovered = await asyncio.to_thread(
-                    _replay_hit, job_id, request_hash, original_bytes, current, provider,
+                    _replay_hit, job_id, request_hash, original_bytes, current, provider, allow_unverified=True,
                 )
                 if recovered:
                     _ensure_instant_hotspots(job_id, read_manifest(job_id).get("scene"))
