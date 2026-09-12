@@ -1,5 +1,7 @@
 # CENTURY PANO
 
+**语言 / Language:** [中文](README.md) · [English](README.en.md)
+
 同一个地方，另一个时代。顶部四个模式依次为全景相机、自己的历史全景、Street View 历史全景和 Marble 沉浸世界。默认打开全景相机，四个模式共享年份滚轮，默认 **1926**，可选择 1800 年至当年的任意整数年份。
 
 **想象重建，非历史影像。** HackCMU 2026 · Traveling。
