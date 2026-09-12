@@ -43,6 +43,16 @@ def test_access_code_is_local_only_and_never_api_key(client, monkeypatch):
     assert client.get('/world-plans/not-a-plan').status_code == 401
 
 
+def test_world_configuration_defaults_to_standard_and_discloses_world_prices(client):
+    configuration = client.get('/world-config').json()
+    assert configuration['model'] == 'marble-1.1'
+    profiles = {item['id']: item for item in configuration['models']}
+    assert set(profiles) == {'marble-1.1', 'marble-1.0-draft'}
+    assert profiles['marble-1.1']['world_credits'] == 1500
+    assert profiles['marble-1.0-draft']['world_credits'] == 150
+    assert all(item['label'] and item['cost_label'] for item in profiles.values())
+
+
 def test_frozen_plan_cache_and_private_assets(client):
     result = client.post('/world-plans', json=PAYLOAD, headers=AUTH)
     assert result.status_code == 200, result.text
@@ -94,13 +104,18 @@ def test_generation_loads_frozen_server_plan_and_blocks_without_key(client, monk
     assert client.post('/world-jobs', json={'plan_id': plan['plan_id']}, headers=AUTH).status_code == 503
     class FakeManager:
         async def start(self, given, model):
-            assert given == plan and model == 'marble-1.0-draft'
-            return {'id': 'fake-job', 'stage': 'queued'}
+            assert given == plan
+            return {'id': 'fake-job', 'stage': 'queued', 'model': model}
         async def aclose(self):
             pass
     monkeypatch.setattr(settings, 'worldlab_api_key', 'fake-key')
     monkeypatch.setattr(router, '_manager', FakeManager())
-    assert client.post('/world-jobs', json={'plan_id': plan['plan_id']}, headers=AUTH).json()['stage'] == 'queued'
+    result = client.post('/world-jobs', json={'plan_id': plan['plan_id']}, headers=AUTH).json()
+    assert result['stage'] == 'queued' and result['model'] == 'marble-1.1'
+    draft = client.post('/world-jobs', json={'plan_id': plan['plan_id'], 'model': 'marble-1.0-draft'}, headers=AUTH)
+    assert draft.status_code == 200 and draft.json()['model'] == 'marble-1.0-draft'
+    for model in ['unknown', 'marble-1.1-plus', None]:
+        assert client.post('/world-jobs', json={'plan_id': plan['plan_id'], 'model': model}, headers=AUTH).status_code == 422
     response = client.post('/world-jobs', json={'plan_id': plan['plan_id'], 'prompt': 'override'}, headers=AUTH)
     assert response.status_code == 422
     assert 'fake-key' not in json.dumps(plan)

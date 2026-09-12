@@ -3,6 +3,8 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import vm from 'node:vm';
 import * as THREE from 'three';
+import { createPanoramaMesh, PanoramaLookControls, panoramaHeading, setCameraBearing, cameraBearing } from '../web/world/panorama.js';
+import { createOrientationController } from '../web/world/orientation.js';
 
 const source = readFileSync(new URL('../web/world/app.js', import.meta.url), 'utf8');
 const html = readFileSync(new URL('../web/world/index.html', import.meta.url), 'utf8');
@@ -14,11 +16,13 @@ const TOKEN = 'private-test-access-token';
 class Element {
   constructor(tagName = 'DIV') {
     Object.assign(this, { tagName, children: [], handlers: {}, attributes: {}, dataset: {}, style: {},
-      hidden: false, disabled: false, value: '', textContent: '', clientWidth: 800, clientHeight: 400 });
+      hidden: false, disabled: false, value: '', textContent: '', clientWidth: 800, clientHeight: 400,
+      naturalWidth: 2048, naturalHeight: 1024 });
     this.classList = { toggle() {}, add() {}, remove() {} };
   }
   set innerHTML(_value) { throw new Error('Do not inject untrusted HTML'); }
   addEventListener(type, callback) { (this.handlers[type] ||= []).push(callback); }
+  removeEventListener(type, callback) { this.handlers[type] = (this.handlers[type] || []).filter((item) => item !== callback); }
   async emit(type, event = {}) {
     for (const callback of this.handlers[type] || []) await callback({ target: this, preventDefault() {}, ...event });
   }
@@ -55,7 +59,7 @@ function app(options = {}) {
   const tabs = ['source', 'historical', 'modern', 'depth', 'pano', 'world'].map((view) => Object.assign(new Element('BUTTON'), { dataset: { view } }));
   const moves = ['forward', 'back', 'left', 'right'].map((move) => Object.assign(new Element('BUTTON'), { dataset: { move } }));
   const storage = new Map(Object.entries(options.storage || {})), requests = [], timers = new Map(), rewrites = [], gpsOptions = [], popups = [];
-  const objects = new Map(), revoked = [];
+  const objects = new Map(), revoked = [], documentEvents = {}, windowEvents = {}, watches = new Map();
   const workspace = new Element('SECTION');
   let timerId = 0, objectId = 0, gpsCalls = 0;
   class ObjectURL extends URL {
@@ -71,19 +75,30 @@ function app(options = {}) {
     getElementById(id) { return elements.get(id) || null; },
     querySelectorAll(selector) { return selector === '[data-view]' ? tabs : selector === '[data-move]' ? moves : []; },
     querySelector(selector) { return selector === '.workspace' ? workspace : null; },
-    createElement(tag) { return new Element(tag.toUpperCase()); }, addEventListener() {},
+    createElement(tag) { return new Element(tag.toUpperCase()); },
+    addEventListener(type, handler) { (documentEvents[type] ||= []).push(handler); },
+    removeEventListener(type, handler) { documentEvents[type] = (documentEvents[type] || []).filter((item) => item !== handler); },
   };
   const context = vm.createContext({
-    THREE, SplatMesh: SplatStub, SparkRenderer: class {},
+    THREE, createPanoramaMesh, PanoramaLookControls, panoramaHeading, setCameraBearing, cameraBearing,
+    createOrientationController, SplatMesh: SplatStub, SparkRenderer: class {},
     GLTFLoader: class { async parseAsync() { return { scene: options.gltf || new THREE.Group() }; } },
-    document, window: { addEventListener() {}, open(...args) {
+    document, window: { DeviceOrientationEvent: options.orientation,
+      setTimeout(callback, milliseconds) { const id = ++timerId; timers.set(id, { callback, milliseconds }); return id; },
+      clearTimeout(id) { timers.delete(id); },
+      addEventListener(type, handler) { (windowEvents[type] ||= []).push(handler); },
+      removeEventListener(type, handler) { windowEvents[type] = (windowEvents[type] || []).filter((item) => item !== handler); }, open(...args) {
       const popup = { args, opener: {}, location: { replace(url) { popup.url = url; } }, close() { popup.closed = true; } };
       popups.push(popup); return options.blockPopups ? null : popup;
     }, isSecureContext: options.secure !== false, devicePixelRatio: 1, matchMedia: () => ({ matches: !!options.mobile }) },
-    location: { hash: '', search: '', pathname: '/world', hostname: 'example.test', ...options.location },
+    location: { hash: '', search: '', pathname: '/world', hostname: 'example.test', origin: 'https://example.test', ...options.location },
     history: { replaceState(...args) { rewrites.push(args); } },
     sessionStorage: { getItem: (key) => storage.get(key) || null, setItem: (key, value) => storage.set(key, value), removeItem: (key) => storage.delete(key) },
-    navigator: { geolocation: options.noGPS ? undefined : { getCurrentPosition(success, failure, settings) {
+    navigator: { userAgent: options.userAgent || '', permissions: options.permissions, clipboard: options.clipboard,
+      geolocation: options.noGPS ? undefined : {
+      watchPosition(success, failure, settings) { const id = watches.size + 1; watches.set(id, { success, failure, settings }); return id; },
+      clearWatch(id) { watches.delete(id); },
+      getCurrentPosition(success, failure, settings) {
       gpsCalls++; gpsOptions.push(settings);
       if (options.gps) return options.gps(success, failure, settings, gpsCalls);
       success({ coords: { latitude: 1, longitude: 2, accuracy: 12 }, timestamp: Date.now() });
@@ -103,10 +118,12 @@ function app(options = {}) {
       throw new Error('Unexpected fetch');
     },
   });
-  const hooks = '{state,api,safeAssetURL,safeSourceURL,initialiseAccess,boot,bindEvents,preparePlan,renderPlan,startGeneration,pollJob,applyJob,restoreSaved,showView,semanticsTransform,importEdits,resumeJob,changeReason,refreshLocation,setLocationMode,resolveLocation,openStreetView}';
+  const hooks = '{state,api,safeAssetURL,safeSourceURL,initialiseAccess,boot,bindEvents,preparePlan,renderPlan,startGeneration,pollJob,applyJob,restoreSaved,showView,semanticsTransform,importEdits,resumeJob,changeReason,refreshLocation,setLocationMode,resolveLocation,openStreetView,toggleMotion,calibrateView,manualLook,generateForYear,moveCamera}';
   vm.runInContext(source.replace(/^import .*;\n/gm, '').replace('void boot();', `globalThis.hooks = ${hooks};`), context);
   return { ...context.hooks, elements, tabs, moves, requests, timers, storage, rewrites, objects, revoked,
-    gpsCalls: () => gpsCalls, gpsOptions, popups, document, SplatStub, workspace };
+    gpsCalls: () => gpsCalls, gpsOptions, popups, document, SplatStub, workspace, watches,
+    async emitDocument(type) { for (const callback of documentEvents[type] || []) await callback(); },
+    async emitWindow(type, event = {}) { for (const callback of [...(windowEvents[type] || [])]) await callback(event); } };
 }
 
 function authorised(view) { view.state.token = TOKEN; view.state.config = { configured: true }; }
@@ -183,12 +200,45 @@ test('generation submits once, polls GET every five seconds, and stops on ready'
   await view.startGeneration();
   await view.startGeneration();
   assert.equal(view.requests.filter((request) => request.method === 'POST').length, 1);
-  assert.deepEqual(JSON.parse(view.requests[0].body), { plan_id: PLAN, model: 'marble-1.0-draft' });
+  assert.deepEqual(JSON.parse(view.requests[0].body), { plan_id: PLAN, model: 'marble-1.1' });
   assert.equal([...view.timers.values()][0].milliseconds, 5000);
   await view.pollJob(view.state.jobEpoch); await view.pollJob(view.state.jobEpoch);
   assert.equal(view.requests.filter((request) => request.method === 'GET').length, 2);
   assert.equal(view.state.job.stage, 'ready');
   assert.equal(view.timers.size, 0);
+});
+
+test('standard is the default and choosing Draft changes the visible cost and submitted model', async () => {
+  const view = app({ fetch: (url) => url === '/world-jobs'
+    ? response({ job_id: JOB, stage: 'queued', model: 'marble-1.0-draft', assets: [] }) : undefined });
+  authorised(view); view.bindEvents(); view.renderPlan(plan());
+  assert.equal(view.elements.get('world-model').value, 'marble-1.1');
+  assert.match(view.elements.get('generation-quality').textContent, /1,500 credits/);
+  const select = view.elements.get('world-model'); select.value = 'marble-1.0-draft';
+  await select.emit('change');
+  assert.match(view.elements.get('generation-quality').textContent, /150 credits/);
+  await view.startGeneration();
+  assert.equal(JSON.parse(view.requests[0].body).model, 'marble-1.0-draft');
+  assert.equal(select.disabled, true);
+  assert.match(view.elements.get('job-quality').textContent, /快速草稿/);
+});
+
+test('saved Draft and reduced SPZ keep their actual quality labels without triggering an upgrade', () => {
+  const view = app(); authorised(view); view.renderPlan(plan());
+  view.applyJob({ job_id: JOB, stage: 'ready', model: 'marble-1.0-draft',
+    assets: [{ kind: 'spz', filename: 'scene.spz', lod: '100k', validation: { num_points: 100000 } }] });
+  assert.match(view.elements.get('job-quality').textContent, /快速草稿.*精简精度 100k.*100,000 点/);
+  assert.doesNotMatch(view.elements.get('job-quality').textContent, /标准质量|完整精度/);
+  assert.equal(view.elements.get('world-model').value, 'marble-1.0-draft');
+  assert.equal(view.elements.get('world-model').disabled, true);
+  assert.equal(view.requests.length, 0);
+  view.applyJob({ job_id: JOB, stage: 'ready', model: 'marble-1.1',
+    assets: [{ kind: 'spz', filename: 'scene.spz', lod: 'full_res', validation: { num_points: 2000000 } }] });
+  assert.match(view.elements.get('job-quality').textContent, /标准质量.*完整精度.*2,000,000 点/);
+  assert.equal(view.requests.length, 0);
+  view.applyJob({ job_id: JOB, stage: 'ready', assets: [{ kind: 'spz', filename: 'scene.spz' }] });
+  assert.match(view.elements.get('job-quality').textContent, /模型未记录.*资源精度未记录/);
+  assert.doesNotMatch(view.elements.get('generation-quality').textContent, /标准质量/);
 });
 
 test('lost generation submission response is persisted and never retried automatically', async () => {
@@ -251,7 +301,7 @@ test('later selected preview wins over an earlier slow asset response', async ()
     if (url.endsWith('/depth.png')) return new Promise((resolve) => { release = () => resolve(response('old depth')); });
     if (url.endsWith('/historical_panorama.jpg')) return response('new panorama');
   } });
-  authorised(view);
+  authorised(view); view.state.engine = fakeEngine();
   view.state.plan = plan({ assets: { 'depth.png': `/world-plans/${PLAN}/assets/depth.png` } });
   view.state.job = { assets: [{ kind: 'historical_pano', url: `/world-jobs/${JOB}/assets/historical_panorama.jpg` }] };
   const old = view.showView('depth');
@@ -283,7 +333,7 @@ test('SPZ receives real bytes and metric transform precedes the X180 axis conver
   const transformed = new THREE.Vector3(2, 3, 4).applyMatrix4(splat.matrixWorld);
   assert.ok(transformed.distanceTo(new THREE.Vector3(4, -5.58, -8)) < 1e-10);
   assert.equal(view.state.engine.metric, true);
-  assert.match(view.elements.get('viewer-note').textContent, /未核实/);
+  assert.match(view.elements.get('view-details').textContent, /未核实/);
 });
 
 test('missing or partial scale metadata keeps model units and does not guess ground', async () => {
@@ -294,7 +344,7 @@ test('missing or partial scale metadata keeps model units and does not guess gro
   const splat = view.state.engine.current.children[0];
   assert.equal(splat.scale.x, 1); assert.equal(Math.abs(splat.position.y), 0);
   assert.equal(view.state.engine.metric, false);
-  assert.match(view.elements.get('view-caption').textContent, /模型单位/);
+  assert.match(view.elements.get('view-details').textContent, /模型单位/);
 });
 
 test('failed historical review stays explicit while genuine SPZ assets remain viewable', async () => {
@@ -310,7 +360,7 @@ test('failed historical review stays explicit while genuine SPZ assets remain vi
   await view.showView('world');
   assert.ok(view.state.engine.current.children[0] instanceof view.SplatStub);
   assert.match(view.elements.get('view-caption').textContent, /历史外观未通过检查/);
-  assert.match(view.elements.get('viewer-note').textContent, /现代双黄线/);
+  assert.match(view.elements.get('view-details').textContent, /现代双黄线/);
   view.applyJob(job);
   assert.equal(view.elements.get('viewer-note').textContent.match(/历史外观未通过检查/g).length, 1);
 });
@@ -435,6 +485,117 @@ test('GPS denial blocks live preparation and does not fall back to old or CMU co
   assert.equal(view.state.locationMode, 'device');
 });
 
+test('iPhone denial shows both permission settings and explicit retry recovers fresh GPS', async () => {
+  let allowed = false;
+  const view = app({
+    userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) Version/18.0 Mobile Safari/604.1',
+    gps: (success, failure) => allowed
+      ? success({ coords: { latitude: 40.44, longitude: -79.94, accuracy: 5 }, timestamp: Date.now() })
+      : failure({ code: 1 }),
+  });
+  view.bindEvents();
+  await assert.rejects(view.refreshLocation(), /权限被拒绝/);
+  assert.equal(view.elements.get('location-help').hidden, false);
+  const instructions = view.elements.get('location-help-steps').children.map((element) => element.textContent).join(' ');
+  assert.match(instructions, /网站设置/);
+  assert.match(instructions, /隐私与安全性/);
+  assert.match(instructions, /精确位置/);
+  assert.equal(view.state.locationFix, null);
+  allowed = true;
+  await view.elements.get('retry-location').emit('click');
+  await new Promise(setImmediate);
+  assert.equal(view.gpsCalls(), 2);
+  assert.equal(view.state.locationFix.lat, 40.44);
+  assert.equal(view.elements.get('location-help').hidden, true);
+  assert.equal(view.requests.length, 0);
+});
+
+test('pending Permissions query cannot delay the user-initiated GPS request', async () => {
+  const view = app({ permissions: { query: () => new Promise(() => {}) } });
+  const request = view.refreshLocation();
+  assert.equal(view.gpsCalls(), 1);
+  await request;
+  assert.equal(view.state.locationFix.lat, 1);
+});
+
+test('stale denied Permissions state cannot block successful explicit GPS retry', async () => {
+  const view = app({ permissions: { query: async () => ({ state: 'denied', addEventListener() {} }) } });
+  await view.refreshLocation();
+  await new Promise(setImmediate);
+  await view.refreshLocation();
+  assert.equal(view.gpsCalls(), 2);
+  assert.equal(view.state.locationFix.lat, 1);
+  assert.equal(view.state.locationError, '');
+});
+
+test('granting permission in a visible page reacquires GPS without starting generation', async () => {
+  const callbacks = [];
+  const permission = { state: 'denied', addEventListener(type, callback) { if (type === 'change') callbacks.push(callback); } };
+  const view = app({ visibility: 'visible', permissions: { query: async () => permission },
+    gps: (success, failure) => permission.state === 'granted'
+      ? success({ coords: { latitude: 40.44, longitude: -79.94, accuracy: 5 }, timestamp: Date.now() })
+      : failure({ code: 1 }) });
+  view.bindEvents();
+  await assert.rejects(view.refreshLocation());
+  await new Promise(setImmediate);
+  assert.ok(callbacks.length > 0);
+  permission.state = 'granted';
+  for (const callback of callbacks) callback();
+  await new Promise(setImmediate);
+  assert.equal(view.gpsCalls(), 2);
+  assert.equal(view.state.locationFix.lat, 40.44);
+  assert.equal(view.requests.length, 0);
+});
+
+test('permission changes while hidden do not request the device position', async () => {
+  const callbacks = [];
+  const permission = { state: 'denied', addEventListener(type, callback) { if (type === 'change') callbacks.push(callback); } };
+  const view = app({ visibility: 'hidden', permissions: { query: async () => permission },
+    gps: (_success, failure) => failure({ code: 1 }) });
+  view.bindEvents();
+  await assert.rejects(view.refreshLocation());
+  await new Promise(setImmediate);
+  permission.state = 'granted';
+  for (const callback of callbacks) callback();
+  await new Promise(setImmediate);
+  assert.equal(view.gpsCalls(), 1);
+  assert.equal(view.requests.length, 0);
+});
+
+test('returning from Settings notices a granted permission even without a change event', async () => {
+  const permission = { state: 'denied', addEventListener() {} };
+  const view = app({ visibility: 'visible', permissions: { query: async () => permission },
+    gps: (success, failure) => permission.state === 'granted'
+      ? success({ coords: { latitude: 40.44, longitude: -79.94, accuracy: 5 }, timestamp: Date.now() })
+      : failure({ code: 1 }) });
+  view.bindEvents();
+  await assert.rejects(view.refreshLocation());
+  await new Promise(setImmediate);
+  permission.state = 'granted';
+  await view.emitWindow('focus');
+  await new Promise(setImmediate);
+  assert.equal(view.gpsCalls(), 2);
+  assert.equal(view.state.locationFix.lat, 40.44);
+  assert.equal(view.requests.length, 0);
+});
+
+test('copying the demo link happens only on click and keeps the access code out of DOM', async () => {
+  const copies = [];
+  const view = app({ clipboard: { writeText: async (value) => copies.push(value) },
+    location: { search: `?world=${JOB}&unused=value` }, gps: (_success, failure) => failure({ code: 1 }) });
+  authorised(view); view.bindEvents();
+  await assert.rejects(view.refreshLocation());
+  assert.equal(copies.length, 0);
+  await view.elements.get('copy-location-link').emit('click');
+  assert.equal(copies.length, 1);
+  const copied = new URL(copies[0]);
+  assert.equal(copied.origin, 'https://example.test');
+  assert.equal(copied.search, `?world=${JOB}`);
+  assert.equal(new URLSearchParams(copied.hash.slice(1)).get('access'), TOKEN);
+  assert.ok([...view.elements.values()].every((element) => !element.textContent.includes(TOKEN)));
+  assert.equal(view.requests.length, 0);
+});
+
 test('a fresh request rejects stale coordinates even when the browser supplies them', async () => {
   const view = app({ gps: (success) => success({
     coords: { latitude: 40.4433, longitude: -79.9436, accuracy: 12 }, timestamp: Date.now() - 120000 }) });
@@ -524,13 +685,13 @@ test('source-photo plan shows the genuine private panorama and hides geometry to
       assets: { 'source_panorama.jpg': `/world-plans/${PLAN}/assets/source_panorama.jpg` } }));
     if (url.endsWith('/source_panorama.jpg')) return response('source photograph');
   } });
-  authorised(view); await view.preparePlan();
+  authorised(view); view.state.engine = fakeEngine(); await view.preparePlan();
   assert.equal(view.state.view, 'source');
   assert.equal(view.elements.get('geometry-stats').hidden, true);
   assert.equal(view.elements.get('geometry-edits').hidden, true);
   assert.ok(view.tabs.filter((tab) => ['historical', 'modern', 'depth'].includes(tab.dataset.view)).every((tab) => tab.hidden));
-  assert.match(view.elements.get('view-caption').textContent, /360° 实景全景照片/);
-  assert.match(view.elements.get('viewer-note').textContent, /2024-06.*照片/);
+  assert.match(view.elements.get('view-caption').textContent, /当前街景/);
+  assert.match(view.elements.get('view-details').textContent, /2024-06.*照片/);
   assert.equal(await [...view.objects.values()][0].text(), 'source photograph');
   assert.equal(view.requests.filter((request) => request.method === 'POST').length, 1);
 });
@@ -563,4 +724,157 @@ test('photo generation separates image-edit charges from World Labs credits', ()
   view.applyJob({ job_id: JOB, stage: 'ready', generation_calls: { image_edit: 1, world: 1 },
     cost_credits: { depth: null, world: 150, total: 150 }, assets: [] });
   assert.match(view.elements.get('cost').textContent, /OpenAI 图片改写另行计费.*世界：150 credits.*总计：150 credits/);
+});
+
+test('fresh location automatically prepares the source scene once without starting AI generation', async () => {
+  const view = app({ location: { hostname: 'localhost' }, fetch: (url) => {
+    if (url === '/world-config') return response({ configured: true, model: 'marble-1.1', streetview: { available: true } });
+    if (url === '/world-plans') return response(plan({ input_kind: 'streetview_panorama',
+      source_panorama: { metadata: { heading: 264 } },
+      assets: { 'source_panorama.jpg': `/world-plans/${PLAN}/assets/source_panorama.jpg` } }));
+    if (url.endsWith('/source_panorama.jpg')) return response('current source');
+  } });
+  view.state.engine = fakeEngine(); await view.boot();
+  assert.equal(view.gpsCalls(), 1);
+  assert.deepEqual(view.requests.filter((request) => request.method === 'POST').map((request) => request.url), ['/world-plans']);
+  assert.equal(view.state.view, 'source');
+  assert.equal(view.state.engine.current.userData.kind, 'panorama');
+  assert.equal(view.elements.get('flat-preview').hidden, true);
+  assert.equal(view.elements.get('generate').hidden, false);
+  assert.equal(view.watches.size, 0);
+});
+
+test('source and historical panorama share the viewing direction and forbid simulated translation', async () => {
+  const view = app({ fetch: () => response('pano') }); authorised(view); view.state.engine = fakeEngine();
+  view.state.plan = plan({ input_kind: 'streetview_panorama', source_panorama: { metadata: { heading: 264 } },
+    assets: { 'source_panorama.jpg': `/world-plans/${PLAN}/assets/source_panorama.jpg` } });
+  view.state.job = { assets: [{ kind: 'historical_pano', url: `/world-jobs/${JOB}/assets/historical_panorama.jpg` }] };
+  await view.showView('source');
+  assert.ok(Math.abs(cameraBearing(view.state.engine.camera).heading - 264) < 1e-7);
+  setCameraBearing(view.state.engine.camera, 359, 22);
+  const direction = view.state.engine.camera.quaternion.clone();
+  await view.showView('pano');
+  assert.ok(view.state.engine.camera.quaternion.angleTo(direction) < 1e-7);
+  assert.equal(view.elements.get('move-pad').hidden, true);
+  view.state.keys.add('forward'); view.moveCamera(view.state.engine, 1);
+  assert.equal(view.state.engine.camera.position.length(), 0);
+  await view.showView('source');
+  assert.ok(view.state.engine.camera.quaternion.angleTo(direction) < 1e-7);
+});
+
+test('sensor permission is user initiated; GPS course stays separate and calibration survives pano switching', async () => {
+  let permissions = 0;
+  const view = app({ visibility: 'visible', orientation: { requestPermission() { permissions++; return Promise.resolve('granted'); } },
+    fetch: () => response('pano') });
+  authorised(view); view.state.engine = fakeEngine();
+  view.state.plan = plan({ input_kind: 'streetview_panorama', source_panorama: { metadata: { heading: 264 } },
+    assets: { 'source_panorama.jpg': `/world-plans/${PLAN}/assets/source_panorama.jpg` } });
+  view.state.job = { assets: [{ kind: 'historical_pano', url: `/world-jobs/${JOB}/assets/historical_panorama.jpg` },
+    { kind: 'spz', url: `/world-jobs/${JOB}/assets/scene.spz` }] };
+  await view.showView('source');
+  assert.equal(permissions, 0); view.toggleMotion(); assert.equal(permissions, 1);
+  await Promise.resolve(); await Promise.resolve();
+  await view.emitWindow('deviceorientation', { alpha: 0, beta: 90, gamma: 0, absolute: true });
+  assert.equal(view.state.orientation.getStatus().phase, 'tracking');
+  const before = view.state.orientation.getQuaternion().clone();
+  assert.equal(view.watches.size, 1);
+  const watch = [...view.watches.values()][0];
+  watch.success({ coords: { heading: 90, speed: 1.4, accuracy: 8 }, timestamp: Date.now() });
+  assert.match(view.elements.get('heading-readout').textContent, /镜头约 0°.*行进 90°/);
+  assert.ok(view.state.orientation.getQuaternion().angleTo(before) < 1e-7);
+  watch.success({ coords: { heading: 90, speed: 0, accuracy: 8 }, timestamp: Date.now() });
+  assert.doesNotMatch(view.elements.get('heading-readout').textContent, /行进/);
+  view.manualLook(); setCameraBearing(view.state.engine.camera, 123); view.calibrateView();
+  assert.equal(view.state.calibrating, false);
+  assert.equal(view.state.orientation.getStatus().mode, 'calibrated');
+  await view.showView('pano');
+  assert.equal(view.state.orientation.getStatus().mode, 'calibrated');
+  await view.showView('world');
+  assert.equal(view.state.orientation.getStatus().enabled, false);
+  assert.equal(view.watches.size, 0);
+  view.toggleMotion(); await Promise.resolve(); await Promise.resolve();
+  assert.equal(view.state.orientation.getStatus().relativeOnly, true);
+  view.document.visibilityState = 'hidden'; await view.emitDocument('visibilitychange');
+  assert.equal(view.state.orientation.getStatus().enabled, false);
+  assert.equal(view.watches.size, 0);
+});
+
+test('changing the prominent year prepares that year before its single world submission', async () => {
+  const view = app({ fetch: (url) => {
+    if (url === '/world-plans') return response(plan({ target_year: 1945, input_kind: 'streetview_panorama' }));
+    if (url === '/world-jobs') return response({ job_id: JOB, stage: 'queued', model: 'marble-1.1', assets: [] });
+  } });
+  authorised(view); view.state.plan = plan(); view.elements.get('year').value = '1945';
+  await view.generateForYear();
+  const posts = view.requests.filter((request) => request.method === 'POST');
+  assert.deepEqual(posts.map((request) => request.url), ['/world-plans', '/world-jobs']);
+  assert.equal(JSON.parse(posts[0].body).year, 1945);
+  assert.equal(view.state.plan.target_year, 1945);
+});
+
+async function followingPanorama(options = {}) {
+  const view = app({ visibility: 'visible', orientation: { requestPermission: () => Promise.resolve('granted') },
+    fetch: () => response('pano'), ...options });
+  authorised(view); view.bindEvents(); view.state.engine = fakeEngine();
+  view.state.plan = plan({ input_kind: 'streetview_panorama', source_panorama: { metadata: { heading: 0 } },
+    assets: { 'source_panorama.jpg': `/world-plans/${PLAN}/assets/source_panorama.jpg` } });
+  await view.showView('source'); view.toggleMotion();
+  await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
+  await view.emitWindow('deviceorientation', { alpha: 0, beta: 90, gamma: 0, absolute: true });
+  assert.equal(view.watches.size, 1);
+  return view;
+}
+
+test('back-forward cache preserves panorama rendering and allows an explicit sensor restart', async () => {
+  let permissions = 0, stoppedRender = 0, disconnected = 0, disposedLook = 0;
+  const view = await followingPanorama({ orientation: { requestPermission() { permissions++; return Promise.resolve('granted'); } } });
+  const engine = view.state.engine, orientation = view.state.orientation, image = view.state.imageURL;
+  engine.renderer.setAnimationLoop = () => { stoppedRender++; };
+  engine.observer = { disconnect() { disconnected++; } };
+  engine.look = { pointers: new Map(), dispose() { disposedLook++; } };
+  view.state.job = { job_id: JOB, stage: 'generating_world', assets: [] };
+  const oldEpoch = view.state.jobEpoch;
+  await view.emitWindow('pagehide', { persisted: true });
+  assert.equal(view.state.orientation.getStatus().enabled, false);
+  assert.equal(view.watches.size, 0);
+  assert.equal(view.objects.has(image), true);
+  assert.equal(stoppedRender + disconnected + disposedLook, 0);
+  assert.ok(view.state.jobEpoch > oldEpoch);
+  await view.emitWindow('pageshow', { persisted: true });
+  assert.equal(view.state.engine, engine); assert.equal(view.state.orientation, orientation);
+  assert.equal(permissions, 1); assert.equal(view.watches.size, 0);
+  assert.ok([...view.timers.values()].some((timer) => timer.milliseconds === 5000));
+  view.toggleMotion(); await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
+  await view.emitWindow('deviceorientation', { alpha: 270, beta: 90, gamma: 0, absolute: true });
+  assert.equal(permissions, 2); assert.equal(view.state.orientation.getStatus().phase, 'tracking');
+  assert.equal(view.watches.size, 1);
+  view.state.orientation.stop();
+});
+
+test('a failed panorama switch stops sensors and the location watch', async () => {
+  const view = await followingPanorama({ fetch: (url) => url.endsWith('historical_panorama.jpg')
+    ? response({ detail: '图片不可用' }, 422) : response('source') });
+  view.state.job = { assets: [{ kind: 'historical_pano', url: `/world-jobs/${JOB}/assets/historical_panorama.jpg` }] };
+  await view.showView('pano');
+  assert.equal(view.state.engine.current, null);
+  assert.equal(view.state.orientation.getStatus().enabled, false);
+  assert.equal(view.watches.size, 0);
+  assert.equal(view.state.travel, null);
+  assert.equal(view.elements.get('motion-toggle').disabled, true);
+});
+
+test('queued location-watch callbacks cannot restore stopped travel or overwrite a new session', async () => {
+  const view = await followingPanorama();
+  const oldWatch = [...view.watches.values()][0];
+  const fix = (heading) => ({ coords: { heading, speed: 1.2, accuracy: 5 }, timestamp: Date.now() });
+  view.toggleMotion(); oldWatch.success(fix(70));
+  assert.equal(view.state.travel, null);
+  assert.doesNotMatch(view.elements.get('heading-readout').textContent, /行进/);
+  view.toggleMotion(); await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
+  const newWatch = [...view.watches.values()][0]; newWatch.success(fix(80));
+  oldWatch.success(fix(70)); assert.equal(view.state.travel.heading, 80);
+  oldWatch.failure({ code: 2 }); assert.equal(view.state.travel.heading, 80);
+  await view.setLocationMode('test'); newWatch.success(fix(90));
+  assert.equal(view.state.travel, null); assert.equal(view.watches.size, 0);
+  view.state.orientation.stop();
 });

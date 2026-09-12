@@ -2,6 +2,8 @@
 
 > 此文记录先前的粗几何／深度实验，现仅在测试模式保留。当前默认流程已按用户要求改为手机实时 GPS → Google Street View RGB 360° 全景 → 历史图像编辑 → Marble；见 [Street View 接入说明](STREETVIEW_INPUT.md)。本页的旧实验耗时和费用不代表新路线。
 
+> 新任务现默认 Marble 1.1 标准质量，并优先加载完整精度资源。下文 Draft 的时长、费用与画面是升级前实验记录；当前质量设置见 [世界质量说明](WORLD_QUALITY.md)。
+
 这是当前 `/world/` 入口的使用说明：选择一个街区，检查带来源的建筑变化，再生成一个可在浏览器中查看的世界。
 
 ```text
@@ -129,7 +131,7 @@ WORLD_ACCESS_TOKEN=单独生成的随机访问码
 | GET | `/world-plans/{id}` | 审阅计划、变化、资料和不确定性 |
 | POST | `/world-plans/{id}/edits` | 上述 `{"edits":[...]}`，创建编辑后的计划 |
 | GET | `/world-plans/{id}/assets/{filename}` | 现代/历史 GLB 与深度 PNG |
-| POST | `/world-jobs` | `plan_id`，模型固定为 `marble-1.0-draft` |
+| POST | `/world-jobs` | `plan_id`，`model` 默认 `marble-1.1`，可显式选 `marble-1.0-draft` |
 | GET | `/world-jobs/{id}` | 阶段、计时、费用与可用资产 |
 | POST | `/world-jobs/{id}/resume` | 仅继续可安全恢复的任务 |
 | GET | `/world-jobs/{id}/assets/{filename}` | 当前任务登记的资产 |

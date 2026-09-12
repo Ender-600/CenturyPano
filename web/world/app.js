@@ -2,6 +2,8 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { SparkRenderer, SplatMesh } from '@sparkjsdev/spark';
+import { createPanoramaMesh, PanoramaLookControls, panoramaHeading, setCameraBearing, cameraBearing } from './panorama.js';
+import { createOrientationController } from './orientation.js';
 
 const $ = (id) => document.getElementById(id);
 const TOKEN_KEY = 'century.world.access';
@@ -12,7 +14,7 @@ const STAGES = {
   submitting_depth: '正在提交深度全景', generating_depth: '正在生成历史全景',
   submitting_image_edit: '正在提交历史全景改写', editing_panorama: '正在改写历史全景',
   fetching_pano: '正在保存历史全景', pano_ready: '历史全景已就绪',
-  submitting_world: '正在提交三维世界', generating_world: '正在生成 Draft 三维世界',
+  submitting_world: '正在提交三维世界', generating_world: '正在生成三维世界',
   fetching_assets: '正在下载并检查世界资产', ready: '世界资产已就绪',
   paused: '服务暂时暂停，等待恢复', error: '生成停止',
   submission_unknown: '提交结果尚未确认', insufficient_credits: '服务器积分不足',
@@ -29,11 +31,17 @@ const STANDARD_REASONS = new Map([
 ]);
 const state = {
   token: '', config: null, plan: null, job: null, planBusy: false, generateBusy: false,
+  model: 'marble-1.1',
   restoring: false, resumeBusy: false, submissionUnknown: false, planEpoch: 0, jobEpoch: 0, viewEpoch: 0,
   pollTimer: null, view: 'source', viewAbort: null, userViewLocked: false,
   imageURL: null, engine: null, keys: new Set(), touchMoves: new Set(),
   locationMode: 'device', locationFix: null, locationEpoch: 0, locationBusy: false, locationError: '',
   viewingSavedPlan: false, streetViewBusy: false,
+  locationErrorCode: 0, locationPermissionState: 'unknown', locationPermissionStatus: null,
+  locationPermissionHandler: null, locationPermissionQuery: false, locationRecoveryPending: false,
+  locationLinkBusy: false,
+  orientation: null, calibrating: false, panoramaPose: null, travelWatch: null, travel: null, travelEpoch: 0,
+  motionFrameAt: 0, autoPrepareAttempted: false, bootReady: false,
 };
 
 function storageGet(key) { try { return sessionStorage.getItem(key); } catch { return null; } }
@@ -41,6 +49,45 @@ function storageSet(key, value) {
   try { value === null ? sessionStorage.removeItem(key) : sessionStorage.setItem(key, value); } catch { /* Optional persistence. */ }
 }
 function text(value, fallback = '') { return typeof value === 'string' ? value : fallback; }
+const MODEL_OPTIONS = [
+  { id: 'marble-1.1', label: '标准质量 · Marble 1.1', world_credits: 1500 },
+  { id: 'marble-1.0-draft', label: '快速草稿 · Draft', world_credits: 150 },
+];
+function modelProfile(id = state.model) {
+  const known = MODEL_OPTIONS.find((profile) => profile.id === id);
+  if (!known) return undefined;
+  const configured = Array.isArray(state.config?.models) ? state.config.models.find((profile) => profile.id === id) : null;
+  return Number.isInteger(configured?.world_credits) && configured.world_credits > 0
+    ? { ...known, world_credits: configured.world_credits } : known;
+}
+function configureModels() {
+  const offered = Array.isArray(state.config?.models) ? state.config.models : MODEL_OPTIONS;
+  const profiles = MODEL_OPTIONS.filter((profile) => offered.some((item) => item.id === profile.id));
+  const select = $('world-model'); select.replaceChildren();
+  for (const profile of profiles) {
+    const option = document.createElement('option'); option.value = profile.id;
+    option.textContent = profile.label; select.append(option);
+  }
+  const defaultModel = state.config?.model || 'marble-1.1';
+  state.model = profiles.some((profile) => profile.id === defaultModel) ? defaultModel : profiles[0]?.id || '';
+  select.value = state.model;
+}
+function renderGenerationQuality() {
+  const profile = modelProfile();
+  $('world-model').value = state.job ? text(state.job.model) : state.model;
+  const displayed = state.job ? (typeof state.job.model === 'string' ? modelProfile(state.job.model) : null) : profile;
+  $('generation-quality').textContent = state.job
+    ? `当前任务：${displayed?.label || text(state.job.model, '模型未记录')}。重新准备街景后，可选择质量生成新版本；已保存版本保留原画质。`
+    : profile ? `世界生成 ${profile.world_credits.toLocaleString('en-US')} credits（约 $${(profile.world_credits / 1250).toFixed(2)}）；全景图片处理另计。优先显示完整精度资源，加载可能更久。`
+      : '当前服务没有可用的生成模型。';
+}
+function worldQualityLabel(job = state.job, asset = assetFor('world')) {
+  const model = typeof job?.model === 'string' ? modelProfile(job.model)?.label || job.model : '模型未记录';
+  if (!asset) return `${model} · 三维资源待就绪`;
+  const lod = asset.lod === 'full_res' ? '完整精度' : asset.lod ? `精简精度 ${text(asset.lod)}` : '资源精度未记录';
+  const points = asset.validation?.num_points;
+  return `${model} · ${lod}${Number.isInteger(points) && points > 0 ? ` · ${points.toLocaleString('en-US')} 点` : ''}`;
+}
 function changeReason(change) {
   const reason = text(change.reason, '该位置的历史形态尚未核实。');
   if (change.origin === 'user_edit' || change.evidence_basis === 'user_supplied_unverified') return reason;
@@ -59,8 +106,9 @@ function applyReviewNotice() {
   if (!['world', 'pano'].includes(state.view) || !failedHistoricalReview()) return;
   const suffix = ' · 历史外观未通过检查';
   if (!$('view-caption').textContent.endsWith(suffix)) $('view-caption').textContent += suffix;
-  const base = $('viewer-note').textContent.split('\n历史外观未通过检查：')[0];
-  $('viewer-note').textContent = `${base}\n历史外观未通过检查：${reviewNotes() || '生成外观与目标年代或地点不符。'} 资产可供核查，不能视为该年代的准确还原。`;
+  $('viewer-note').textContent = '历史外观未通过检查 · 详情见设置';
+  const base = $('view-details').textContent.split('\n历史外观未通过检查：')[0];
+  $('view-details').textContent = `${base}\n历史外观未通过检查：${reviewNotes() || '生成外观与目标年代或地点不符。'} 资产可供核查，不能视为该年代的准确还原。`;
 }
 function message(value = '', error = false) {
   $('message').textContent = value;
@@ -156,37 +204,56 @@ function revealMobilePreview() {
 function syncUI() {
   const running = state.job && !TERMINAL.has(state.job.stage || state.job.status);
   const busy = state.planBusy || state.generateBusy || state.restoring || state.resumeBusy || running;
-  for (const element of $('plan-form').querySelectorAll('input,select,button')) element.disabled = !!busy;
+  for (const element of $('plan-form').elements || $('plan-form').querySelectorAll('input,select,button')) element.disabled = !!busy;
   $('prepare').disabled = !!busy || !state.token;
   if ($('snapshot')) $('snapshot').disabled = !!busy || !state.token || state.locationMode !== 'test';
   $('lat').readOnly = $('lon').readOnly = state.locationMode === 'device';
   $('gps').disabled = !!busy || state.locationBusy;
+  $('retry-location').disabled = state.locationBusy || state.planBusy;
+  $('copy-location-link').disabled = state.locationLinkBusy;
   $('open-streetview').disabled = !!busy || state.streetViewBusy;
   $('geometry-test').disabled = !!busy || !state.token || state.locationMode !== 'test';
   $('test-controls').hidden = state.locationMode !== 'test';
   $('location-mode').value = state.locationMode;
   $('location-label').textContent = state.locationMode === 'device' ? '手机当前位置' : '测试点位 · 非当前位置';
-  renderLocationStatus();
+  renderLocationStatus(); renderLocationHelp();
   if ($('edits-file')) $('edits-file').disabled = !!busy || !state.token || !state.plan;
+  const changedYear = state.plan && Number($('year').value) !== state.plan.target_year;
+  $('generate').hidden = !state.plan;
   $('generate').disabled = !state.token || !state.plan || !state.config?.configured || !!busy
-    || !!state.job || state.submissionUnknown
+    || !!state.job && !changedYear || state.submissionUnknown || !modelProfile()
     || state.plan?.input_kind === 'streetview_panorama' && state.config?.panorama_editor_configured === false;
-  $('prepare').textContent = state.planBusy ? '正在准备所选位置…' : '准备当前街景 →';
+  $('world-model').disabled = !!busy || !!state.job || state.submissionUnknown;
+  renderGenerationQuality();
+  $('prepare').textContent = state.planBusy ? '获取街景中…' : state.plan ? '更新位置' : '查看当前位置';
+  $('prepare').classList.toggle('secondary-action', !!state.plan);
   const streetview = state.config?.streetview;
   $('streetview-status').textContent = !state.config ? '正在检查街景服务…'
     : !streetview?.configured ? '服务器尚未配置 Google 全景获取。可以先在 Google 地图查看当前位置。'
       : !streetview?.ai_authorized ? 'Google 全景用于生成的授权尚未配置；可先打开官方街景查看。'
         : '生成流程使用此处的 360° 实景全景，不使用地图粗模型。';
   $('generate').textContent = state.generateBusy ? '正在创建世界任务…'
-    : state.job?.stage === 'ready' ? (failedHistoricalReview() ? '生成完成 · 历史外观未通过检查' : '世界已生成')
-      : state.job ? '任务已创建，请查看下方状态'
-        : state.submissionUnknown ? '提交状态待确认' : '生成历史世界 →';
+    : !changedYear && state.job?.stage === 'ready' ? (failedHistoricalReview() ? '画面待重新审阅' : '世界已生成')
+      : !changedYear && state.job ? STAGES[state.job.stage] || '正在生成世界'
+        : state.submissionUnknown ? '提交状态待确认' : `走进 ${$('year').value} 年 →`;
+  const profile = modelProfile();
+  $('generation-price').textContent = state.plan && (!state.job || changedYear) && profile
+    ? `${profile.label} · ${profile.world_credits.toLocaleString('en-US')} credits，图片处理另计` : '';
+  $('generation-price').hidden = !$('generation-price').textContent;
+  $('window-location').textContent = state.locationMode === 'test' ? '测试点位'
+    : state.viewingSavedPlan ? '已保存的街景' : state.locationBusy ? '正在定位…'
+      : state.locationError ? '等待位置权限' : '手机当前位置';
+  $('scene-progress').textContent = state.planBusy ? '正在获取当前位置的街景…'
+    : state.job && state.job.stage !== 'ready' ? STAGES[state.job.stage] || '' : '';
+  $('scene-progress').hidden = !$('scene-progress').textContent;
   for (const button of document.querySelectorAll('[data-view]')) {
     const view = button.dataset.view;
     button.classList.toggle('active', view === state.view || view === 'depth' && state.view === 'depth_preview');
+    button.setAttribute('aria-pressed', String(view === state.view || view === 'depth' && state.view === 'depth_preview'));
     button.disabled = !availableView(view);
     button.hidden = (!state.plan || state.plan.input_kind === 'streetview_panorama') && ['historical', 'modern', 'depth'].includes(view);
   }
+  updateMotionUI();
 }
 
 function assetFor(view) {
@@ -203,14 +270,100 @@ function assetFor(view) {
 }
 function availableView(view) { return !!assetFor(view); }
 
+function isPanorama(view = state.view) { return view === 'source' || view === 'pano'; }
+function canFollowView() { return (isPanorama() || state.view === 'world') && !!state.engine?.current; }
+function updateMotionUI() {
+  const status = state.orientation?.getStatus();
+  const enabled = status?.enabled === true;
+  $('motion-toggle').disabled = !canFollowView();
+  $('motion-toggle').textContent = enabled ? '暂停转动跟随' : '开启转动跟随';
+  $('motion-toggle').setAttribute('aria-pressed', String(enabled));
+  $('align-view').disabled = !enabled || !canFollowView() || status.phase !== 'tracking';
+  $('align-view').textContent = state.calibrating ? '完成对齐' : '校准朝向';
+  const heading = enabled ? status.physicalHeading : null;
+  const travel = state.travel && Date.now() - state.travel.timestamp < 15000 ? state.travel.heading : null;
+  $('heading-readout').textContent = Number.isFinite(heading) ? `镜头约 ${Math.round(heading)}°`
+    : enabled ? '相对朝向' : '拖动环视 360°';
+  if (Number.isFinite(travel)) $('heading-readout').textContent += ` · 行进 ${Math.round(travel)}°`;
+  $('motion-status').textContent = state.calibrating
+    ? '手机对准眼前地标，拖动画面找到同一方向，再点「完成对齐」。'
+    : enabled ? (status.message || '转动手机，视窗随之转动。')
+      : status?.message || (state.view === 'world' ? '三维世界支持虚拟浏览；朝向需手动对齐。' : '转动跟随需允许方向权限；也可以直接拖动画面。');
+}
+
+function stopTravelTracking() {
+  ++state.travelEpoch;
+  if (state.travelWatch !== null) navigator.geolocation?.clearWatch?.(state.travelWatch);
+  state.travelWatch = null; state.travel = null;
+}
+
+function startTravelTracking() {
+  if (state.travelWatch !== null || state.locationMode !== 'device' || !navigator.geolocation?.watchPosition
+      || !state.orientation?.getStatus().enabled || document.visibilityState === 'hidden') return;
+  const epoch = ++state.travelEpoch;
+  const current = () => epoch === state.travelEpoch && state.locationMode === 'device'
+    && state.orientation?.getStatus().enabled && document.visibilityState !== 'hidden';
+  state.travelWatch = navigator.geolocation.watchPosition((position) => {
+    if (!current()) return;
+    const { heading, speed, accuracy } = position.coords || {};
+    // GPS course is direction of travel, never the direction of the rear camera.
+    if (Number.isFinite(heading) && heading >= 0 && heading < 360 && Number.isFinite(speed) && speed >= 0.5
+        && Number.isFinite(accuracy) && accuracy >= 0 && accuracy <= 35 && Number.isFinite(position.timestamp)
+        && Date.now() - position.timestamp >= -10000 && Date.now() - position.timestamp < 15000) {
+      state.travel = { heading, speed, timestamp: position.timestamp };
+    } else state.travel = null;
+    updateMotionUI();
+  }, () => { if (current()) { state.travel = null; updateMotionUI(); } }, { enableHighAccuracy: true, maximumAge: 3000, timeout: 15000 });
+}
+
+function getOrientation() {
+  if (!state.orientation) state.orientation = createOrientationController({
+    window, document, getCameraQuaternion: () => state.engine?.camera.quaternion,
+    onChange: (status) => {
+      if (!status.enabled) { state.calibrating = false; stopTravelTracking(); }
+      updateMotionUI();
+    },
+  });
+  return state.orientation;
+}
+
+function toggleMotion() {
+  if (!canFollowView()) return;
+  const orientation = getOrientation();
+  if (orientation.getStatus().enabled) { orientation.stop(); state.calibrating = false; stopTravelTracking(); updateMotionUI(); return; }
+  // Call directly in the button gesture so Safari can present its permission UI.
+  const starting = orientation.startFromGesture({ relativeOnly: state.view === 'world'
+    || !Number.isFinite(state.plan?.source_panorama?.metadata?.heading) });
+  void starting.then((started) => {
+    if (started && orientation.getStatus().enabled && document.visibilityState !== 'hidden' && canFollowView()) startTravelTracking();
+    updateMotionUI();
+  });
+}
+
+function calibrateView() {
+  if (!state.orientation?.getStatus().enabled || !canFollowView()) return;
+  if (state.calibrating) {
+    if (state.orientation.calibrate(state.engine.camera.quaternion)) state.calibrating = false;
+  } else state.calibrating = true;
+  updateMotionUI();
+}
+
+function manualLook() {
+  if (state.orientation?.getStatus().enabled) state.calibrating = true;
+  updateMotionUI();
+}
+
 function renderPlan(plan) {
+  if (state.plan?.plan_id !== plan.plan_id) {
+    state.orientation?.stop(); stopTravelTracking(); state.panoramaPose = null; state.calibrating = false;
+  }
   state.plan = plan;
   $('plan-panel').hidden = false;
   const photograph = plan.input_kind === 'streetview_panorama';
   $('geometry-stats').hidden = photograph; $('geometry-edits').hidden = photograph;
   $('generation-description').textContent = photograph
-    ? '先将实景全景改写为目标年代，再由 World Labs 生成 Draft 三维世界。图片处理与世界生成分别计费；相同区块任务会复用已有结果。'
-    : '旧几何实验：World Labs 将依次从粗模型深度生成历史全景与 Draft 三维世界。此路线不使用 Google 街景照片。';
+    ? '先将实景全景改写为目标年代，再由 World Labs 生成三维世界。相同输入与模型会复用已有结果；画面细节、空间完整性与历史外观需在生成后检查。'
+    : '旧几何实验：World Labs 将依次从粗模型深度生成历史全景与三维世界。粗模型的形状与历史假设会影响最终画面。';
   const modern = Array.isArray(plan.modern_buildings) ? plan.modern_buildings : [];
   const historical = Array.isArray(plan.historical_buildings) ? plan.historical_buildings : [];
   const changes = Array.isArray(plan.changes) ? plan.changes : [];
@@ -268,6 +421,7 @@ function renderLocationStatus() {
   }
   if (state.locationBusy) $('location-status').textContent = '正在请求手机当前位置，请允许位置权限…';
   else if (state.locationError) $('location-status').textContent = state.locationError;
+  else if (state.locationPermissionState === 'denied' && !state.locationFix) $('location-status').textContent = locationFailure({ code: 1 });
   else if (state.locationFix) $('location-status').textContent = '已获取设备位置。准备新区块时会再次定位。';
   else $('location-status').textContent = '尚未获取手机位置。请允许位置权限并重新定位。';
   const fix = state.locationFix;
@@ -277,22 +431,124 @@ function renderLocationStatus() {
 }
 
 function locationFailure(error) {
-  if (error?.code === 1) return '位置权限被拒绝。请在浏览器设置中允许定位，再点“重新定位”。';
+  if (error?.code === 1) return '位置权限被拒绝或受限。需要在网站和系统设置中恢复；重复点定位不会强制弹出授权窗口。';
   if (error?.code === 2) return '设备暂时无法确定位置，请到信号较好的地方重新定位。';
   if (error?.code === 3) return '定位超时，请重试；不会改用旧坐标或测试点位。';
   return error?.message || '无法获取手机位置，请重新定位。';
 }
 
+function locationHelpSteps() {
+  const userAgent = navigator.userAgent || '';
+  const iphone = /iPhone|iPad|iPod/.test(userAgent) || navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1;
+  if (/MicroMessenger/i.test(userAgent)) return [
+    `你正在使用微信内置浏览器。复制演示链接后，在 ${iphone ? 'Safari' : '手机浏览器（如 Chrome）'} 粘贴打开，再允许网站定位。`,
+    '如果继续使用微信内置页面，还需在手机系统设置中检查微信的位置权限。',
+  ];
+  if (iphone) return [
+    'Safari：页面菜单 → 更多 → 此网站设置 → 位置 → 允许。旧版 Safari 可点 aA → 网站设置。',
+    'iPhone 设置 → 隐私与安全性 → 定位服务：开启定位服务，再将 Safari 网站设为“使用 App 期间”，并打开“精确位置”。',
+    '返回此页，点“已修改权限，重新定位”。使用其他 iPhone 浏览器时，还要检查系统给该浏览器的位置权限。',
+  ];
+  if (/Android/i.test(userAgent)) return [
+    'Chrome：打开地址栏的网站信息，在权限中允许此网站访问位置信息。',
+    'Android 设置：开启系统位置信息，并允许 Chrome（或当前浏览器）在使用时访问位置。菜单名称可能因手机版本不同。',
+    '返回此页，点“已修改权限，重新定位”。',
+  ];
+  return [
+    '在浏览器的网站设置中，允许此网站访问位置。',
+    '在设备系统设置中开启定位服务，并允许当前浏览器使用位置。修改后返回此页重新定位。',
+    '如果这是 App 内置浏览器，可复制链接到 Safari 或 Chrome 打开。',
+  ];
+}
+
+function renderLocationHelp() {
+  const blocked = state.locationErrorCode === 1 || state.locationPermissionState === 'denied' && !state.locationFix;
+  $('location-help').hidden = state.locationMode !== 'device' || !blocked;
+  $('location-help-steps').replaceChildren();
+  for (const instruction of locationHelpSteps()) {
+    const item = document.createElement('li'); item.textContent = instruction; $('location-help-steps').append(item);
+  }
+  $('location-copy-note').textContent = validToken(state.token)
+    ? '复制的链接包含此演示的访问权限，请只分享给演示参与者。'
+    : '复制后在浏览器地址栏粘贴打开；生成服务可能需要重新输入访问码。';
+}
+
+function applyLocationPermission(permission, { recover = true } = {}) {
+  const next = permission?.state;
+  if (!['granted', 'denied', 'prompt'].includes(next)) return;
+  const previous = state.locationPermissionState;
+  state.locationPermissionState = next;
+  if (next === 'granted' && previous !== 'granted' && state.locationErrorCode === 1) {
+    state.locationRecoveryPending = true;
+  }
+  syncUI();
+  if (recover) resumeLocationRecovery();
+}
+
+function resumeLocationRecovery() {
+  if (!state.locationRecoveryPending || state.locationPermissionState !== 'granted'
+      || state.locationMode !== 'device' || document.visibilityState !== 'visible'
+      || state.locationBusy || state.planBusy || state.restoring) return;
+  state.locationRecoveryPending = false;
+  void refreshLocation().catch(() => {});
+}
+
+async function observeLocationPermission() {
+  // Permissions is only a hint. Some Safari versions do not support this query,
+  // and OS permission changes may not be reflected in its state immediately.
+  if (state.locationPermissionQuery || state.locationPermissionStatus || !navigator.permissions?.query) return;
+  state.locationPermissionQuery = true;
+  try {
+    const permission = await navigator.permissions.query({ name: 'geolocation' });
+    state.locationPermissionStatus = permission;
+    const handler = () => applyLocationPermission(permission);
+    state.locationPermissionHandler = handler;
+    if (permission.addEventListener) permission.addEventListener('change', handler);
+    else permission.onchange = handler;
+    applyLocationPermission(permission, { recover: false });
+  } catch { /* Geolocation continues independently without Permissions API. */ }
+  finally { state.locationPermissionQuery = false; }
+}
+
+async function retryLocation() {
+  if (!state.plan && !state.job) state.autoPrepareAttempted = false;
+  if (state.locationMode !== 'device') await setLocationMode('device');
+  else { try { await refreshLocation(); } catch { /* The recovery guide remains beside the location inputs. */ } }
+}
+
+async function copyLocationLink() {
+  if (state.locationLinkBusy) return;
+  state.locationLinkBusy = true; $('location-copy-status').textContent = ''; syncUI();
+  try {
+    if (!navigator.clipboard?.writeText) throw new Error('Clipboard unavailable');
+    const link = new URL(location.pathname, location.origin);
+    const job = new URLSearchParams(location.search).get('world');
+    if (/^[a-f0-9]{32}$/.test(job || '')) link.searchParams.set('world', job);
+    if (validToken(state.token)) link.hash = new URLSearchParams({ access: state.token }).toString();
+    // The app access code exists only in memory and the user-triggered clipboard
+    // write. It is never inserted into a visible link, input, attribute, or log.
+    await navigator.clipboard.writeText(link.href);
+    $('location-copy-status').textContent = '已复制。请在 Safari 或 Chrome 的地址栏粘贴打开。';
+  } catch {
+    $('location-copy-status').textContent = '浏览器未允许复制。可使用浏览器分享菜单复制页面链接；在另一浏览器可能需要重新输入访问码。';
+  } finally { state.locationLinkBusy = false; syncUI(); }
+}
+
 async function refreshLocation() {
   const epoch = ++state.locationEpoch;
-  state.locationFix = null; state.locationError = ''; state.locationBusy = true;
+  state.locationFix = null; state.locationError = ''; state.locationErrorCode = 0; state.locationBusy = true;
+  state.locationRecoveryPending = false;
   if (state.locationMode === 'device') { $('lat').value = ''; $('lon').value = ''; }
   syncUI();
   try {
     if (!window.isSecureContext) throw new Error('手机定位需要 HTTPS。请用安全演示链接打开页面。');
     if (!navigator.geolocation) throw new Error('此浏览器不支持定位，请使用支持定位的 Safari 或 Chrome。');
-    const position = await new Promise((resolve, reject) => navigator.geolocation.getCurrentPosition(resolve, reject,
+    // Start geolocation directly in the click's activation, before any await.
+    // A pending or denied Permissions query never blocks an explicit retry.
+    const pendingPosition = new Promise((resolve, reject) => navigator.geolocation.getCurrentPosition(resolve, reject,
       { enableHighAccuracy: true, maximumAge: 0, timeout: 15000 }));
+    void observeLocationPermission();
+    const position = await pendingPosition;
     if (epoch !== state.locationEpoch || state.locationMode !== 'device') throw new Error('位置模式已切换，本次定位已忽略。');
     const fix = { lat: position.coords?.latitude, lon: position.coords?.longitude,
       accuracy_m: position.coords?.accuracy, timestamp_ms: position.timestamp };
@@ -304,17 +560,21 @@ async function refreshLocation() {
     $('lat').value = fix.lat.toFixed(6); $('lon').value = fix.lon.toFixed(6);
     return fix;
   } catch (error) {
-    if (epoch === state.locationEpoch && state.locationMode === 'device') state.locationError = locationFailure(error);
+    if (epoch === state.locationEpoch && state.locationMode === 'device') {
+      state.locationError = locationFailure(error); state.locationErrorCode = Number(error?.code) || 0;
+    }
     throw new Error(locationFailure(error));
   } finally {
-    if (epoch === state.locationEpoch) { state.locationBusy = false; syncUI(); }
+    if (epoch === state.locationEpoch) { state.locationBusy = false; syncUI(); void maybePrepareCurrent(); }
   }
 }
 
 async function setLocationMode(mode) {
   if (mode !== 'device' && mode !== 'test') return;
   state.locationMode = mode; ++state.locationEpoch;
-  state.locationFix = null; state.locationError = ''; state.locationBusy = false;
+  stopTravelTracking();
+  state.locationFix = null; state.locationError = ''; state.locationErrorCode = 0; state.locationBusy = false;
+  state.locationRecoveryPending = false;
   $('lat').value = ''; $('lon').value = '';
   syncUI();
   if (mode === 'device') { try { await refreshLocation(); } catch { /* Visible location status provides retry. */ } }
@@ -350,7 +610,15 @@ async function openStreetView() {
   finally { state.streetViewBusy = false; syncUI(); }
 }
 
-async function preparePlan(source = 'google_streetview') {
+async function maybePrepareCurrent() {
+  if (!state.bootReady || state.autoPrepareAttempted || state.plan || state.job || state.planBusy || state.restoring
+      || state.submissionUnknown || !state.token || state.locationMode !== 'device' || !state.locationFix
+      || !state.config?.streetview?.available || new URLSearchParams(location.search).has('world')) return;
+  state.autoPrepareAttempted = true;
+  await preparePlan('google_streetview', { reuseLocation: true });
+}
+
+async function preparePlan(source = 'google_streetview', { reuseLocation = false } = {}) {
   if (state.planBusy || state.generateBusy || state.restoring
       || state.job && !TERMINAL.has(state.job.stage || state.job.status)) return;
   if (source !== 'google_streetview' && state.locationMode !== 'test') {
@@ -363,7 +631,10 @@ async function preparePlan(source = 'google_streetview') {
   const epoch = ++state.planEpoch;
   state.planBusy = true; syncUI();
   try {
-    const coordinates = await resolveLocation();
+    const fix = state.locationFix;
+    const coordinates = reuseLocation && state.locationMode === 'device' && fix && Date.now() - fix.timestamp_ms < 60000
+      ? { lat: fix.lat, lon: fix.lon, location_source: 'device', location_accuracy_m: fix.accuracy_m,
+        location_timestamp_ms: fix.timestamp_ms } : await resolveLocation();
     if (epoch !== state.planEpoch) return;
     if (!$('plan-form').reportValidity()) return;
     const payload = { ...coordinates, year: Number($('year').value),
@@ -384,6 +655,17 @@ async function preparePlan(source = 'google_streetview') {
   } finally {
     if (epoch === state.planEpoch) { state.planBusy = false; syncUI(); }
   }
+}
+
+async function generateForYear() {
+  if (!state.plan || state.generateBusy || state.planBusy || state.submissionUnknown) return;
+  if (!$('plan-form').reportValidity()) return;
+  const selectedYear = Number($('year').value);
+  if (state.plan.target_year !== selectedYear) {
+    await preparePlan('google_streetview');
+    if (state.plan?.target_year !== selectedYear || state.job) return;
+  }
+  await startGeneration();
 }
 
 function jobDetails(job) {
@@ -446,6 +728,7 @@ function applyJob(job) {
   const elapsed = job.timing_s?.total_to_assets;
   $('job-detail').textContent = jobDetails(job)
     + (Number.isFinite(elapsed) ? ` 从创建到资产就绪 ${elapsed.toFixed(1)} 秒。` : '');
+  $('job-quality').textContent = worldQualityLabel(job);
   const costs = job.cost_credits || {};
   const credit = (value) => Number.isFinite(value) ? `${value} credits` : '未返回';
   const photoInput = state.plan?.input_kind === 'streetview_panorama' || !!job.generation_calls?.image_edit;
@@ -476,10 +759,10 @@ function applyJob(job) {
 }
 
 async function startGeneration() {
-  if (!state.plan || state.generateBusy || state.job || state.submissionUnknown || !state.config?.configured) return;
-  state.generateBusy = true; syncUI(); message('正在创建历史全景与 Draft 世界任务…');
+  if (!state.plan || state.generateBusy || state.job || state.submissionUnknown || !state.config?.configured || !modelProfile()) return;
+  state.generateBusy = true; syncUI(); message(`正在创建历史全景与${modelProfile().label}世界任务…`);
   try {
-    const job = await api('/world-jobs', { method: 'POST', body: { plan_id: state.plan.plan_id, model: 'marble-1.0-draft' } });
+    const job = await api('/world-jobs', { method: 'POST', body: { plan_id: state.plan.plan_id, model: state.model } });
     applyJob(job); message(); schedulePoll(++state.jobEpoch);
     if (!state.userViewLocked && !assetFor('pano') && !assetFor('world') && assetFor('depth_preview')) {
       void showView('depth_preview', { automatic: true });
@@ -542,7 +825,7 @@ function ensureEngine() {
   const renderer = new THREE.WebGLRenderer({ antialias: false, alpha: false });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.75));
   renderer.outputColorSpace = THREE.SRGBColorSpace;
-  renderer.domElement.setAttribute('aria-label', '虚拟三维浏览；未启用手机空间追踪');
+  renderer.domElement.setAttribute('aria-label', '360° 视窗，拖动或使用方向键环视');
   renderer.domElement.tabIndex = 0;
   $('viewport').append(renderer.domElement);
   const scene = new THREE.Scene(); scene.background = new THREE.Color(0xe5e8df);
@@ -551,12 +834,14 @@ function ensureEngine() {
   const camera = new THREE.PerspectiveCamera(65, 2, 0.05, 2000);
   const controls = new OrbitControls(camera, renderer.domElement);
   controls.enableDamping = true; controls.dampingFactor = 0.1; controls.maxDistance = 600;
+  controls.addEventListener('start', manualLook);
   const spark = new SparkRenderer({ renderer }); scene.add(spark);
   const helpers = new THREE.Group();
   helpers.add(new THREE.AxesHelper(8));
   const grid = new THREE.GridHelper(120, 24, 0x778578, 0xc3cabb); grid.position.y = 0.02;
   helpers.add(grid); scene.add(helpers);
   const engine = { renderer, scene, camera, controls, spark, helpers, current: null, home: null, metric: false, previousTime: 0 };
+  engine.look = new PanoramaLookControls(camera, renderer.domElement, { onManualInteraction: manualLook, onChange: updateMotionUI });
   state.engine = engine;
   const resize = () => {
     const width = Math.max(1, $('viewport').clientWidth), height = Math.max(1, $('viewport').clientHeight);
@@ -569,7 +854,17 @@ function ensureEngine() {
   renderer.setAnimationLoop((now) => {
     const dt = Math.min(0.05, (now - engine.previousTime) / 1000 || 0); engine.previousTime = now;
     if (renderer.domElement.hidden || document.visibilityState === 'hidden') return;
-    moveCamera(engine, dt); controls.update();
+    const panorama = isPanorama();
+    engine.look.enabled = panorama;
+    const orientation = !state.calibrating && canFollowView() ? state.orientation?.getQuaternion() : null;
+    controls.enabled = !panorama && !orientation;
+    if (panorama) camera.position.set(0, 0, 0);
+    else moveCamera(engine, dt);
+    if (orientation) {
+      camera.quaternion.slerp(orientation, 1 - Math.exp(-14 * dt));
+      controls.target.copy(camera.position).add(new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion));
+    } else if (!panorama) controls.update();
+    if (now - state.motionFrameAt > 250) { state.motionFrameAt = now; updateMotionUI(); }
     try { renderer.render(scene, camera); }
     catch { message('此设备无法绘制当前三维资产；全景和下载仍可使用。', true); renderer.setAnimationLoop(null); }
   });
@@ -577,6 +872,7 @@ function ensureEngine() {
 }
 
 function moveCamera(engine, dt) {
+  if (isPanorama()) return;
   const active = new Set([...state.keys, ...state.touchMoves]);
   if (!active.size || !engine.current) return;
   const forward = new THREE.Vector3(); engine.camera.getWorldDirection(forward);
@@ -624,7 +920,8 @@ function fitCoarse(engine, object, view) {
   engine.controls.update();
   const count = state.plan?.[view === 'modern' ? 'modern_buildings' : 'historical_buildings']?.length;
   $('view-caption').textContent = `${view === 'modern' ? '现代' : `${state.plan?.target_year || ''} 年历史`}粗模型${Number.isInteger(count) ? ` · ${count} 栋` : ''} · 红东 / 绿上 / 蓝南`;
-  $('viewer-note').textContent = '简化体块与平坦地面，单位为米。拖动旋转、双指缩放；WASD 或方向按钮仅移动虚拟相机，不代表手机真实行走。';
+  $('viewer-note').textContent = '地图粗模型 · 仅供测试';
+  $('view-details').textContent = '简化体块与平坦地面，单位为米。拖动旋转、双指缩放；WASD 或方向按钮仅移动虚拟相机，不代表手机真实行走。';
 }
 
 function semanticsTransform(asset) {
@@ -638,6 +935,12 @@ function semanticsTransform(asset) {
 async function showView(view, { automatic = false } = {}) {
   const asset = assetFor(view);
   if (!asset) return;
+  if (isPanorama() && state.engine?.current) {
+    state.panoramaPose = { planId: state.plan?.plan_id, quaternion: state.engine.camera.quaternion.clone() };
+  }
+  if (!(isPanorama() && isPanorama(view)) && state.view !== view) {
+    state.orientation?.stop(); stopTravelTracking(); state.calibrating = false;
+  }
   if (!automatic) state.userViewLocked = true;
   const epoch = ++state.viewEpoch; state.viewAbort?.abort();
   const controller = new AbortController(); state.viewAbort = controller; state.view = view;
@@ -648,28 +951,55 @@ async function showView(view, { automatic = false } = {}) {
     state.engine.renderer.domElement.hidden = true;
     state.engine.current?.removeFromParent(); disposeObject(state.engine.current); state.engine.current = null;
   }
-  let pendingObject = null;
+  let pendingObject = null, pendingURL = null;
   try {
     const url = safeAssetURL(asset.url);
-    if (view === 'source' || view === 'depth' || view === 'depth_preview' || view === 'pano') {
+    if (isPanorama(view)) {
+      const blob = await api(url, { format: 'blob', signal: controller.signal });
+      if (epoch !== state.viewEpoch) return;
+      pendingURL = URL.createObjectURL(blob);
+      const photograph = document.createElement('img'); photograph.src = pendingURL;
+      await photograph.decode();
+      if (epoch !== state.viewEpoch) return;
+      const sourceMetadata = state.plan?.source_panorama?.metadata || {};
+      const engine = ensureEngine();
+      pendingObject = createPanoramaMesh(photograph, sourceMetadata);
+      engine.camera.position.set(0, 0, 0); engine.camera.fov = 65; engine.camera.updateProjectionMatrix();
+      if (state.panoramaPose?.planId === state.plan?.plan_id) engine.camera.quaternion.copy(state.panoramaPose.quaternion);
+      else setCameraBearing(engine.camera, panoramaHeading(sourceMetadata));
+      engine.controls.enabled = false; engine.look && (engine.look.enabled = true);
+      engine.helpers.visible = false; if (engine.spark) engine.spark.visible = false;
+      engine.home = { position: engine.camera.position.clone(), quaternion: engine.camera.quaternion.clone(),
+        target: new THREE.Vector3(0, 0, -1).applyQuaternion(engine.camera.quaternion) };
+      engine.current = pendingObject; pendingObject = null; engine.scene.add(engine.current);
+      engine.renderer.domElement.hidden = false;
+      state.imageURL = pendingURL; pendingURL = null;
+      $('view-caption').textContent = view === 'source' ? '当前街景' : `${state.plan?.target_year || ''} 年 · 历史想象全景`;
+      const distance = sourceMetadata.distance_m;
+      const offset = Number.isFinite(distance) ? `街景拍摄点距准备时的位置约 ${Math.round(distance)} 米。` : '';
+      $('viewer-note').textContent = view === 'source' ? '拖动环视 · 开启跟随，随手机转动' : '想象重建，非历史影像 · 可随手机转动';
+      $('view-details').textContent = view === 'source'
+        ? `Google Street View · ${text(sourceMetadata.copyright)} · 拍摄日期：${text(sourceMetadata.date, '未提供')}。这是一张可环视的全景照片。${offset}朝向基于街景元数据估计，传感器与地标可辅助校准。`
+        : `历史全景与当前街景保留相同查看方向。${offset}历史改图可能改变投影或地标；对齐仍需实际比对。全景环视不随真实行走产生位置视差。`;
+      $('scene-attribution').textContent = view === 'source'
+        ? `${text(sourceMetadata.copyright, 'Google Street View')} · ${text(sourceMetadata.date, '拍摄日期未知')}`
+        : `历史想象重建 · ${text(sourceMetadata.copyright, '来源：街景照片')}`;
+    } else if (view === 'depth' || view === 'depth_preview') {
       const blob = await api(url, { format: 'blob', signal: controller.signal });
       if (epoch !== state.viewEpoch) return;
       state.imageURL = URL.createObjectURL(blob); $('flat-preview').src = state.imageURL;
       await $('flat-preview').decode();
       if (epoch !== state.viewEpoch) return;
       $('flat-preview').hidden = false;
-      $('flat-preview').alt = view === 'source' ? 'Google Street View 360 度实景全景照片，平面展开预览' : view === 'pano' ? '模型生成的历史想象全景，历史准确性未核实'
-        : view === 'depth_preview' ? '历史粗几何的全景诊断预览' : '历史几何的全景径向深度，近白远黑';
-      $('view-caption').textContent = view === 'source' ? '当前街景 · 360° 实景全景照片（平面展开）' : view === 'pano' ? '历史想象全景 · 实际生成结果'
-        : view === 'depth_preview' ? '历史几何全景 · 墙面、屋顶与地面的诊断预览' : '360° 径向深度 · 对数编码 · 近白 / 远黑';
-      const sourceMetadata = state.plan?.source_panorama?.metadata || {};
-      $('viewer-note').textContent = view === 'source'
-        ? `Google Street View · ${text(sourceMetadata.copyright)} · 拍摄日期：${text(sourceMetadata.date, '未提供')}。这是一张完整全景照片；拍摄时间可能早于现在，平面展开不是三维网格。`
-        : view === 'pano'
-        ? '这是平面展示的生成全景。建筑外观及历史细节未核实；不会把全景旋转称为真实空间行走。'
-        : '全景由建筑几何射线求交得到，删除体块会改变遮挡。诊断色彩仅区分几何表面，未观察到的历史地物仍未知。';
+      $('flat-preview').alt = '历史粗几何的深度全景诊断预览';
+      $('view-caption').textContent = view === 'depth_preview' ? '历史几何全景 · 诊断预览' : '360° 径向深度';
+      $('viewer-note').textContent = '深度全景仅用于检查粗模型几何。';
+      $('view-details').textContent = $('viewer-note').textContent;
+      $('scene-attribution').textContent = '';
     } else {
       const engine = ensureEngine();
+      engine.controls.enabled = true; if (engine.look) engine.look.enabled = false;
+      if (engine.spark) engine.spark.visible = view === 'world';
       const bytes = await api(url, { format: 'bytes', signal: controller.signal });
       if (epoch !== state.viewEpoch) return;
       if (view === 'world') {
@@ -687,24 +1017,32 @@ async function showView(view, { automatic = false } = {}) {
         engine.controls.target.copy(engine.camera.position).add(new THREE.Vector3(0, 0, -1));
         engine.controls.minDistance = 0.05; engine.controls.maxDistance = 500;
         engine.home = { position: engine.camera.position.clone(), target: engine.controls.target.clone() };
-        $('view-caption').textContent = transform.metric ? '生成世界 · 已应用提供方米制比例与地面偏移'
+        $('view-caption').textContent = `${state.plan?.target_year || ''} 年 · 生成世界`;
+        $('view-details').textContent = transform.metric ? '生成世界 · 已应用提供方米制比例与地面偏移'
           : '生成世界 · 使用模型单位，比例与地面未核实';
-        $('viewer-note').textContent = '真实 SPZ 资产；拖动查看、WASD 或方向按钮虚拟移动。源相机位置、地理朝向与手机空间对齐仍未核实，无碰撞或真实 AR 追踪。';
+        $('view-details').textContent += ` · ${worldQualityLabel(state.job, asset)}\n真实 SPZ 资产；拖动查看、WASD 或方向按钮虚拟移动。源相机位置、地理朝向与手机空间对齐仍未核实，无碰撞或真实 AR 追踪。`;
+        $('viewer-note').textContent = '想象重建，非历史影像 · 朝向可手动对齐';
+        $('scene-attribution').textContent = 'AI 生成世界 · 历史想象重建';
       } else {
         const model = await new GLTFLoader().parseAsync(bytes, ''); pendingObject = model.scene;
         if (epoch !== state.viewEpoch) { disposeObject(pendingObject); return; }
         fitCoarse(engine, pendingObject, view);
+        $('scene-attribution').textContent = '地图粗模型 · 测试实验';
       }
       engine.current = pendingObject; pendingObject = null;
       engine.scene.add(engine.current); engine.renderer.domElement.hidden = false; engine.controls.update();
       $('move-pad').hidden = false;
     }
-    if (epoch === state.viewEpoch) { applyReviewNotice(); message(); }
+    if (epoch === state.viewEpoch) { applyReviewNotice(); updateMotionUI(); message(); }
   } catch (error) {
     disposeObject(pendingObject);
     if (epoch !== state.viewEpoch || error.name === 'AbortError') return;
+    state.orientation?.stop(); stopTravelTracking(); state.calibrating = false;
     $('view-caption').textContent = '预览未加载';
     message(error instanceof RequestError ? error.message : '无法显示此资产；可切换其他预览或下载原文件。', true);
+    updateMotionUI();
+  } finally {
+    if (pendingURL) URL.revokeObjectURL(pendingURL);
   }
 }
 
@@ -727,6 +1065,7 @@ async function initialiseAccess() {
     } catch { /* Remote access is explicit; no key is requested from the user. */ }
   }
   $('access-panel').hidden = false; $('connection').textContent = '需要访问码'; syncUI();
+  message('点右上角设置，输入访问码连接生成服务。');
 }
 
 function connected() {
@@ -775,32 +1114,57 @@ async function restoreSaved() {
 }
 
 function bindEvents() {
+  $('settings-open').addEventListener('click', () => { $('settings-dialog').showModal?.(); });
+  $('settings-close').addEventListener('click', () => { $('settings-dialog').close?.(); });
+  $('settings-dialog').addEventListener('click', (event) => {
+    if (event.target === $('settings-dialog')) $('settings-dialog').close?.();
+  });
+  $('motion-toggle').addEventListener('click', toggleMotion);
+  $('align-view').addEventListener('click', calibrateView);
+  $('year').addEventListener('input', syncUI);
   $('plan-form').addEventListener('submit', (event) => { event.preventDefault(); void preparePlan('google_streetview'); });
   $('geometry-test').addEventListener('click', () => { void preparePlan('osm'); });
   $('open-streetview').addEventListener('click', openStreetView);
   $('snapshot')?.addEventListener('click', () => { void preparePlan('cmu_snapshot'); });
   $('edits-file')?.addEventListener('change', (event) => { void importEdits(event.target.files?.[0]); });
-  $('generate').addEventListener('click', () => { void startGeneration(); });
+  $('generate').addEventListener('click', () => { void generateForYear(); });
+  $('world-model').addEventListener('change', (event) => {
+    if (state.job || state.generateBusy || state.submissionUnknown || !modelProfile(event.target.value)) return;
+    state.model = event.target.value; syncUI();
+  });
   $('connect').addEventListener('click', async () => {
     const token = $('access').value.trim();
     if (!validToken(token)) { message('请输入有效访问码。', true); return; }
     $('connect').disabled = true; state.token = token;
-    try { await verifyAccess(); message(); await restoreSaved(); }
+    try { await verifyAccess(); message(); await restoreSaved(); await maybePrepareCurrent(); $('settings-dialog').close?.(); }
     catch (error) { state.token = ''; storageSet(TOKEN_KEY, null); message(error.message, true); syncUI(); }
     finally { $('connect').disabled = false; }
   });
   $('location-mode').addEventListener('change', (event) => setLocationMode(event.target.value));
-  $('gps').addEventListener('click', async () => {
-    if (state.locationMode !== 'device') await setLocationMode('device');
-    else { try { await refreshLocation(); } catch { /* Error remains beside the location inputs. */ } }
-  });
+  $('gps').addEventListener('click', retryLocation);
+  $('retry-location').addEventListener('click', retryLocation);
+  $('copy-location-link').addEventListener('click', copyLocationLink);
+  const revisitLocationPermission = () => {
+    if (document.visibilityState !== 'visible') return;
+    // Re-read the live PermissionStatus when Safari resumes from Settings;
+    // the browser may defer its change event while the page is backgrounded.
+    if (state.locationPermissionStatus) applyLocationPermission(state.locationPermissionStatus);
+    else void observeLocationPermission();
+    resumeLocationRecovery();
+  };
+  window.addEventListener('focus', revisitLocationPermission);
+  document.addEventListener('visibilitychange', revisitLocationPermission);
   for (const button of document.querySelectorAll('[data-view]')) {
     button.addEventListener('click', () => { void showView(button.dataset.view); });
   }
   $('reset-view').addEventListener('click', () => {
     const engine = state.engine;
     if (!engine?.home || engine.renderer.domElement.hidden) return;
-    engine.camera.position.copy(engine.home.position); engine.controls.target.copy(engine.home.target); engine.controls.update();
+    state.orientation?.stop(); stopTravelTracking(); state.calibrating = false;
+    engine.camera.position.copy(engine.home.position); engine.controls.target.copy(engine.home.target);
+    if (isPanorama() && engine.home.quaternion) engine.camera.quaternion.copy(engine.home.quaternion);
+    else engine.controls.update();
+    engine.camera.fov = 65; engine.camera.updateProjectionMatrix(); updateMotionUI();
   });
   const moveKeys = { KeyW: 'forward', KeyS: 'back', KeyA: 'left', KeyD: 'right' };
   window.addEventListener('keydown', (event) => {
@@ -809,7 +1173,7 @@ function bindEvents() {
     if (move && state.engine && !state.engine.renderer.domElement.hidden) { event.preventDefault(); state.keys.add(move); }
   });
   window.addEventListener('keyup', (event) => state.keys.delete(moveKeys[event.code]));
-  const releaseMoves = () => { state.keys.clear(); state.touchMoves.clear(); };
+  const releaseMoves = () => { state.keys.clear(); state.touchMoves.clear(); state.engine?.look?.pointers.clear(); };
   window.addEventListener('blur', releaseMoves); document.addEventListener('visibilitychange', releaseMoves);
   for (const button of document.querySelectorAll('[data-move]')) {
     button.addEventListener('pointerdown', (event) => {
@@ -819,19 +1183,36 @@ function bindEvents() {
       button.addEventListener(name, () => state.touchMoves.delete(button.dataset.move));
     }
   }
-  window.addEventListener('pagehide', () => {
-    clearTimeout(state.pollTimer); state.viewAbort?.abort(); releaseMoves();
+  window.addEventListener('pagehide', (event) => {
+    clearTimeout(state.pollTimer); state.pollTimer = null; ++state.jobEpoch;
+    state.viewAbort?.abort(); releaseMoves();
+    state.orientation?.stop('paused'); stopTravelTracking();
+    // A back/forward-cache entry retains this JS state and its live canvas.
+    // Keep rendering resources and controls so browser Back can resume them.
+    if (event.persisted) return;
+    state.orientation?.dispose();
     if (state.imageURL) URL.revokeObjectURL(state.imageURL);
-    if (state.engine) { state.engine.renderer.setAnimationLoop(null); state.engine.observer.disconnect(); }
+    if (state.engine) { state.engine.renderer.setAnimationLoop(null); state.engine.observer.disconnect(); state.engine.look?.dispose(); }
+  });
+  window.addEventListener('pageshow', (event) => {
+    if (!event.persisted) return;
+    if (state.engine) state.engine.previousTime = 0;
+    schedulePoll(state.jobEpoch);
+    // An asset fetch may have been interrupted during navigation.
+    if (availableView(state.view) && !state.engine?.current && !['depth', 'depth_preview'].includes(state.view)) {
+      void showView(state.view, { automatic: true });
+    }
+    updateMotionUI();
   });
 }
 
 async function boot() {
   bindEvents(); syncUI();
-  void refreshLocation().catch(() => {});
+  const locationReady = refreshLocation().catch(() => {});
   const results = await Promise.allSettled([
     api('/world-config', { auth: false }).then((config) => {
       state.config = config;
+      configureModels();
       if (Number.isInteger(config.min_year)) $('year').min = String(config.min_year);
       if (Number.isInteger(config.max_year)) $('year').max = String(config.max_year);
       syncUI();
@@ -840,6 +1221,9 @@ async function boot() {
   if (results[0].status === 'rejected') message('无法读取服务配置，请检查服务是否启动。', true);
   else if (!state.config.configured) message('服务器尚未配置 World Labs；可以先准备和审视粗模型。');
   await restoreSaved();
+  state.bootReady = true;
+  await locationReady;
+  await maybePrepareCurrent();
 }
 
 void boot();

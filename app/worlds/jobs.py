@@ -29,6 +29,7 @@ from .assets import AssetError, _download, _validate_url, download_assets, inspe
 from .marble import MarbleClient, MarbleError, SubmissionUnknown, _finite_number, _valid_id
 from .panorama import (HistoricalPanoramaEditor, PanoramaEditError, PanoramaSubmissionUnknown,
                        _image_size, _safe_usage, panorama_prompt)
+from .profiles import DEFAULT_WORLD_MODEL, world_credits
 
 
 _JOB_ID = re.compile(r"[0-9a-f]{32}\Z")
@@ -243,13 +244,12 @@ class WorldJobManager:
             # _run handles provider and local failures without exposing response bodies.
             task.add_done_callback(lambda completed: completed.exception() if not completed.cancelled() else None)
 
-    async def start(self, plan: dict, model: str = "marble-1.0-draft") -> dict:
+    async def start(self, plan: dict, model: str = DEFAULT_WORLD_MODEL) -> dict:
         if self._closed:
             raise ValueError("World job manager is closed")
         if not isinstance(self._api_key, str) or not self._api_key.strip():
             raise MarbleError("WORLDLAB_API_KEY is not configured", code="missing_key")
-        if model != "marble-1.0-draft":
-            raise ValueError("This world pipeline currently supports Marble Draft only")
+        world_credits(model)
         try:
             encoded = json.dumps(plan, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
             frozen = json.loads(encoded)
@@ -513,7 +513,7 @@ class WorldJobManager:
                 prompt = panorama_prompt(plan)
                 balance = (await client.credits())["remaining_credits"]
                 record["credits_before_image_edit"] = balance
-                if balance < 150:
+                if balance < world_credits(record["model"]):
                     raise MarbleError("Insufficient Marble credits", code="insufficient_credits")
                 record["generation_calls"]["image_edit"] = 1
                 record["image_edit_attempted"] = True
@@ -622,8 +622,10 @@ class WorldJobManager:
         balance = (await client.credits())["remaining_credits"]
         record[f"credits_before_{stage}"] = balance
         # Depth-to-RGB has no explicit tariff in the public pricing table.
-        # This checks the known Draft requirement, not a guaranteed total cap.
-        if balance < 150 or stage == "depth" and balance == 150:
+        # Reserve the selected world's known requirement before upstream work;
+        # an accepted older job keeps using its recorded model on resume.
+        required = world_credits(record["model"])
+        if balance < required or stage == "depth" and balance == required:
             raise MarbleError("Insufficient Marble credits", code="insufficient_credits")
         self._stage(record, f"submitting_{stage}")
         record["generation_calls"][stage] += 1

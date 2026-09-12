@@ -17,6 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.config import settings
 from app.temporal import MIN_YEAR, MAX_YEAR
+from app.worlds.profiles import DEFAULT_WORLD_MODEL, WORLD_MODELS, WorldModel
 
 router = APIRouter()
 _manager = None
@@ -57,7 +58,8 @@ async def require_access(request: Request):
 
 @router.get('/world-config')
 async def configuration():
-    return {'configured': bool(settings.worldlab_api_key), 'model': 'marble-1.0-draft',
+    return {'configured': bool(settings.worldlab_api_key), 'model': DEFAULT_WORLD_MODEL,
+            'models': list(WORLD_MODELS.values()),
             'min_year': MIN_YEAR, 'max_year': MAX_YEAR,
             'test_location': {'lat': 40.4433, 'lon': -79.9436, 'radius_m': 100},
             'default_source': 'google_streetview', 'default_location_source': 'device',
@@ -95,7 +97,7 @@ class PlanRequest(BaseModel):
 class GenerateRequest(BaseModel):
     model_config = ConfigDict(extra='forbid')
     plan_id: str
-    model: Literal['marble-1.0-draft'] = 'marble-1.0-draft'
+    model: WorldModel = DEFAULT_WORLD_MODEL
 
 
 class EditsRequest(BaseModel):

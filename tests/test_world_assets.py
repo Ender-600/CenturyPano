@@ -73,7 +73,7 @@ def response(data, *, status=200, headers=None):
     return httpx.Response(status, stream=httpx.ByteStream(data), headers=headers or {})
 
 
-def test_selects_one_smallest_spz_and_validates_downloads(tmp_path, install_http, monkeypatch):
+def test_selects_full_resolution_spz_and_validates_downloads(tmp_path, install_http, monkeypatch):
     monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:1")
     monkeypatch.setenv("WLT_API_KEY", "do-not-send-this-key")
     supplied = world({"500k": CDN + "/large.spz", "100k": CDN + "/small.spz",
@@ -81,12 +81,12 @@ def test_selects_one_smallest_spz_and_validates_downloads(tmp_path, install_http
     supplied["assets"]["splats"]["semantics_metadata"] = {"metric_scale_factor": 1.2, "ground_plane_offset": -.4}
     supplied["assets"]["imagery"] = {"pano_url": CDN + "/panorama.jpg?signed=private"}
     supplied["assets"]["mesh"] = {"collider_mesh_url": CDN + "/collider.glb"}
-    bodies = {"/small.spz": v4_spz(), "/panorama.jpg": picture(), "/collider.glb": glb()}
+    bodies = {"/full.spz": v4_spz(), "/panorama.jpg": picture(), "/collider.glb": glb()}
     options, requests = install_http(lambda request: response(bodies[request.url.path]))
     result = asyncio.run(assets.download_assets(supplied, tmp_path))
     assert [item["kind"] for item in result] == ["spz", "pano", "collider"]
     assert [request.url.path for request in requests] == list(bodies)
-    assert result[0]["lod"] == "100k"
+    assert result[0]["lod"] == "full_res"
     assert result[0]["semantics_metadata"] == {"metric_scale_factor": 1.2, "ground_plane_offset": -.4}
     assert result[0]["semantics_status"] == "present"
     assert options[0]["trust_env"] is False and options[0]["follow_redirects"] is False
@@ -103,12 +103,24 @@ def test_selects_one_smallest_spz_and_validates_downloads(tmp_path, install_http
 
 
 @pytest.mark.parametrize("lods,expected", [
-    ({"500k": CDN + "/one", "25k": CDN + "/two", "1m": CDN + "/three"}, "25k"),
+    ({"500k": CDN + "/one", "25k": CDN + "/two", "1m": CDN + "/three"}, "1m"),
+    ({"2.5m": CDN + "/one", "900k": CDN + "/two", "250000": CDN + "/three"}, "2.5m"),
+    ({"full_res": CDN + "/one", "2.5m": CDN + "/two"}, "full_res"),
+    ({"full_res": "", "500k": CDN + "/one", "100k": CDN + "/two"}, "500k"),
     ({"mystery": CDN + "/one", "full_res": CDN + "/two"}, "full_res"),
     ({"z-preview": CDN + "/one", "a-preview": CDN + "/two"}, "a-preview"),
 ])
-def test_optional_lod_keys(lods, expected):
+def test_selects_highest_available_lod(lods, expected):
     assert assets._select_assets(world(lods))[0]["lod"] == expected
+
+
+def test_downloads_highest_point_count_when_full_resolution_missing(tmp_path, install_http):
+    supplied = world({"100k": CDN + "/small.spz", "2m": CDN + "/large.spz",
+                      "500k": CDN + "/medium.spz"})
+    _, requests = install_http(lambda request: response(legacy_spz()))
+    result = asyncio.run(assets.download_assets(supplied, tmp_path))
+    assert [request.url.path for request in requests] == ["/large.spz"]
+    assert result[0]["lod"] == "2m"
 
 
 @pytest.mark.parametrize("supplied", [{}, {"assets": None}, {"assets": {"splats": None}},

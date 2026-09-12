@@ -75,7 +75,9 @@ def _select_assets(world: dict) -> list[dict]:
             amount = float(match[1]) * {"": 1, "k": 1000, "m": 1_000_000}[match[2]]
             if amount > 0 and math.isfinite(amount):
                 numeric.append((amount, label))
-    lod = min(numeric)[1] if numeric else "full_res" if "full_res" in available else sorted(available)[0]
+    # Keep the provider's complete scene when available. Numeric keys describe
+    # reduced point counts, so select the largest one only as a fallback.
+    lod = "full_res" if "full_res" in available else max(numeric)[1] if numeric else sorted(available)[0]
     selected = [{"kind": "spz", "lod": lod, "url": available[lod], "filename": "scene.spz"}]
     for kind, url, filename in (
         ("pano", _mapping(assets.get("imagery")).get("pano_url"), "panorama"),
@@ -217,7 +219,7 @@ async def _download(client: httpx.AsyncClient, url: str, target: Path) -> dict:
 
 
 async def download_assets(world: dict, output_dir: Path) -> list[dict]:
-    """Download one lowest-count SPZ and optional panorama/collider, without API keys.
+    """Download one highest-detail SPZ and optional panorama/collider, without API keys.
 
     Missing SPZ is a capability error, even if the generation operation succeeded.
     Any error keeps the caller's existing outputs intact; staging files are removed.

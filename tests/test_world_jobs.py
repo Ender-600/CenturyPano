@@ -30,20 +30,23 @@ def render(**_kwargs):
             "metadata": {"z_min": .1, "z_max": 100}}
 
 
-def operation(stage, *, done=True):
+def operation(stage, *, done=True, world_cost=1500):
     return {"operation_id": f"operation-{stage}", "done": done,
-            "cost": {"total_credits": 80 if stage == "depth" else 150},
+            "cost": {"total_credits": 80 if stage == "depth" else world_cost},
             "response": {"pano_url": f"https://cdn.marble.worldlabs.ai/{SECRET}.png"} if stage == "depth"
             else {"world_id": "world-1"}}
 
 
 class FakeClient:
-    def __init__(self, root, *, fail_depth=False, fail_world=False, wait_stage=None, balance=1000):
+    def __init__(self, root, *, fail_depth=False, fail_world=False, wait_stage=None, balance=10000,
+                 expected_model="marble-1.1"):
         self.root = root
         self.fail_depth = fail_depth
         self.fail_world = fail_world
         self.wait_stage = wait_stage
         self.balance = balance
+        self.expected_model = expected_model
+        self.world_cost = 150 if expected_model == "marble-1.0-draft" else 1500
         self.calls = []
         self.entered = asyncio.Event()
         self.closed = False
@@ -69,14 +72,14 @@ class FakeClient:
         record = self.record()
         assert record["stage"] == "submitting_world" and record["generation_calls"]["world"] == 1
         assert any(item["kind"] == "historical_pano" for item in record["assets"])
-        assert settings == {"model": "marble-1.0-draft", "is_pano": True}
+        assert settings == {"model": self.expected_model, "is_pano": True}
         assert "historical RGB panorama" in prompt and "depth panorama" not in prompt
         image = Image.open(io.BytesIO(data))
         assert image.format == "JPEG" and image.size == (128, 64)
         self.calls.append("world_post")
         if self.fail_world:
             raise SubmissionUnknown()
-        return operation("world", done=self.wait_stage != "world")
+        return operation("world", done=self.wait_stage != "world", world_cost=self.world_cost)
 
     async def operation(self, operation_id):
         self.calls.append(operation_id)
@@ -84,7 +87,7 @@ class FakeClient:
         if self.wait_stage == stage:
             self.entered.set()
             await asyncio.Future()
-        return operation(stage)
+        return operation(stage, world_cost=self.world_cost)
 
     async def world(self, world_id):
         self.calls.append("world_get")
@@ -133,7 +136,7 @@ async def test_live_depth_result_world_shaped_imagery(tmp_path):
     initial = await engine.start(deepcopy(PLAN))
     result = await finish(engine, initial['id'])
     assert result['stage'] == 'ready'
-    assert result['cost_credits']['total'] == 230
+    assert result['cost_credits']['total'] == 1580
     assert client.calls.count('depth_post') == client.calls.count('world_post') == 1
     await engine.aclose()
 
@@ -147,8 +150,9 @@ async def test_two_paid_stages_deduplicate_and_publish_only_local_assets(tmp_pat
     result = await finish(engine, first["id"])
     assert result["stage"] == "ready", result
     assert result["plan_id"] == PLAN["plan_id"]
+    assert result["model"] == "marble-1.1"
     assert result["generation_calls"] == {"depth": 1, "world": 1}
-    assert result["cost_credits"] == {"depth": 80, "world": 150, "known_total": 230, "total": 230}
+    assert result["cost_credits"] == {"depth": 80, "world": 1500, "known_total": 1580, "total": 1580}
     assert client.calls.count("depth_post") == client.calls.count("world_post") == 1
     assert SECRET not in json.dumps(result) and str(tmp_path) not in json.dumps(result)
     assert "prompt" not in result and "plan_hash" not in result and "operation" not in result
@@ -199,22 +203,24 @@ async def test_unknown_submission_is_terminal_even_after_restart(tmp_path, faile
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("wait_stage", ["depth", "world"])
-async def test_shutdown_and_resume_query_saved_operation_without_repeating_paid_stage(tmp_path, wait_stage):
-    first = FakeClient(tmp_path, wait_stage=wait_stage)
+@pytest.mark.parametrize("model", ["marble-1.1", "marble-1.0-draft"])
+async def test_shutdown_and_resume_query_saved_operation_without_repeating_paid_stage(tmp_path, wait_stage, model):
+    first = FakeClient(tmp_path, wait_stage=wait_stage, expected_model=model)
     engine = manager(tmp_path, first)
-    job = await engine.start(PLAN)
+    job = await engine.start(PLAN, model=model)
     await asyncio.wait_for(first.entered.wait(), 3)
     await engine.aclose()
     assert engine.get(job["id"])["stage"] == "paused"
-    second = FakeClient(tmp_path)
+    second = FakeClient(tmp_path, expected_model=model)
     resumed = manager(tmp_path, second)
     await resumed.resume_all()
     result = await finish(resumed, job["id"])
     assert result["stage"] == "ready", result
+    assert result["model"] == model
     assert "depth_post" not in second.calls
     assert ("world_post" in second.calls) == (wait_stage == "depth")
     assert result["generation_calls"] == {"depth": 1, "world": 1}
-    assert result["cost_credits"]["total"] == 230
+    assert result["cost_credits"]["total"] == 80 + first.world_cost
     await resumed.aclose()
 
 
@@ -308,7 +314,7 @@ async def test_asset_failure_resumes_without_any_generation_post(tmp_path):
     job = await engine.start(PLAN)
     result = await finish(engine, job["id"])
     assert result["stage"] == "paused"
-    assert result["cost_credits"]["total"] == 230
+    assert result["cost_credits"]["total"] == 1580
     await engine.aclose()
     second = FakeClient(tmp_path)
     resumed = manager(tmp_path, second)
@@ -485,6 +491,40 @@ async def test_updated_content_hash_reuses_legacy_job_without_recharging(tmp_pat
     await engine.aclose()
 
 
+@pytest.mark.asyncio
+async def test_default_quality_job_does_not_reuse_ready_draft_cache(tmp_path, monkeypatch):
+    client = FakeClient(tmp_path, expected_model="marble-1.0-draft")
+    engine = manager(tmp_path, client)
+    draft = await engine.start(PLAN, model="marble-1.0-draft")
+    assert (await finish(engine, draft["id"]))["stage"] == "ready"
+    # Simulate an old cache key to also exercise the compatibility scan.
+    directory = tmp_path / draft["id"]
+    legacy_id = "e" * 32
+    record = json.loads((directory / "record.json").read_text())
+    record.update(id=legacy_id, plan_hash="legacy-draft-key")
+    (directory / "record.json").write_text(json.dumps(record))
+    directory.rename(tmp_path / legacy_id)
+    monkeypatch.setattr(engine, "_schedule", lambda _job_id: None)
+    standard = await engine.start(PLAN)
+    assert standard["model"] == "marble-1.1" and standard["stage"] == "queued"
+    assert standard["id"] not in {draft["id"], legacy_id}
+    assert (await engine.start(PLAN))["id"] == standard["id"]
+    assert (await engine.start(PLAN, model="marble-1.0-draft"))["id"] == legacy_id
+    assert client.calls.count("world_post") == 1
+    await engine.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model", ["marble-1.0", "marble-1.1-plus", "unknown", None, []])
+async def test_unsupported_world_model_stops_before_job_creation(tmp_path, model):
+    client = FakeClient(tmp_path)
+    engine = manager(tmp_path, client)
+    with pytest.raises(ValueError, match="Unsupported world generation model"):
+        await engine.start(PLAN, model=model)
+    assert not client.calls and not list(tmp_path.glob("*/record.json"))
+    await engine.aclose()
+
+
 # The RGB path uses a real 2:1 JPEG fixture; all provider calls stay offline.
 def source_jpeg():
     output = io.BytesIO()
@@ -557,7 +597,7 @@ async def test_photo_pipeline_skips_geometry_and_depth_and_preserves_source_sha(
     assert 'depth_post' not in client.calls
     assert client.calls.count('world_post') == 1
     assert result['generation_calls'] == {'image_edit': 1, 'world': 1}
-    assert result['cost_credits'] == {'depth': None, 'world': 150, 'known_total': 150, 'total': 150}
+    assert result['cost_credits'] == {'depth': None, 'world': 1500, 'known_total': 1500, 'total': 1500}
     assert result['image_edit_usage'] == {'input_tokens': 100, 'output_tokens': 250, 'total_tokens': 350}
     assert result['image_edit_billing']['included_in_worldlabs_credits'] is False
     assert result['image_edit_billing']['amount'] is None
@@ -623,6 +663,62 @@ async def test_photo_preflight_blocks_edit_before_paid_marker(tmp_path, kind):
     assert result['error_code'] == ('not_configured' if kind == 'missing_key' else 'insufficient_credits')
     assert result['generation_calls'] == {'image_edit': 0, 'world': 0}
     assert editor.calls == [] and 'world_post' not in client.calls
+    await engine.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model,required", [("marble-1.1", 1500), ("marble-1.0-draft", 150)])
+@pytest.mark.parametrize("shortfall", [0, 1])
+async def test_photo_checks_selected_world_price_before_image_edit(tmp_path, model, required, shortfall):
+    client = FakeClient(tmp_path, expected_model=model, balance=required - shortfall)
+    editor = FakeEditor(tmp_path)
+    engine = photo_manager(tmp_path, client, editor)
+    job = await engine.start(photo_plan(), model=model)
+    result = await finish(engine, job["id"])
+    assert result["model"] == model
+    if shortfall:
+        assert result["stage"] == "insufficient_credits"
+        assert result["generation_calls"] == {"image_edit": 0, "world": 0}
+        assert editor.calls == [] and client.calls == ["credits"]
+    else:
+        assert result["stage"] == "ready"
+        assert editor.calls == ["image_post"] and client.calls.count("world_post") == 1
+        assert result["cost_credits"]["world"] == required
+    await engine.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model,required", [("marble-1.1", 1500), ("marble-1.0-draft", 150)])
+async def test_depth_preflight_needs_credit_above_reserved_world_price(tmp_path, model, required):
+    client = FakeClient(tmp_path, expected_model=model, balance=required)
+    engine = manager(tmp_path, client)
+    job = await engine.start(PLAN, model=model)
+    result = await finish(engine, job["id"])
+    assert result["stage"] == "insufficient_credits"
+    assert result["generation_calls"] == {"depth": 0, "world": 0}
+    assert client.calls == ["credits"]
+    await engine.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model,required", [("marble-1.1", 1500), ("marble-1.0-draft", 150)])
+@pytest.mark.parametrize("input_kind", ["depth", "photo"])
+async def test_world_submission_rechecks_model_price_after_panorama(tmp_path, model, required, input_kind):
+    class DepletedClient(FakeClient):
+        async def credits(self):
+            if "credits" in self.calls:
+                self.balance = required - 1
+            return await super().credits()
+
+    client = DepletedClient(tmp_path, expected_model=model, balance=required + 100)
+    editor = FakeEditor(tmp_path)
+    engine = photo_manager(tmp_path, client, editor) if input_kind == "photo" else manager(tmp_path, client)
+    job = await engine.start(photo_plan() if input_kind == "photo" else PLAN, model=model)
+    result = await finish(engine, job["id"])
+    assert result["stage"] == "insufficient_credits"
+    assert result["generation_calls"]["world"] == 0 and "world_post" not in client.calls
+    assert result["credits_before_world"] == required - 1
+    assert result["generation_calls"]["image_edit" if input_kind == "photo" else "depth"] == 1
     await engine.aclose()
 
 
@@ -721,7 +817,7 @@ async def test_photo_saved_world_operation_resumes_without_image_or_world_post(t
     assert result['stage'] == 'ready'
     assert resumed_editor.calls == []
     assert 'world_post' not in resumed_client.calls and 'depth_post' not in resumed_client.calls
-    assert result['cost_credits']['total'] == 150
+    assert result['cost_credits']['total'] == 1500
     await resumed.aclose()
 
 
