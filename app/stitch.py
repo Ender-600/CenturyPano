@@ -6,6 +6,7 @@ overlap. Continuity is enforced in two stages:
 1. `fuse_overlaps` registers neighbours (translation + edge-guided optical flow)
    and writes one shared, full-overlap feather strip so thin structures track
    without hard-pasting one tile's appearance onto the other.
+
 2. `seam_plan` / `stitch` then choose a minimum-cost cut when residual structural
    disagreement remains, or a wide cosine feather when the leftover is only tonal.
 
