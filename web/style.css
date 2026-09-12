@@ -226,14 +226,16 @@ svg {
   letter-spacing: -2px;
 }
 .year-suffix { margin-left: 3px; font-size: 24px; font-weight: 300; letter-spacing: 0; opacity: .7; }
-.decade-options {
+#year-picker-button { font: inherit; letter-spacing: inherit; text-shadow: inherit; border-radius: 8px; }
+#year-picker-button:hover { opacity: .85; }
+.year-options {
   display: flex;
   align-items: center;
   justify-content: space-between;
   border-bottom: 1px solid #ffffff26;
   padding-bottom: 14px;
 }
-.decade-options button {
+.year-options button {
   position: relative;
   display: flex;
   align-items: center;
@@ -248,9 +250,9 @@ svg {
   text-shadow: 0 1px 12px #0003;
   transition: color .2s ease;
 }
-.decade-options button:hover { color: var(--white); }
-.decade-options button.active, .decade-options button[aria-pressed='true'] { color: #fff; }
-.decade-options button.active::before, .decade-options button[aria-pressed='true']::before {
+.year-options button:hover { color: var(--white); }
+.year-options button.active, .year-options button[aria-pressed='true'] { color: #fff; }
+.year-options button.active::before, .year-options button[aria-pressed='true']::before {
   content: '';
   position: absolute;
   inset: 5px 0 7px;
@@ -529,6 +531,20 @@ body.clean .slider-handle { visibility: hidden; }
 }
 .place-input-wrap input::placeholder { color: #97a096; }
 .field-note { margin: 10px 0 0; color: #7a877e; font-size: 10px; line-height: 1.8; }
+.year-settings { margin-top: 0; padding-top: 0; border-top: 0; padding-bottom: 20px; }
+.year-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; color: #526b58; font-size: 12px; }
+.year-entry { display: flex; align-items: baseline; gap: 7px; color: #7a877e; }
+.year-entry input { width: 100px; padding: 8px 9px; border: 1px solid #24403420; border-radius: 9px; background: #ffffff80; color: var(--ink); font-size: 22px; font-variant-numeric: tabular-nums; }
+.year-range { display: block; width: 100%; height: 32px; margin: 13px 0 0; accent-color: #657d68; cursor: pointer; }
+.year-scale { display: flex; justify-content: space-between; font-size: 10px; color: #7a877e; }
+.historical-context { margin-top: 16px; padding-top: 16px; border-top: 1px solid #24403416; color: #647568; overflow-wrap: anywhere; }
+.history-heading { display: flex; flex-direction: column; gap: 5px; }
+.history-heading h3, .historical-context > h3 { margin: 0; color: #526b58; font-size: 13px; font-weight: 500; }
+.history-heading > span, .history-status { font-size: 10px; color: #8a795b; }
+.historical-context p, .history-section { margin: 11px 0; font-size: 11px; line-height: 1.9; }
+.history-section h4 { margin: 0 0 5px; font-size: 11px; font-weight: 500; }
+.history-section ul { padding-left: 17px; margin: 0; }
+.historical-context .history-footnote { padding-top: 11px; border-top: 1px solid #24403412; color: #859082; font-size: 10px; }
 .check-label { display: flex; align-items: center; min-height: 44px; gap: 9px; margin-top: 10px; color: #647568; font-size: 11px; line-height: 1.7; cursor: pointer; }
 .check-label input { width: 16px; height: 16px; margin: 0; flex-shrink: 0; accent-color: #657d68; }
 .warning-note { margin: 7px 0 4px; padding: 10px 12px; border-radius: 8px; background: #9a743d0c; color: #92733e; font-size: 10px; line-height: 1.8; }
@@ -618,8 +634,8 @@ body.clean .slider-handle { visibility: hidden; }
   .time-caption { margin-bottom: 17px; }
   .time-caption h1 { font-size: 61px; }
   .time-caption p { font-size: 10px; letter-spacing: 1.5px; }
-  .decade-options { padding-bottom: 10px; }
-  .decade-options button { min-width: 44px; padding-inline: 8px; font-size: 12px; }
+  .year-options { padding-bottom: 10px; }
+  .year-options button { min-width: 44px; padding-inline: 8px; font-size: 12px; }
   .action-row { margin-top: 6px; }
   .provider-note { margin-top: 8px; }
   .gesture-hint { font-size: 10px; padding: 10px 15px; letter-spacing: .3px; }
@@ -635,7 +651,7 @@ body.clean .slider-handle { visibility: hidden; }
   .time-caption p { margin-bottom: 7px; font-size: 9px; }
   .journey-controls { bottom: calc(9px + env(safe-area-inset-bottom)); }
   .provider-note { margin-top: 3px; }
-  .decade-options { padding-bottom: 2px; }
+  .year-options { padding-bottom: 2px; }
   .site-header, .restore-button { top: calc(12px + env(safe-area-inset-top)); }
   .gesture-hint, .generation-overlay, .slider-grip { top: 35%; }
   .viewport-label, .progress-strip { top: calc(72px + env(safe-area-inset-top)); }
@@ -644,7 +660,7 @@ body.clean .slider-handle { visibility: hidden; }
 @media (max-height: 430px) {
   .time-caption { display: none; }
   .journey-controls { width: min(440px, calc(100% - 60px)); max-width: 440px; }
-  .decade-options button { min-height: 40px; }
+  .year-options button { min-height: 40px; }
   .action-row { height: 44px; margin-top: 0; }
   .provider-note { display: none; }
   .gesture-hint, .slider-grip { top: 42%; }

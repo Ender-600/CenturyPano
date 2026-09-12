@@ -54,7 +54,7 @@ function viewer({ ios = false, permissions = ['granted'], touch = true, secure =
         const s = part.trim();
         if (s.startsWith('#')) return this.id === s.slice(1);
         if (s.startsWith('.')) return this.classList.contains(s.slice(1));
-        if (s === '[data-decade]') return 'decade' in this.dataset;
+        if (s === '[data-year]') return 'year' in this.dataset;
         return this.tagName.toLowerCase() === s;
       });
     }
@@ -72,6 +72,7 @@ function viewer({ ios = false, permissions = ['granted'], touch = true, secure =
     focus() {}
     showModal() { this.open = true; }
     close() { this.open = false; }
+    checkValidity() { return true; }
     getBoundingClientRect() { return { left: 0, top: 0, right: this.clientWidth, bottom: this.clientHeight, width: this.clientWidth, height: this.clientHeight }; }
     setPointerCapture(id) { this.capture.add(id); }
     hasPointerCapture(id) { return this.capture.has(id); }
@@ -84,7 +85,7 @@ function viewer({ ios = false, permissions = ['granted'], touch = true, secure =
   document.body = elements.find((element) => element.tagName === 'BODY');
   document.hidden = false;
   document.getElementById = (id) => { assert.ok(ids.has(id), `actual HTML must contain #${id}`); return ids.get(id); };
-  document.querySelectorAll = (selector) => elements.filter((element) => element.matches(selector === '#decade-options [data-decade]' ? '[data-decade]' : selector));
+  document.querySelectorAll = (selector) => elements.filter((element) => element.matches(selector === '#year-options [data-year]' ? '[data-year]' : selector));
   document.querySelector = (selector) => document.querySelectorAll(selector)[0] || null;
   document.createElement = (tag) => new Element(tag);
   const window = new Events();
@@ -98,7 +99,7 @@ function viewer({ ios = false, permissions = ['granted'], touch = true, secure =
   };
   const storage = new Map();
   const requests = [];
-  const manifest = { job_id: 'motion-test', status: 'running', decade: '1920s', place: 'Pittsburgh', provider: 'demo', geometry: { W: 3000, H: 750, wrap: false, n: 1 }, tiles: [], metrics: {} };
+  const manifest = { job_id: 'motion-test', status: 'running', target_year: 1925, place: 'Pittsburgh', provider: 'demo', geometry: { W: 3000, H: 750, wrap: false, n: 1 }, tiles: [], metrics: {} };
   const context = vm.createContext({
     console, document, window, navigator: { onLine: true, maxTouchPoints: touch ? 5 : 0 },
     matchMedia: (query) => ({ matches: query.includes('pointer: coarse') ? touch : false }),
@@ -109,7 +110,7 @@ function viewer({ ios = false, permissions = ['granted'], touch = true, secure =
     FormData: class { append() {} }, ResizeObserver: class { observe() {} },
     fetch: async (url, options) => {
       requests.push({ url, method: options?.method || 'GET' });
-      const body = url === '/health' ? { configured: true, provider: 'demo' } : url === '/jobs' ? { job_id: manifest.job_id } : url.endsWith('/manifest') ? manifest : [];
+      const body = url === '/health' ? { configured: true, provider: 'demo', min_year: 1800, max_year: 2026, default_year: 1925 } : url === '/jobs' ? { job_id: manifest.job_id } : url.endsWith('/manifest') ? manifest : [];
       return { ok: true, json: async () => body, blob: async () => ({}) };
     },
     setTimeout: (callback, delay = 0) => { const handle = nextHandle++; timers.set(handle, { callback, due: now + delay }); return handle; },

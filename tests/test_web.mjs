@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { File } from 'node:buffer';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import vm from 'node:vm';
@@ -7,23 +8,51 @@ const html = readFileSync(new URL('../web/index.html', import.meta.url), 'utf8')
 const source = readFileSync(new URL('../web/app.js', import.meta.url), 'utf8');
 
 class Element {
-  constructor() {
-    Object.assign(this, { handlers: {}, attributes: {}, dataset: {}, style: {}, value: '', hidden: false, disabled: false, clientWidth: 800, clientHeight: 400, children: [] });
-    this.classList = { toggle() {}, add() {}, remove() {} };
+  constructor(tag = 'div', attrs = '') {
+    Object.assign(this, { tag, handlers: {}, attributes: {}, dataset: {}, value: '', hidden: /\shidden(?:\s|$)/.test(attrs), disabled: false, clientWidth: 390, clientHeight: 844, naturalWidth: 3000, naturalHeight: 750, children: [] });
+    for (const [, name, value] of attrs.matchAll(/([\w-]+)="([^"]*)"/g)) {
+      this.attributes[name] = value;
+      if (name.startsWith('data-')) this.dataset[name.slice(5)] = value;
+    }
+    this.style = { setProperty(name, value) { this[name] = value; } };
+    const classes = new Set((this.attributes.class || '').split(/\s+/));
+    this.classList = {
+      contains: (name) => classes.has(name), add: (name) => classes.add(name), remove: (name) => classes.delete(name),
+      toggle: (name, active = !classes.has(name)) => { if (active) classes.add(name); else classes.delete(name); },
+    };
     this.firstElementChild = this.lastElementChild = { style: {}, textContent: '' };
   }
   addEventListener(name, callback) { (this.handlers[name] ||= []).push(callback); }
-  async emit(name) { for (const callback of this.handlers[name] || []) await callback({ target: this }); }
+  async emit(name, detail = {}) { for (const callback of this.handlers[name] || []) await callback({ target: this, preventDefault() {}, ...detail }); }
   setAttribute(name, value) { this.attributes[name] = value; }
+  getAttribute(name) { return this.attributes[name] ?? null; }
+  matches(selector) {
+    return selector.split(',').some((part) => {
+      const value = part.trim().split(/\s+/).at(-1);
+      if (value.startsWith('#')) return this.attributes.id === value.slice(1);
+      if (value.startsWith('.')) return this.classList.contains(value.slice(1));
+      if (value === '[data-year]') return 'year' in this.dataset;
+      return this.tag === value;
+    });
+  }
+  closest(selector) { return this.matches(selector) ? this : null; }
+  querySelector(selector) { return this.children.find((element) => element.matches(selector)) || null; }
+  set innerHTML(value) { this._html = value; this.children = /<img\b/.test(value) ? [new Element('img')] : []; }
+  get innerHTML() { return this._html || ''; }
   insertAdjacentHTML(_position, value) { this.innerHTML = (this.innerHTML || '') + value; }
   appendChild(element) { this.children.push(element); }
+  click() { return this.emit('click'); }
+  focus() {}
+  showModal() { this.open = true; }
+  close() { this.open = false; }
+  getBoundingClientRect() { return { left: 0, top: 0, right: this.clientWidth, bottom: this.clientHeight, width: this.clientWidth, height: this.clientHeight }; }
   checkValidity() { return true; }
-  getContext() { return { drawImage() {} }; }
+  getContext() { return { drawImage() {}, fillRect() {} }; }
 }
 
 function app(options = {}) {
-  const elements = new Map([...html.matchAll(/id="([^"]+)"/g)].map((match) => [match[1], new Element()]));
-  const presets = [...html.matchAll(/data-year="(\d+)"/g)].map((match) => Object.assign(new Element(), { dataset: { year: match[1] } }));
+  const nodes = [...html.matchAll(/<([a-z][\w-]*)\b([^>]*)>/gi)].map(([, tag, attrs]) => new Element(tag, attrs));
+  const elements = new Map(nodes.filter((element) => element.attributes.id).map((element) => [element.attributes.id, element]));
   const requests = [], jobs = new Map();
   const fetch = async (url, request) => {
     if (options.fetch) {
@@ -43,21 +72,25 @@ function app(options = {}) {
     throw new Error(`Unexpected request: ${url}`);
   };
   const document = {
-    title: 'CENTURY PANO', body: new Element(),
+    title: 'CENTURY PANO', body: nodes.find((element) => element.tag === 'body'), addEventListener() {},
     getElementById(id) { assert.ok(elements.has(id), `Missing HTML element: ${id}`); return elements.get(id); },
-    querySelector() { return new Element(); },
-    querySelectorAll(selector) { assert.equal(selector, '[data-year]'); return presets; },
+    querySelector(selector) { return nodes.find((element) => element.matches(selector)) || null; },
+    querySelectorAll(selector) { return nodes.filter((element) => element.matches(selector)); },
     createElement() { return new Element(); },
   };
+  const storage = new Map();
   const context = vm.createContext({
-    document, navigator: { onLine: true, ...options.navigator }, fetch, FormData, Blob, URL, URLSearchParams,
+    document, navigator: { onLine: true, maxTouchPoints: 0, ...options.navigator }, fetch, FormData, Blob, File, URL, URLSearchParams,
     window: { addEventListener() {}, removeEventListener() {}, scrollTo() {} },
     location: { search: '', pathname: '/' }, history: { replaceState() {} },
     requestAnimationFrame() {}, setTimeout() {}, clearTimeout() {},
+    matchMedia: () => ({ matches: false }),
+    Image: class { constructor() { this.naturalWidth = 3000; this.naturalHeight = 750; } set src(_value) { queueMicrotask(() => this.onload?.()); } },
     ResizeObserver: class { observe() {} },
-    localStorage: { getItem() { return null; } },
+    localStorage: { getItem: (key) => storage.get(key), setItem: (key, value) => storage.set(key, value) },
   });
   const instrumented = source.replace(/\}\)\(\);\s*$/, 'globalThis.hooks = { state, setTargetYear, yearOf, locate, updateMetadata, pollManifest };\n})();');
+  vm.runInContext(readFileSync(new URL('../web/motion.js', import.meta.url), 'utf8'), context);
   vm.runInContext(instrumented, context);
   return { ...context.hooks, elements, document, requests, jobs };
 }
@@ -110,22 +143,47 @@ test('generating 1945 then 1950 submits distinct exact-year requests', async () 
 });
 
 test('photo GPS precedes device GPS and manual location survives asynchronous resolution', async () => {
-  let deviceCalls = 0;
-  const view = app({ navigator: { geolocation: { getCurrentPosition(success) { deviceCalls++; success({ coords: { latitude: 1, longitude: 2 } }); } } } });
-  await view.locate(photoGPS(), 0);
+  let deviceCalls = 0, resolveCity;
+  const navigator = { geolocation: { getCurrentPosition(success) { deviceCalls++; success({ coords: { latitude: 1, longitude: 2 } }); } } };
+  const delayedCity = new Promise((resolve) => { resolveCity = resolve; });
+  const view = app({ navigator, fetch: (url) => url === '/location/resolve' ? delayedCity : null });
+  const photo = photoGPS();
+  const locating = view.locate(photo, 0, true);
+  for (let n = 0; n < 8; n++) await Promise.resolve();
   assert.equal(deviceCalls, 0);
   assert.equal(view.state.locationSource, 'exif');
   assert.equal(view.state.location.lat, 40); assert.equal(view.state.location.lon, -79);
   view.elements.get('place-input').value = 'Pittsburgh, PA, US';
   await view.elements.get('place-input').emit('input');
-  await view.locate(new Blob(['no exif']), 0);
-  assert.equal(deviceCalls, 1);
-  assert.equal(view.state.locationSource, 'geolocation');
-  assert.equal(view.elements.get('place-input').value, 'Pittsburgh, PA, US');
-  view.state.file = new Blob(['photo']); view.state.screen = 'preview';
+  resolveCity({ ok: true, json: async () => ({ place: { name: 'Late automatic city', cc: 'US' } }) });
+  await locating;
+  for (let n = 0; n < 8; n++) await Promise.resolve();
+  assert.equal(view.elements.get('place-input').value, 'Pittsburgh, PA, US', 'late GPS resolution cannot overwrite a manually edited city');
+  assert.equal(view.state.locationSource, 'exif', 'editing the city retains photo coordinates for clearing the override');
+  view.state.file = photo; view.state.screen = 'preview';
   await view.elements.get('generate-button').emit('click');
   assert.equal(view.requests[0].get('place'), 'Pittsburgh, PA, US');
-  assert.equal(view.requests[0].get('lat'), '1');
+  view.elements.get('place-input').value = '';
+  await view.elements.get('place-input').emit('input');
+  view.state.screen = 'preview';
+  await view.elements.get('generate-button').emit('click');
+  assert.equal(view.requests[1].has('place'), false, 'clearing a manual city restores photo GPS precedence on the server');
+  assert.deepEqual(Buffer.from(await view.requests[1].get('image').arrayBuffer()), Buffer.from(await photo.arrayBuffer()), 'the original photo GPS remains available to the server');
+
+  const device = app({ navigator });
+  const noExif = new Blob(['no exif']);
+  await device.locate(noExif, 0);
+  assert.equal(deviceCalls, 0, 'opening a photo does not request device location');
+  device.elements.get('place-input').value = 'Pittsburgh, PA, US';
+  await device.elements.get('place-input').emit('input');
+  await device.locate(noExif, 0, true);
+  assert.equal(deviceCalls, 1);
+  assert.equal(device.state.locationSource, 'geolocation');
+  assert.equal(device.elements.get('place-input').value, 'Pittsburgh, PA, US');
+  device.state.file = noExif; device.state.screen = 'preview';
+  await device.elements.get('generate-button').emit('click');
+  assert.equal(device.requests[0].get('place'), 'Pittsburgh, PA, US');
+  assert.equal(device.requests[0].get('lat'), '1');
 });
 
 test('mismatched-year results stop before applying a manifest', async () => {
@@ -135,6 +193,31 @@ test('mismatched-year results stop before applying a manifest', async () => {
   await view.pollManifest(view.state.generation);
   assert.equal(view.state.manifest, null);
   assert.match(view.elements.get('generation-title').textContent, /年份与选择不一致/);
+});
+
+test('selecting Now while generating remains on the original as tiles and the final result arrive', async () => {
+  const view = app();
+  view.state.file = new Blob(['photo'], { type: 'image/jpeg' });
+  view.state.screen = 'preview'; view.setTargetYear(1945, true);
+  await view.elements.get('generate-button').emit('click');
+  await view.elements.get('present-button').emit('click');
+  const manifest = {
+    job_id: view.state.jobId, target_year: 1945, status: 'running',
+    geometry: { W: 3000, H: 750, tile_w: 1024, n: 1, wrap: false },
+    tiles: [{ i: 0, x: 0, status: 'done' }],
+  };
+  view.jobs.set(view.state.jobId, manifest);
+  await view.pollManifest(view.state.generation);
+  assert.equal(view.state.loadedTiles.size, 1);
+  assert.equal(view.elements.get('compare-button').disabled, false);
+  assert.equal(view.state.pastPercent, 0);
+  manifest.status = 'done'; manifest.result = { status: 'done' };
+  await view.pollManifest(view.state.generation);
+  assert.equal(view.state.finalLoaded, true);
+  assert.equal(view.state.viewMode, 'present');
+  assert.equal(view.state.pastPercent, 0);
+  assert.equal(view.elements.get('present-button').getAttribute('aria-pressed'), 'true');
+  assert.equal(view.elements.get('window-year').textContent, '现在');
 });
 
 test('historical context includes the reference date and unverified site uncertainty safely', () => {

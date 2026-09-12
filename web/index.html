@@ -73,19 +73,19 @@
     <div class="gesture-hint chrome" id="gesture-hint"><span aria-hidden="true">↔</span> 左右滑动，探索此地</div>
     <button class="gesture-hint motion-button chrome" id="motion-button" hidden><svg aria-hidden="true"><use href="#i-gyro"/></svg><span id="motion-label">点按开启转动视窗</span></button>
 
-    <section class="journey-controls chrome" id="journey-controls" aria-label="年代与视窗控制">
+    <section class="journey-controls chrome" id="journey-controls" aria-label="年份与视窗控制">
       <div class="time-caption">
         <p id="window-caption">同一个地方，另一个年代。</p>
-        <h1><span id="window-year">1920</span><span class="year-suffix" id="window-year-suffix">s</span></h1>
+        <h1><button id="year-picker-button" aria-label="选择具体年份" aria-haspopup="dialog"><span id="window-year">1925</span><span class="year-suffix" id="window-year-suffix">年</span></button></h1>
       </div>
-      <div class="decade-options" id="decade-options" role="group" aria-label="选择年代">
-        <button data-decade="1900s" aria-pressed="false">1900<span class="era-dot" aria-hidden="true"></span></button>
-        <button data-decade="1920s" aria-pressed="true" class="active">1920<span class="era-dot" aria-hidden="true"></span></button>
-        <button data-decade="1950s" aria-pressed="false">1950<span class="era-dot" aria-hidden="true"></span></button>
-        <button data-decade="1970s" aria-pressed="false">1970<span class="era-dot" aria-hidden="true"></span></button>
+      <div class="year-options" id="year-options" role="group" aria-label="快捷选择年份">
+        <button data-year="1900" aria-pressed="false">1900<span class="era-dot" aria-hidden="true"></span></button>
+        <button data-year="1920" aria-pressed="false">1920<span class="era-dot" aria-hidden="true"></span></button>
+        <button data-year="1950" aria-pressed="false">1950<span class="era-dot" aria-hidden="true"></span></button>
+        <button data-year="1970" aria-pressed="false">1970<span class="era-dot" aria-hidden="true"></span></button>
         <button id="present-button" aria-pressed="false">现在<span class="era-dot" aria-hidden="true"></span></button>
       </div>
-      <button class="generate-button" id="generate-button" hidden>走进 1920 年代<svg><use href="#i-arrow"/></svg></button>
+      <button class="generate-button" id="generate-button" hidden>走进 1925 年<svg><use href="#i-arrow"/></svg></button>
       <div class="action-row">
         <button class="subtle-button" id="album-button"><svg><use href="#i-image"/></svg><span>换张全景</span></button>
         <button class="quiet-button" id="clean-button" aria-label="进入纯净模式，隐藏界面" title="纯净模式"><svg><use href="#i-window"/></svg></button>
@@ -104,6 +104,13 @@
       <button class="sheet-close icon-button" id="close-options" aria-label="关闭视窗选项"><svg><use href="#i-close"/></svg></button>
     </div>
 
+    <section id="year-settings" class="sheet-section year-settings" aria-labelledby="year-settings-title">
+      <div class="year-heading"><label id="year-settings-title" for="year-input">选择年份</label><span class="year-entry"><input id="year-input" type="number" inputmode="numeric" min="1800" max="2026" step="1" value="1925" required><span>年</span></span></div>
+      <input id="year-range" class="year-range" type="range" min="1800" max="2026" step="1" value="1925" aria-label="选择具体年份">
+      <div class="year-scale"><span id="year-min">1800</span><span id="year-max">2026</span></div>
+      <p class="field-note">每年以 7 月 1 日为参考。也可以直接输入年份。</p>
+    </section>
+
     <div class="sheet-actions">
       <button id="capture-button"><svg><use href="#i-camera"/></svg><span>拍下眼前的风景<small>使用手机全景模式，慢慢转身。</small></span><svg class="sheet-arrow"><use href="#i-arrow"/></svg></button>
       <button id="sample-button"><svg><use href="#i-play"/></svg><span>先来一场时光旅行<small>打开示例，感受完整的视窗。</small></span><svg class="sheet-arrow"><use href="#i-arrow"/></svg></button>
@@ -113,8 +120,9 @@
     <section id="photo-settings" class="sheet-section" hidden aria-labelledby="photo-settings-title">
       <h3 id="photo-settings-title">这一次，从哪里出发？</h3>
       <div class="location-field-heading"><label class="field-label" for="place-input">城市 <span>可选</span></label><button class="text-button locate-button" id="locate-button"><svg><use href="#i-location"/></svg>使用当前位置</button></div>
-      <div class="place-input-wrap"><svg><use href="#i-location"/></svg><input id="place-input" maxlength="160" placeholder="例如 Pittsburgh" autocomplete="address-level2"></div>
-      <p id="location-note" class="field-note">只使用城市信息，帮助重现当地风格。</p>
+      <div class="place-input-wrap"><svg><use href="#i-location"/></svg><input id="place-input" maxlength="160" placeholder="城市，例如 Pittsburgh, PA, US" autocomplete="address-level2"></div>
+      <p id="location-note" class="field-note">照片位置用于推测当地历史；也可手动填写拍摄城市。</p>
+      <p class="field-note">手填城市优先于照片 GPS；当前位置可能与拍摄地不同。可用坐标及城市会用于历史推理。</p>
       <label class="check-label"><input id="is-360" type="checkbox">这是一张 360° 等距柱状全景</label>
       <p id="image-warning" class="warning-note" hidden></p>
       <button class="text-button return-button" id="retake-button">重新选择照片 <span>↗</span></button>
@@ -126,6 +134,8 @@
       <p id="result-subtitle" class="field-note">旧日的风景，正在眼前展开。</p>
       <p id="result-mode" class="result-mode"></p>
       <p id="result-note" class="result-note">以你拍摄的全景为起点，重新想象另一个年代。</p>
+      <p id="place-warning" class="warning-note" role="status" hidden></p>
+      <div id="historical-context" class="historical-context" hidden></div>
       <button class="text-button metrics-toggle" id="metrics-toggle" aria-expanded="false" aria-controls="metrics-panel">本次旅程的数据 <span>+</span></button>
       <div id="metrics-panel" class="metrics-panel" hidden></div>
     </section>
