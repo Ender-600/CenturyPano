@@ -1634,7 +1634,7 @@
     setTimeout(() => archiveLeaflet.invalidateSize(), 50);
   }
   async function cacheJourney(manifest) {
-    if (state.offlineSaved || state.cachePending || !navigator.serviceWorker) return;
+    if (window.CenturyAccess?.sessionRequired || state.offlineSaved || state.cachePending || !navigator.serviceWorker) return;
     state.cachePending = true;
     const jobId = manifest.job_id;
     try {
@@ -1754,7 +1754,7 @@
       }
     },
   };
-  if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => { /* HTTPS or localhost is needed for offline mode. */ });
+  if (!window.CenturyAccess?.sessionRequired && 'serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => { /* HTTPS or localhost is needed for offline mode. */ });
   checkHealth();
   showScreen('capture');
   if (motionDevice) {

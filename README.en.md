@@ -1,5 +1,7 @@
 # CENTURY PANO
 
+For the full four-mode frontend and authenticated backend, see [Vercel deployment](docs/VERCEL_DEPLOYMENT.md). Provider keys stay on the Python backend; the public site uses a separate application access code.
+
 **Language / 语言:** [English](README.en.md) · [中文](README.md)
 
 The same place, another era. The four top modes are, in order: panorama camera, your own historical panorama, Street View historical panorama, and Marble immersive worlds. The camera opens by default. All four modes share the year wheel, defaulting to **1926**, with any whole year from 1800 through the current year.

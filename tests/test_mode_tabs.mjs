@@ -48,6 +48,17 @@ test('the default Camera panel does not create or contact the world viewer', () 
   assert.deepEqual(f.actions.filter(([type]) => !['active', 'year'].includes(type)), []);
 });
 
+test('gateway sessions open the shared world frame in cookie mode without a credential in its URL', () => {
+  const f = fixture();
+  f.window.CenturyAccess = { sessionRequired: true, authenticated: true };
+  f.host.setMode('world');
+  const query = new URL(f.frames[0].src, f.window.location).searchParams;
+  assert.equal(query.get('session'), '1');
+  assert.equal(query.has('access'), false);
+  f.childMessage({ type: 'century:world-ready' });
+  assert.equal('access' in f.messages.at(-1).data, false);
+});
+
 test('Street View and world reuse one frame and deactivate it when leaving', () => {
   const f = fixture();
   f.host.setMode('streetview'); assert.equal(f.frames.length, 1);

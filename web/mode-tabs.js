@@ -51,6 +51,7 @@ export function createModeHost({ window, document, photo, wheelFactory = createY
     frame.allow = 'geolocation; accelerometer; gyroscope; magnetometer; camera; fullscreen';
     frame.referrerPolicy = 'same-origin';
     const query = new URLSearchParams({ embedded: '1' });
+    if (window.CenturyAccess?.sessionRequired) query.set('session', '1');
     const saved = new URLSearchParams(window.location.search).get('world');
     if (/^[a-f0-9]{32}$/.test(saved || '')) query.set('world', saved);
     frame.src = `/world/?${query}`;

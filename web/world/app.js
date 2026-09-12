@@ -40,7 +40,7 @@ const STANDARD_REASONS = new Map([
 const state = {
   embedded: EMBEDDED, active: !EMBEDDED, mode: 'streetview', hostEpoch: 0,
   eventsBound: false, bootStarted: false, bootPromise: null, hostYear: null, sourceSelected: false, worldPose: null,
-  token: '', config: null, plan: null, job: null, planBusy: false, generateBusy: false,
+  token: '', sessionAuthenticated: false, sessionMode: new URLSearchParams(location.search).get('session') === '1', config: null, plan: null, job: null, planBusy: false, generateBusy: false,
   model: 'marble-1.1',
   restoring: false, resumeBusy: false, submissionUnknown: false, planEpoch: 0, jobEpoch: 0, viewEpoch: 0,
   pollTimer: null, view: 'source', viewAbort: null, viewBusy: false, userViewLocked: false,
@@ -59,6 +59,7 @@ const state = {
   prefetch: null, prefetchEnabled: false, prefetchStatus: null, prefetchApplying: false, prefetchStartEpoch: 0,
 };
 
+function hasAccess() { return state.sessionAuthenticated || !!state.token; }
 function viewerActive() { return !state.embedded || state.active; }
 function foreground() { return viewerActive() && document.visibilityState !== 'hidden'; }
 function postHost(payload) {
@@ -236,12 +237,12 @@ class RequestError extends Error {
 
 async function api(path, { method = 'GET', body, auth = true, signal, format = 'json' } = {}) {
   // Never attach the access token to external URLs, redirects, images, or query strings.
-  if (typeof path !== 'string' || !/^\/world-(?:config|session|plans|jobs|prefetch)(?:\/[^?#]*)?$/.test(path)) {
+  if (typeof path !== 'string' || (path !== '/app-session' && !/^\/world-(?:config|session|plans|jobs|prefetch)(?:\/[^?#]*)?$/.test(path))) {
     throw new RequestError(0, 'Invalid service URL.');
   }
-  if (auth && !state.token) throw new RequestError(401, 'Enter an access code and connect to the generation service first.');
+  if (auth && !hasAccess()) throw new RequestError(401, 'Enter an access code and connect to the generation service first.');
   const headers = new Headers();
-  if (auth) headers.set('Authorization', `Bearer ${state.token}`);
+  if (auth && state.token) headers.set('Authorization', `Bearer ${state.token}`);
   if (body !== undefined) headers.set('Content-Type', 'application/json');
   const controller = new AbortController();
   const abort = () => controller.abort();
@@ -255,8 +256,8 @@ async function api(path, { method = 'GET', body, auth = true, signal, format = '
       redirect: 'error', referrerPolicy: 'no-referrer',
     });
     if (!response.ok) {
-      if (response.status === 401) {
-        state.token = ''; storageSet(TOKEN_KEY, null);
+      if (response.status === 401 && (auth || path === '/app-session')) {
+        state.token = ''; state.sessionAuthenticated = false; storageSet(TOKEN_KEY, null);
         $('access-panel').hidden = false; $('connection').textContent = 'Access code required';
         syncUI();
       }
@@ -315,24 +316,24 @@ function syncUI() {
   const busy = state.planBusy || state.generateBusy || state.restoring || state.resumeBusy || running;
   for (const element of $('plan-form').elements || $('plan-form').querySelectorAll('input,select,button')) element.disabled = !!busy;
   state.yearWheel?.setDisabled(!viewerActive() || !!busy || state.config?.viewer_only === true);
-  if ($('test-prepare')) $('test-prepare').disabled = !!busy || !state.token || state.locationMode !== 'test';
-  if ($('snapshot')) $('snapshot').disabled = !!busy || !state.token || state.locationMode !== 'test';
+  if ($('test-prepare')) $('test-prepare').disabled = !!busy || !hasAccess() || state.locationMode !== 'test';
+  if ($('snapshot')) $('snapshot').disabled = !!busy || !hasAccess() || state.locationMode !== 'test';
   $('lat').readOnly = $('lon').readOnly = state.locationMode === 'device';
   $('gps').disabled = !!busy || state.locationBusy;
-  if ($('refresh-scene')) $('refresh-scene').disabled = !viewerActive() || !!busy || !state.token || state.config?.viewer_only === true;
+  if ($('refresh-scene')) $('refresh-scene').disabled = !viewerActive() || !!busy || !hasAccess() || state.config?.viewer_only === true;
   $('retry-location').disabled = state.locationBusy || state.planBusy;
   $('copy-location-link').disabled = state.locationLinkBusy;
   $('open-streetview').disabled = !!busy || state.streetViewBusy;
-  $('geometry-test').disabled = !!busy || !state.token || state.locationMode !== 'test';
+  $('geometry-test').disabled = !!busy || !hasAccess() || state.locationMode !== 'test';
   $('test-controls').hidden = state.locationMode !== 'test';
   $('location-mode').value = state.locationMode;
   $('location-label').textContent = state.locationMode === 'device' ? 'Current location' : 'Test location · Not your current position';
   renderLocationStatus(); renderLocationHelp();
-  if ($('edits-file')) $('edits-file').disabled = !!busy || !state.token || !state.plan;
+  if ($('edits-file')) $('edits-file').disabled = !!busy || !hasAccess() || !state.plan;
   const changedYear = state.plan && Number($('year').value) !== state.plan.target_year;
   const panoramaOnly = state.embedded && state.mode === 'streetview';
   $('generate').hidden = !state.plan || state.config?.viewer_only === true;
-  $('generate').disabled = !viewerActive() || !state.token || !state.plan || (!panoramaOnly && !state.config?.configured) || !!busy
+  $('generate').disabled = !viewerActive() || !hasAccess() || !state.plan || (!panoramaOnly && !state.config?.configured) || !!busy
     || !!state.job && !changedYear && (panoramaOnly || state.job.kind !== 'panorama') || state.submissionUnknown || (!panoramaOnly && !modelProfile())
     || state.plan?.input_kind === 'streetview_panorama' && state.config?.panorama_editor_configured === false;
   $('world-model').disabled = !!busy || !!state.job && state.job.kind !== 'panorama' || state.submissionUnknown;
@@ -397,7 +398,7 @@ function isPanorama(view = state.view) { return view === 'source' || view === 'p
 
 function prefetchAvailable() {
   return state.config?.prefetch?.available === true && state.config?.viewer_only !== true
-    && !!state.token && state.locationMode === 'device' && state.plan?.input_kind === 'streetview_panorama';
+    && hasAccess() && state.locationMode === 'device' && state.plan?.input_kind === 'streetview_panorama';
 }
 
 function renderPrefetchUI() {
@@ -1158,7 +1159,7 @@ async function openStreetView() {
 async function maybePrepareCurrent() {
   const fix = state.locationFix;
   if (state.embedded && state.plan && state.job || state.prefetchEnabled || !state.bootReady || state.planBusy || state.generateBusy || state.restoring || state.resumeBusy
-      || state.submissionUnknown || walkingLocked() || state.scaleCalibration?.isActive() || !state.token || state.locationMode !== 'device'
+      || state.submissionUnknown || walkingLocked() || state.scaleCalibration?.isActive() || !hasAccess() || state.locationMode !== 'device'
       || !foreground() || state.view !== 'source' || state.locationError
       || state.job && (state.job.stage || state.job.status) !== 'ready'
       || !fix || fix.accuracy_m > 35 || Date.now() - fix.timestamp_ms > 60000
@@ -1375,7 +1376,7 @@ async function startGeneration() {
 
 function schedulePoll(epoch) {
   clearTimeout(state.pollTimer);
-  if (epoch !== state.jobEpoch || !state.job || TERMINAL.has(state.job.stage || state.job.status) || !state.token) return;
+  if (epoch !== state.jobEpoch || !state.job || TERMINAL.has(state.job.stage || state.job.status) || !hasAccess()) return;
   state.pollTimer = setTimeout(() => { void pollJob(epoch); }, 5000);
 }
 async function pollJob(epoch) {
@@ -1699,6 +1700,18 @@ function canRequestLocalSession(hostname) {
 }
 
 async function initialiseAccess() {
+  if (state.sessionMode) {
+    state.token = ''; storageSet(TOKEN_KEY, null);
+    try {
+      const session = await api('/app-session', { auth: false });
+      if (session.authenticated !== true) throw new Error('Access code required');
+      state.sessionAuthenticated = true; connected(); return;
+    } catch {
+      state.sessionAuthenticated = false;
+      $('access-panel').hidden = false; $('connection').textContent = 'Access code required'; syncUI();
+      message('Open settings and enter your access code to reconnect.', true); return;
+    }
+  }
   const fragment = new URLSearchParams(location.hash.slice(1));
   const supplied = fragment.get('access');
   if (fragment.has('access')) {
@@ -1708,7 +1721,7 @@ async function initialiseAccess() {
   const saved = supplied ?? storageGet(TOKEN_KEY);
   if (validToken(saved)) {
     state.token = saved;
-    try { await verifyAccess(); return; } catch { state.token = ''; storageSet(TOKEN_KEY, null); }
+    try { await verifyAccess(); return; } catch { state.token = ''; state.sessionAuthenticated = false; storageSet(TOKEN_KEY, null); }
   }
   if (canRequestLocalSession(location.hostname) || new URLSearchParams(location.search).get('viewer') === '1') {
     try {
@@ -1721,7 +1734,7 @@ async function initialiseAccess() {
 }
 
 function connected() {
-  storageSet(TOKEN_KEY, state.token); $('access').value = '';
+  storageSet(TOKEN_KEY, state.sessionMode ? null : state.token); $('access').value = '';
   $('access-panel').hidden = true; $('connection').textContent = 'Service connected'; syncUI();
 }
 async function verifyAccess() {
@@ -1732,7 +1745,7 @@ async function verifyAccess() {
 }
 
 async function restoreSaved() {
-  if (!state.token) return;
+  if (!hasAccess()) return;
   let saved;
   try { saved = JSON.parse(storageGet(RESUME_KEY) || 'null'); } catch { saved = null; }
   const query = new URLSearchParams(location.search);
@@ -1826,9 +1839,23 @@ function bindEvents() {
   $('connect').addEventListener('click', async () => {
     const token = $('access').value.trim();
     if (!validToken(token)) { message('Enter a valid access code.', true); return; }
-    $('connect').disabled = true; state.token = token;
-    try { await verifyAccess(); message(); await restoreSaved(); await maybePrepareCurrent(); closeSettings(); }
-    catch (error) { state.token = ''; storageSet(TOKEN_KEY, null); message(error.message, true); syncUI(); }
+    $('connect').disabled = true;
+    try {
+      if (state.sessionMode) {
+        const session = await api('/app-session', { method: 'POST', body: { access_code: token }, auth: false });
+        if (session.authenticated !== true) throw new Error('The access code was not accepted.');
+        state.token = ''; state.sessionAuthenticated = true; connected();
+      } else { state.token = token; await verifyAccess(); }
+      if (!state.config) {
+        try { await loadConfiguration(); }
+        catch {
+          message('Connected, but unable to read service configuration. Try connecting again shortly.', true);
+          syncUI(); return;
+        }
+      }
+      message(); await restoreSaved(); await maybePrepareCurrent(); closeSettings();
+    }
+    catch (error) { state.token = ''; state.sessionAuthenticated = false; storageSet(TOKEN_KEY, null); message(error.message, true); syncUI(); }
     finally { $('connect').disabled = false; }
   });
   $('location-mode').addEventListener('change', (event) => setLocationMode(event.target.value));
@@ -1937,20 +1964,26 @@ async function boot() {
   return state.bootPromise;
 }
 
+async function loadConfiguration({ auth = hasAccess() } = {}) {
+  const config = await api('/world-config', { auth });
+  state.config = config;
+  configureModels();
+  if (Number.isInteger(config.min_year)) $('year').min = String(config.min_year);
+  if (Number.isInteger(config.max_year)) $('year').max = String(config.max_year);
+  state.yearWheel?.setRange(Number($('year').min) || 1800, Number($('year').max) || new Date().getFullYear());
+  syncUI();
+}
+
 async function loadApp() {
   startAutomaticMotion();
   const locationReady = refreshLocation().catch(() => {});
   const results = await Promise.allSettled([
-    api('/world-config', { auth: false }).then((config) => {
-      state.config = config;
-      configureModels();
-      if (Number.isInteger(config.min_year)) $('year').min = String(config.min_year);
-      if (Number.isInteger(config.max_year)) $('year').max = String(config.max_year);
-      state.yearWheel?.setRange(Number($('year').min) || 1800, Number($('year').max) || new Date().getFullYear());
-      syncUI();
-    }), initialiseAccess(),
+    loadConfiguration({ auth: false }), initialiseAccess(),
   ]);
-  if (results[0].status === 'rejected') message('Unable to read service configuration. Check that the service is running.', true);
+  if (results[0].status === 'rejected' && hasAccess()) {
+    try { await loadConfiguration(); } catch { /* The configuration error below remains visible. */ }
+  }
+  if (!state.config) message('Unable to read service configuration. Check that the service is running.', true);
   else if (!state.config.configured && !state.config.viewer_only && !(state.embedded && state.mode === 'streetview')) message('World Labs is not configured on the server. Historical panoramas remain available when image editing is configured.');
   await restoreSaved();
   state.bootReady = true;

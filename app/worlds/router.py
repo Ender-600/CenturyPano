@@ -83,6 +83,12 @@ async def configuration():
             'historical_accuracy': 'unverified', 'phone_ar': False}
 
 
+@router.get('/world-auth', dependencies=[Depends(require_access)])
+async def authenticated_session():
+    """Read-only credential validation for the public application gateway."""
+    return JSONResponse({'authenticated': True}, headers={'Cache-Control': 'no-store'})
+
+
 @router.get('/world-session')
 async def local_session(request: Request):
     origin = request.headers.get('origin')

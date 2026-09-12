@@ -46,6 +46,25 @@ svg {
   flex-shrink: 0;
 }
 [hidden] { display: none !important; }
+body[data-access="locked"] > :not(.access-screen):not(noscript) { display: none !important; }
+.access-screen {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: grid;
+  place-items: center;
+  overflow: auto;
+  padding: max(24px, env(safe-area-inset-top)) 24px max(24px, env(safe-area-inset-bottom));
+  background: linear-gradient(155deg, #29332ee8, #202720f5), url('/window-scene.png') center / cover;
+}
+.access-card { width: min(100%, 380px); }
+.access-card h1 { margin: 16px 0; font-size: clamp(30px, 7vw, 42px); font-weight: 400; line-height: 1.1; letter-spacing: -.05em; }
+.access-card > p:not(.eyebrow) { color: #c3c8bf; font-size: 14px; line-height: 1.6; }
+.access-card label { display: block; margin: 32px 0 10px; font-size: 13px; }
+.access-card input { width: 100%; min-height: 50px; border: 1px solid #ffffff42; border-radius: 10px; padding: 12px 14px; color: var(--white); background: #ffffff0a; }
+.access-card .generate-button { width: 100%; margin-top: 14px; justify-content: center; }
+.access-card .access-status { min-height: 44px; margin: 14px 0 0; }
+.access-card .subtle-button { margin-top: 12px; }
 .icon-defs { position: absolute; width: 0; height: 0; overflow: hidden; }
 .window {
   position: relative;

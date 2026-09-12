@@ -6,6 +6,8 @@
 
 **想象重建，非历史影像。** HackCMU 2026 · Traveling。
 
+Vercel 四模式前端与认证后端的配置见 [Vercel 部署说明](docs/VERCEL_DEPLOYMENT.md)。模型密钥保留在 Python 后端，公网入口使用单独的应用访问码。
+
 ## 当前可运行版本
 
 已实现移动端四模式界面、FastAPI 图像流水线、多提供方照片编辑、精确年份与地点历史推理、天气变体、热点说明、地图档案、磁盘缓存、渐进瓦片、前后对比、手机转动跟随和离线照片回放；同时支持 Google Street View 360° 历史改图、Marble 三维世界、GPS／原生行走和沿路全景预加载。模式与合并行为见 [四模式说明](docs/FOUR_MODES.md)。

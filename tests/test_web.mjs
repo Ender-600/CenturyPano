@@ -262,7 +262,7 @@ test('unrecognized manual cities are explicitly excluded and history progress ex
 test('archive world map clusters pins and opens place trips for replay', async () => {
   assert.match(html, /id="archive-map"/);
   assert.match(html, /id="archive-leaflet"/);
-  assert.match(html, /vendor\/leaflet\/leaflet\.js/);
+  assert.match(readFileSync(new URL('../web/access.js', import.meta.url), 'utf8'), /vendor\/leaflet\/leaflet\.js/);
   const clicks = [];
   const marker = {
     on(event, callback) { if (event === 'click') this._click = callback; return this; },

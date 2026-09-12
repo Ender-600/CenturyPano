@@ -142,6 +142,106 @@ function app(options = {}) {
 
 function authorised(view) { view.state.token = TOKEN; view.state.config = { configured: true }; }
 
+test('gateway cookie session enables world controls without a bearer or stored access code', async () => {
+  const view = app({ location: { search: '?session=1' }, storage: { 'century.world.access': TOKEN }, fetch: (url) => {
+    if (url === '/app-session') return response({ authenticated: true });
+    if (url === `/world-plans/${PLAN}`) return response(plan());
+  } });
+  view.state.locationMode = 'test';
+  await view.initialiseAccess();
+  assert.equal(view.state.sessionAuthenticated, true);
+  assert.equal(view.state.token, '');
+  assert.equal(view.storage.has('century.world.access'), false);
+  assert.equal(view.elements.get('access-panel').hidden, true);
+  assert.equal(view.elements.get('geometry-test').disabled, false);
+  const loaded = await view.api(`/world-plans/${PLAN}`);
+  assert.equal(loaded.plan_id, PLAN);
+  assert.ok(view.requests.every((request) => request.credentials === 'same-origin' && !request.headers.has('Authorization')));
+  assert.equal(view.gpsCalls(), 0);
+});
+
+test('cookie session failure and expiration leave world APIs and generation locked', async () => {
+  for (const sessionReply of [response({ authenticated: false }, 401), response({ authenticated: 'true' }), response({}, 502)]) {
+    const view = app({ location: { search: '?session=1' }, fetch: (url) => url === '/app-session' ? sessionReply : undefined });
+    await view.initialiseAccess();
+    assert.equal(view.state.sessionAuthenticated, false);
+    assert.equal(view.elements.get('access-panel').hidden, false);
+    const count = view.requests.length;
+    await assert.rejects(view.api(`/world-plans/${PLAN}`), /access code/i);
+    assert.equal(view.requests.length, count);
+  }
+  const expired = app({ location: { search: '?session=1' }, fetch: (url) => url === '/app-session'
+    ? response({ authenticated: true }) : response({ detail: 'Access code required' }, 401) });
+  await expired.initialiseAccess();
+  await assert.rejects(expired.api(`/world-plans/${PLAN}`));
+  assert.equal(expired.state.sessionAuthenticated, false);
+  assert.equal(expired.elements.get('access-panel').hidden, false);
+  assert.equal(expired.elements.get('generate').disabled, true);
+});
+
+test('the world reconnect form renews gateway access through the cookie session endpoint', async () => {
+  const view = app({ location: { search: '?session=1' }, fetch: (url) => {
+    if (url === '/app-session') return response({ authenticated: true });
+  } });
+  view.bindEvents();
+  view.elements.get('access').value = TOKEN;
+  await view.elements.get('connect').emit('click');
+  assert.equal(view.state.sessionAuthenticated, true);
+  assert.equal(view.state.token, '');
+  assert.equal(view.storage.has('century.world.access'), false);
+  assert.equal(view.elements.get('access').value, '');
+  assert.equal(view.requests[0].url, '/app-session');
+  assert.equal(view.requests[0].method, 'POST');
+  assert.deepEqual(JSON.parse(view.requests[0].body), { access_code: TOKEN });
+  assert.equal(view.requests[0].headers.has('Authorization'), false);
+});
+
+test('world jobs continue polling with a cookie session and no token', async () => {
+  const view = app({ location: { search: '?session=1' }, fetch: (url) => {
+    if (url === `/world-jobs/${JOB}`) return response({ job_id: JOB, status: 'queued', stage: 'queued' });
+  } });
+  view.state.sessionAuthenticated = true;
+  view.state.job = { job_id: JOB, stage: 'queued' };
+  await view.pollJob(view.state.jobEpoch);
+  assert.equal(view.requests[0].url, `/world-jobs/${JOB}`);
+  assert.equal(view.requests[0].headers.has('Authorization'), false);
+  assert.equal(view.timers.get(view.state.pollTimer).milliseconds, 5000);
+});
+
+test('reconnecting an expired cookie loads service configuration that failed during boot', async () => {
+  let authenticated = false;
+  const view = app({ location: { search: '?session=1' }, fetch: (url, init) => {
+    if (url === '/app-session') {
+      if (init.method === 'POST') authenticated = true;
+      return response({ authenticated }, authenticated ? 200 : 401);
+    }
+    if (url === '/world-config') return response({ configured: true }, authenticated ? 200 : 401);
+  } });
+  await view.boot();
+  assert.equal(view.state.config, null);
+  assert.equal(view.state.sessionAuthenticated, false);
+  view.elements.get('access').value = TOKEN;
+  await view.elements.get('connect').emit('click');
+  assert.equal(view.state.sessionAuthenticated, true);
+  assert.equal(view.state.config.configured, true);
+  assert.equal(view.elements.get('access-panel').hidden, true);
+  assert.equal(view.requests.filter((request) => request.url === '/world-config').length, 2);
+});
+
+test('a standalone bearer login retries protected configuration without losing verified access', async () => {
+  const view = app({ storage: { 'century.world.access': TOKEN }, fetch: (url, init) => {
+    if (url === '/world-config') return response({ configured: true }, init.headers.get('Authorization') === `Bearer ${TOKEN}` ? 200 : 401);
+  } });
+  await view.boot();
+  assert.equal(view.state.token, TOKEN);
+  assert.equal(view.state.config.configured, true);
+  assert.equal(view.elements.get('access-panel').hidden, true);
+  const requests = view.requests.filter((request) => request.url === '/world-config');
+  assert.equal(requests.length, 2);
+  assert.equal(requests[0].headers.has('Authorization'), false);
+  assert.equal(requests[1].headers.get('Authorization'), `Bearer ${TOKEN}`);
+});
+
 test('remote fragment access is removed from URL and sent only in protected headers', async () => {
   const view = app({ location: { hash: `#access=${TOKEN}` } });
   await view.initialiseAccess();
