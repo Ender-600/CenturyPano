@@ -189,6 +189,9 @@ svg {
 }
 .gesture-hint > span { font-size: 17px; }
 .gesture-hint.dismissed { opacity: 0; }
+.motion-button { pointer-events: auto; min-height: 44px; border-color: #ffffff55; background: #18333399; cursor: pointer; }
+.motion-button > span { font-size: inherit; }
+.motion-button svg { width: 19px; height: 19px; }
 .journey-controls {
   position: absolute;
   z-index: 5;

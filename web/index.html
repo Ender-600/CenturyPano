@@ -8,6 +8,7 @@
   <title>CENTURY PANO · 时间视窗</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%2332372f'/%3E%3Cpath d='M7 13V7h6m6 0h6v6M7 19v6h6m6 0h6v-6' stroke='white' stroke-width='1.5' fill='none'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="/style.css">
+  <script src="/motion.js" defer></script>
   <script src="/app.js" defer></script>
 </head>
 <body data-screen="capture">
@@ -70,6 +71,7 @@
     </header>
 
     <div class="gesture-hint chrome" id="gesture-hint"><span aria-hidden="true">↔</span> 左右滑动，探索此地</div>
+    <button class="gesture-hint motion-button chrome" id="motion-button" hidden><svg aria-hidden="true"><use href="#i-gyro"/></svg><span id="motion-label">点按开启转动视窗</span></button>
 
     <section class="journey-controls chrome" id="journey-controls" aria-label="年代与视窗控制">
       <div class="time-caption">
@@ -128,10 +130,14 @@
       <div id="metrics-panel" class="metrics-panel" hidden></div>
     </section>
 
-    <section id="result-actions" class="sheet-section result-actions" hidden aria-label="全景工具">
-      <div class="result-toolbar"><button class="button button-small" id="gyro-button" aria-pressed="false"><svg><use href="#i-gyro"/></svg>开启转动跟随</button><button class="icon-button audio-button" id="audio-button" aria-label="播放年代氛围音" title="播放年代氛围音"><svg><use href="#i-sound"/></svg></button></div>
+    <section class="sheet-section" aria-label="手机转动视窗">
+      <button class="button button-small" id="gyro-button" aria-pressed="false"><svg><use href="#i-gyro"/></svg>开启转动跟随</button>
       <button class="text-button recenter-button" id="recenter-button" hidden>以当前朝向为中心</button>
       <p id="gyro-hint" class="gyro-hint" hidden></p>
+    </section>
+
+    <section id="result-actions" class="sheet-section result-actions" hidden aria-label="全景工具">
+      <button class="button audio-button" id="audio-button" aria-label="播放年代氛围音" title="播放年代氛围音"><svg><use href="#i-sound"/></svg>播放年代氛围音</button>
       <a class="button button-small download-button" id="download-button" hidden download="century-pano.jpg"><svg><use href="#i-image"/></svg>保存全景</a>
       <button class="text-button return-button" id="new-journey-button">开启新的旅程 <span>↗</span></button>
     </section>

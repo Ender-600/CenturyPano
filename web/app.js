@@ -4,6 +4,7 @@
   const $ = (id) => document.getElementById(id);
   const screens = ['capture', 'preview', 'result'];
   const years = { '1900s': 1905, '1920s': 1925, '1950s': 1955, '1970s': 1975 };
+  const motionDevice = matchMedia('(pointer: coarse)').matches || navigator.maxTouchPoints > 0;
   const state = {
     screen: 'capture', file: null, fileURL: null, decade: '1920s',
     imageWidth: 0, imageHeight: 0, location: null, locationSource: null,
@@ -11,7 +12,8 @@
     manifest: null, jobId: null, generation: 0, pollTimer: null,
     geometryKey: null, originalImage: null, loadedTiles: new Set(),
     finalLoaded: false, revealed: false, pastPercent: 0, health: null,
-    gyro: false, alpha0: null, gyroBase: 0, gyroTarget: 0, gyroSeen: false,
+    gyro: false, gyroTarget: 0, gyroSeen: false,
+    gyroPending: false, gyroRequest: 0, gyroHeading: null, gyroSignal: false,
     drag: null, audioContext: null, audioBuffers: new Map(), sound: true,
     loadingFile: 0, offlineSaved: false, revealing: false,
     viewMode: 'past', clean: false, submitting: false, loadingSource: false,
@@ -30,12 +32,13 @@
     state.screen = screen;
     screens.forEach((name) => { $(name + '-screen').hidden = name !== screen; });
     document.body.dataset.screen = screen;
+    resetMotionOrigin();
     syncChrome();
     window.scrollTo({ top: 0, behavior: 'instant' });
     requestAnimationFrame(resizeViewport);
   }
   function stopJourney() {
-    state.generation++; clearTimeout(state.pollTimer); disableGyro();
+    state.generation++; clearTimeout(state.pollTimer); resetMotionOrigin();
     state.loadingFile++;
     state.loadingSource = false;
     if (state.drag) {
@@ -54,7 +57,7 @@
     if (location.search) history.replaceState(null, '', location.pathname);
   }
 
-  function closeOptions() { if ($('options-dialog').open) $('options-dialog').close(); }
+  function closeOptions() { if ($('options-dialog').open) { $('options-dialog').close(); resetMotionOrigin(); } }
   function setClean(enabled, focus = true) {
     state.clean = enabled;
     document.body.classList.toggle('clean', enabled);
@@ -199,7 +202,7 @@
       text('location-note', '正在查找城市… 也可以直接手动填写。');
       showScreen('preview');
       if (location.search) history.replaceState(null, '', location.pathname);
-      requestAnimationFrame(() => { resizeViewport(); state.offset = Math.max(0, (state.renderWidth - $('preview-window').clientWidth) / 2); render(); });
+      requestAnimationFrame(() => { resizeViewport(); state.offset = Math.max(0, (state.renderWidth - $('preview-window').clientWidth) / 2); resetMotionOrigin(); render(); });
       if (narrow) showToast('已打开原图。横向全景会带来更开阔的视野。');
       locate(file, request);
     } catch (error) {
@@ -243,7 +246,7 @@
       text('location-note', '沿用这个旅程的城市。可以修改或留空。');
       showScreen('preview');
       history.replaceState(null, '', location.pathname);
-      requestAnimationFrame(() => { resizeViewport(); state.offset = constrainOffset(heading * state.renderWidth - $('preview-window').clientWidth / 2); render(); });
+      requestAnimationFrame(() => { resizeViewport(); state.offset = constrainOffset(heading * state.renderWidth - $('preview-window').clientWidth / 2); resetMotionOrigin(); render(); });
       showToast(recovered ? '已打开存档工作图。点击生成，开始新的年代。' : '已保留你的原图。点击生成，开始新的年代。');
     } catch (error) {
       if (newURL && newURL !== state.fileURL) URL.revokeObjectURL(newURL);
@@ -343,9 +346,7 @@
     const scale = Math.max(viewport.clientHeight / height, viewport.clientWidth / width) * (hero ? 1.08 : 1);
     state.renderWidth = width * scale; state.renderHeight = height * scale;
     state.offset = constrainOffset(fraction * state.renderWidth - viewport.clientWidth / 2);
-    if (state.gyro && oldWidth !== state.renderWidth) {
-      state.alpha0 = null; state.gyroBase = state.offset; state.gyroTarget = state.offset;
-    }
+    if (state.gyro) resetMotionOrigin();
     if (hero) {
       $('hero-image').style.width = state.renderWidth + 'px'; $('hero-image').style.height = state.renderHeight + 'px';
     } else if (state.screen === 'preview') {
@@ -373,7 +374,7 @@
     }
   }
   function frame() {
-    if (state.gyro && state.screen === 'result' && !state.drag && !state.revealing) {
+    if (state.gyro && !state.drag && !state.revealing && !document.hidden && !$('options-dialog').open && !$('replay-dialog').open) {
       if (state.wrap) {
         let delta = state.gyroTarget - state.offset;
         delta = ((delta + state.renderWidth * 1.5) % state.renderWidth) - state.renderWidth / 2;
@@ -415,7 +416,7 @@
     });
     const endDrag = (event) => {
       if (!state.drag || state.drag.pointerId !== event.pointerId) return;
-      if (state.gyro && !state.drag.slider) { state.alpha0 = null; state.gyroBase = state.offset; state.gyroTarget = state.offset; }
+      if (state.gyro) resetMotionOrigin();
       state.drag = null; viewport.classList.remove('dragging');
       if (viewport.hasPointerCapture(event.pointerId)) viewport.releasePointerCapture(event.pointerId);
     };
@@ -435,7 +436,7 @@
       event.preventDefault();
       const delta = viewport.clientWidth * (event.shiftKey ? 0.5 : 0.1);
       state.offset = constrainOffset(event.key === 'Home' ? 0 : event.key === 'End' ? state.renderWidth : state.offset + (event.key === 'ArrowLeft' ? -delta : delta));
-      if (state.gyro) { state.alpha0 = null; state.gyroBase = state.offset; state.gyroTarget = state.offset; }
+      if (state.gyro) resetMotionOrigin();
       render();
     });
   }
@@ -580,6 +581,7 @@
     }
     resizeViewport();
     state.offset = constrainOffset(state.initialHeading * state.renderWidth - $('pano-viewport').clientWidth / 2);
+    resetMotionOrigin();
     state.gyroTarget = state.offset; render(); return true;
   }
   function placeName(place) { return typeof place === 'string' ? place : place?.name || '未知城市'; }
@@ -714,7 +716,7 @@
     if (generation !== state.generation) return;
     document.body.classList.remove('revealing'); state.revealing = false;
     resizeViewport(); state.offset = constrainOffset(center * state.renderWidth - $('pano-viewport').clientWidth / 2);
-    state.gyroBase = state.offset; state.gyroTarget = state.offset; state.alpha0 = null;
+    resetMotionOrigin();
     if (viewRevision === state.viewRevision) setPastPercent(100);
     syncChrome();
   }
@@ -736,44 +738,94 @@
     $('metrics-toggle').lastElementChild.textContent = open ? '−' : '+';
   });
 
-  function gyroFallback(message = '请在 Safari / Chrome 中打开以启用转动跟随。现在可以左右拖动探索。') {
-    disableGyro(); $('gyro-hint').hidden = false; text('gyro-hint', message);
+  function resetMotionOrigin() {
+    state.gyroHeading = null; state.gyroTarget = state.offset;
+  }
+  function motionPrompt(label, message = '') {
+    clearTimeout(enableGyro.hideTimer);
+    text('motion-label', label); $('motion-button').hidden = !motionDevice;
+    $('gyro-hint').hidden = !message; text('gyro-hint', message);
+    if (motionDevice) $('gesture-hint').hidden = true;
   }
   function disableGyro() {
-    state.gyro = false; state.alpha0 = null;
-    window.removeEventListener('deviceorientation', onOrientation); clearTimeout(disableGyro.timer);
+    state.gyroRequest++; state.gyroPending = false; state.gyro = false; state.gyroSeen = false;
+    resetMotionOrigin();
+    window.removeEventListener('deviceorientation', onOrientation);
+    clearTimeout(enableGyro.timer); clearTimeout(enableGyro.hideTimer);
     $('gyro-button').innerHTML = '<svg><use href="#i-gyro"/></svg>开启转动跟随';
+    $('gyro-button').disabled = false; $('motion-button').disabled = false;
     $('gyro-button').setAttribute('aria-pressed', 'false'); $('recenter-button').hidden = true;
+    $('motion-button').hidden = true;
+  }
+  function gyroFallback(message) {
+    disableGyro();
+    motionPrompt('点按重试转动跟随', message);
+    showToast(message, 7000);
   }
   function onOrientation(event) {
     if (!state.gyro) return;
-    if (event.alpha == null) { gyroFallback(); return; }
-    state.gyroSeen = true;
-    if (state.alpha0 === null) { state.alpha0 = event.alpha; state.gyroBase = state.offset; }
-    const delta = ((event.alpha - state.alpha0 + 540) % 360) - 180;
-    state.gyroTarget = state.gyroBase - delta * state.renderWidth / (state.wrap ? 360 : 120);
+    if (Number.isFinite(event.alpha)) state.gyroSignal = true;
+    const heading = CenturyMotion.headingFromOrientation(event);
+    // Some phones initially emit null readings, or point their camera straight up.
+    if (heading === null) { resetMotionOrigin(); return; }
+    if (!state.gyroSeen) {
+      state.gyroSeen = true; clearTimeout(enableGyro.timer);
+      $('gyro-button').innerHTML = '<svg><use href="#i-check"/></svg>转动跟随已开启';
+      motionPrompt('已开启 · 转动手机探索');
+      enableGyro.hideTimer = setTimeout(() => { $('motion-button').hidden = true; }, 2800);
+    }
+    if (state.drag || state.revealing || document.hidden || $('options-dialog').open || $('replay-dialog').open) {
+      resetMotionOrigin(); return;
+    }
+    if (state.gyroHeading === null) { state.gyroHeading = heading; state.gyroTarget = state.offset; return; }
+    const delta = CenturyMotion.shortestDelta(heading, state.gyroHeading);
+    state.gyroHeading = heading;
+    // Integrating short steps preserves a full turn without a jump at +/-180°.
+    state.gyroTarget = constrainOffset(state.gyroTarget + delta * state.renderWidth / (state.wrap ? 360 : 120));
   }
-  $('gyro-button').addEventListener('click', async () => {
-    if (state.gyro) { disableGyro(); return; }
-    const generation = state.generation;
+  async function enableGyro() {
+    if (state.gyroPending) return;
+    const request = ++state.gyroRequest;
     try {
-      if (!window.DeviceOrientationEvent) { gyroFallback(); return; }
+      if (!window.isSecureContext) { gyroFallback('转动跟随需要 HTTPS，请使用手机预览链接打开。'); return; }
+      if (!window.DeviceOrientationEvent) { gyroFallback('浏览器未提供方向传感器，请在手机 Safari 或 Chrome 中打开。'); return; }
+      state.gyroPending = true;
+      $('gyro-button').disabled = true; $('motion-button').disabled = true;
+      // Keep the permission call inside the original tap's user activation on iOS.
       if (typeof window.DeviceOrientationEvent.requestPermission === 'function') {
         const permission = await window.DeviceOrientationEvent.requestPermission();
-        if (permission !== 'granted') { gyroFallback(); return; }
+        if (request !== state.gyroRequest) return;
+        if (permission !== 'granted') { gyroFallback('未获得转动权限。请在浏览器的网站设置中允许运动与方向访问，再重试。'); return; }
       }
-      if (generation !== state.generation || state.screen !== 'result') return;
-      state.gyro = true; state.alpha0 = null; state.gyroSeen = false; state.gyroBase = state.offset; state.gyroTarget = state.offset;
+      if (request !== state.gyroRequest) return;
+      state.gyro = true; state.gyroSeen = false; state.gyroSignal = false; resetMotionOrigin();
       window.addEventListener('deviceorientation', onOrientation);
-      $('gyro-button').innerHTML = '<svg><use href="#i-check"/></svg>转动跟随已开启';
-      $('gyro-button').setAttribute('aria-pressed', 'true'); $('recenter-button').hidden = false; $('gyro-hint').hidden = true;
-      disableGyro.timer = setTimeout(() => { if (state.gyro && !state.gyroSeen) gyroFallback(); }, 2200);
-    } catch { gyroFallback(); }
+      $('gyro-button').innerHTML = '<svg><use href="#i-gyro"/></svg>暂停转动跟随';
+      $('gyro-button').setAttribute('aria-pressed', 'true'); $('recenter-button').hidden = false;
+      motionPrompt('请竖起手机，轻轻左右转动');
+      clearTimeout(enableGyro.timer);
+      enableGyro.timer = setTimeout(() => {
+        if (state.gyro && !state.gyroSeen) {
+          motionPrompt(state.gyroSignal ? '请竖起手机，向前看' : '未收到方向 · 点按重试', state.gyroSignal ?
+            '将手机竖起，让后置摄像头朝向前方，再左右转动。' : '请检查浏览器的运动与方向权限；也可以继续拖动。');
+        }
+      }, 6000);
+    } catch { if (request === state.gyroRequest) gyroFallback('无法开启转动跟随，请在手机 Safari 或 Chrome 中允许方向访问后重试。'); }
+    finally {
+      if (request === state.gyroRequest) {
+        state.gyroPending = false; $('gyro-button').disabled = false; $('motion-button').disabled = false;
+      }
+    }
+  }
+  $('motion-button').addEventListener('click', () => { if (!state.gyroSeen) enableGyro(); else $('motion-button').hidden = true; });
+  $('gyro-button').addEventListener('click', () => {
+    if (state.gyro) { disableGyro(); return; }
+    closeOptions(); enableGyro();
   });
-  $('recenter-button').addEventListener('click', () => {
-    state.alpha0 = null; state.gyroBase = state.offset; state.gyroTarget = state.offset;
-    showToast('已将当前视角设为中心。', 2200);
-  });
+  $('recenter-button').addEventListener('click', () => { resetMotionOrigin(); showToast('已将当前视角设为中心。', 2200); });
+  document.addEventListener('visibilitychange', resetMotionOrigin);
+  window.addEventListener('orientationchange', resetMotionOrigin);
+  window.screen?.orientation?.addEventListener('change', resetMotionOrigin);
 
   function storedJourneys(key) {
     try {
@@ -859,6 +911,10 @@
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => { /* HTTPS or localhost is needed for offline mode. */ });
   checkHealth();
   showScreen('capture');
+  if (motionDevice) {
+    if (window.isSecureContext && window.DeviceOrientationEvent && typeof window.DeviceOrientationEvent.requestPermission !== 'function') enableGyro();
+    else motionPrompt('点按开启转动视窗');
+  }
   setTimeout(() => { $('gesture-hint').hidden = true; }, 5000);
   const replayId = new URLSearchParams(location.search).get('replay');
   if (replayId && /^[a-zA-Z0-9_-]{1,100}$/.test(replayId)) startJob(replayId, true);
