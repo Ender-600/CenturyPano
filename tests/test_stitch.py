@@ -23,18 +23,29 @@ def test_fuse_overlaps_makes_shared_strip_identical():
     left_strip = np.asarray(fused[0])[:, -200:]
     right_strip = np.asarray(fused[1])[:, :200]
     assert np.array_equal(left_strip, right_strip)
-    # Full-overlap feather: left edge stays near left, right edge near warped right.
+    # Auto mode selects the short tail for this structural disagreement.
     assert np.allclose(left_strip[:, :20], np.asarray(left)[:, -200:-180], atol=8)
 
 
-def test_fuse_default_feather_avoids_hard_paste_collage():
+def test_fuse_default_short_fade_preserves_structural_disagreement():
     left = np.zeros((TILE, TILE, 3), dtype=np.uint8)
     right = np.zeros((TILE, TILE, 3), dtype=np.uint8)
     left[:, -200:] = (0, 255, 0)
     right[:, :200] = (255, 0, 0)
     fused = fuse_overlaps([Image.fromarray(left), Image.fromarray(right)], [0, 824])
     mid = np.asarray(fused[0])[:, -100]
-    # Mid-overlap should blend — not a pure green hard paste of the left tile.
+    # The default must not average a disagreement across the whole overlap.
+    assert mid[:, 1].mean() > 200
+    assert mid[:, 0].mean() < 30
+
+
+def test_fuse_explicit_wide_feather_remains_available():
+    left = np.zeros((TILE, TILE, 3), dtype=np.uint8)
+    right = np.zeros((TILE, TILE, 3), dtype=np.uint8)
+    left[:, -200:] = (0, 255, 0)
+    right[:, :200] = (255, 0, 0)
+    fused = fuse_overlaps([Image.fromarray(left), Image.fromarray(right)], [0, 824], fade_px=200)
+    mid = np.asarray(fused[0])[:, -100]
     assert 40 < mid[:, 1].mean() < 220
     assert 40 < mid[:, 0].mean() < 220
 
