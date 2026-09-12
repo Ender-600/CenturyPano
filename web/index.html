@@ -30,6 +30,9 @@
     <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/></symbol>
     <symbol id="i-archive" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="4" rx="1"/><path d="M5 8v12h14V8M9 12h6"/></symbol>
     <symbol id="i-play" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="m10 8 6 4-6 4Z"/></symbol>
+    <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2.5M12 19.5V22M2 12h2.5M19.5 12H22M4.9 4.9l1.8 1.8M17.3 17.3l1.8 1.8M19.1 4.9l-1.8 1.8M6.7 17.3l-1.8 1.8"/></symbol>
+    <symbol id="i-rain" viewBox="0 0 24 24"><path d="M8 15a5 5 0 1 1 1.5-9.8A6 6 0 0 1 20 10a4 4 0 0 1-.5 8H8"/><path d="m9 18-1.2 2.2M12.5 18l-1.2 2.2M16 18l-1.2 2.2"/></symbol>
+    <symbol id="i-snow" viewBox="0 0 24 24"><path d="M12 3v18M5.6 6.6l12.8 12.8M18.4 6.6 5.6 19.4"/><path d="m9.5 4.8 2.5 1.4 2.5-1.4M9.5 19.2l2.5-1.4 2.5 1.4M4.2 10.2l1.8 2.3-1.8 2.3M19.8 10.2l-1.8 2.3 1.8 2.3"/></symbol>
   </defs></svg>
 
   <main id="main" class="window" aria-label="Panoramic window onto time">
@@ -47,7 +50,7 @@
     <section id="result-screen" class="screen result-screen" hidden aria-label="Explore the reconstructed panorama">
       <div class="pano-viewport" id="pano-viewport" tabindex="0" aria-label="Panorama comparison. Drag or use the arrow keys to pan.">
         <div class="pano-layer original-layer" id="original-layer" aria-hidden="true"><canvas id="original-canvas"></canvas></div>
-        <div class="past-clip" id="past-clip" aria-hidden="true"><div class="pano-layer past-layer" id="past-layer"><canvas id="past-canvas"></canvas></div></div>
+        <div class="past-clip" id="past-clip" aria-hidden="true"><div class="pano-layer past-layer" id="past-layer"><canvas id="past-canvas"></canvas><div class="hotspot-layer" id="hotspot-layer" hidden></div></div></div>
         <div class="viewport-label present-label chrome" hidden>TODAY <span>ORIGINAL</span></div>
         <div class="viewport-label past-label chrome" id="past-label" hidden>1920s <span>REIMAGINED</span></div>
         <div class="slider-handle" id="slider-handle" role="slider" tabindex="0" aria-label="How much of the past to reveal" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" hidden><span class="slider-grip">‹<i></i>›</span></div>
@@ -57,6 +60,13 @@
           <span id="generation-detail">Reading your panorama…</span>
         </div>
         <div class="reveal-title" id="reveal-title" aria-hidden="true"><span>WELCOME TO</span><strong id="reveal-year">1925</strong></div>
+        <aside class="hotspot-card chrome" id="hotspot-card" hidden>
+          <button type="button" class="hotspot-card-close" id="hotspot-card-close" aria-label="Close explanation">×</button>
+          <p class="hotspot-card-kicker" id="hotspot-card-kicker">This place</p>
+          <h3 id="hotspot-card-title">Looking closer</h3>
+          <p id="hotspot-card-body">Tap a highlighted region to ask what it likely was.</p>
+          <p class="hotspot-card-note" id="hotspot-card-note" hidden></p>
+        </aside>
       </div>
       <div class="progress-strip chrome" id="progress-strip" role="status">
         <div class="progress-track"><span id="progress-fill"></span></div>
@@ -87,6 +97,14 @@
         <button data-year="1970" aria-pressed="false">1970<span class="era-dot" aria-hidden="true"></span></button>
         <button id="present-button" aria-pressed="false">Today<span class="era-dot" aria-hidden="true"></span></button>
       </div>
+      <div class="weather-switch chrome" id="weather-options" role="group" aria-label="Weather" hidden></div>
+      <label class="weather-opt-in chrome" id="weather-opt-in" hidden>
+        <input id="weather-enabled" type="checkbox">
+        <span class="weather-opt-in-icons" aria-hidden="true">
+          <svg><use href="#i-sun"/></svg><svg><use href="#i-rain"/></svg><svg><use href="#i-snow"/></svg>
+        </span>
+        <span>Also generate Clear, Rain and Snow</span>
+      </label>
       <button class="generate-button" id="generate-button" hidden>Step into 1925<svg><use href="#i-arrow"/></svg></button>
       <div class="action-row">
         <button class="subtle-button" id="album-button"><svg><use href="#i-image"/></svg><span>Another panorama</span></button>
@@ -126,7 +144,7 @@
       <p id="location-note" class="field-note">The photo's location guides the local history. You can also type the city yourself.</p>
       <p class="field-note">A city you type wins over the photo's GPS, and your current location may not be where the photo was taken. Whatever coordinates and city are available are used to reason about the history.</p>
       <label class="check-label"><input id="is-360" type="checkbox">This is a 360° equirectangular panorama</label>
-      <p class="field-note scene-hint">Outdoor street scenes work best. Indoors, only furnishings and materials change, so the difference is smaller.</p>
+      <p class="field-note">Outdoor street scenes work best. Indoors, only furnishings and materials change, so the difference is smaller.</p>
       <p id="image-warning" class="warning-note" hidden></p>
       <button class="text-button return-button" id="retake-button">Choose another photo <span>↗</span></button>
     </section>

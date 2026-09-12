@@ -124,6 +124,7 @@ class EditorPool:
         self, primary: str | ImageEditor | None = None,
         fallback: str | ImageEditor | None = None, *, max_attempts: int = 3,
         backoff: tuple[float, ...] = (1.0, 2.0, 4.0),
+        max_concurrency: int | None = None,
     ) -> None:
         from app.config import settings
 
@@ -142,13 +143,17 @@ class EditorPool:
         self.primary_open = False
         self._primary_failures = 0
         self._limited_providers: set[str] = set()
-        self._limit = max(1, settings.max_concurrency)
+        limit = settings.max_concurrency if max_concurrency is None else max_concurrency
+        self._limit = max(1, int(limit))
         self._active = 0
         self._gate = asyncio.Condition()
 
     @property
     def max_concurrency(self) -> int:
         return self._limit
+
+    def set_max_concurrency(self, limit: int) -> None:
+        self._limit = max(1, int(limit))
 
     async def _invoke(self, editor: ImageEditor, image: bytes, prompt: str, **kwargs) -> bytes:
         async with self._gate:

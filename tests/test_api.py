@@ -104,6 +104,8 @@ def test_exact_year_rejects_invalid_values(client, value):
 def test_health_and_legacy_manifest_years(client):
     health = client.get('/health').json()
     assert (health['min_year'], health['max_year'], health['default_year']) == (MIN_YEAR, MAX_YEAR, DEFAULT_YEAR)
+    assert 'weather_enabled' in health
+    assert health['weather_ids'] == ['clear', 'rain', 'snow']
     assert resolve_year('1920s') == 1925
     assert resolve_year('1945') == 1945
     assert manifest_year({'target_year': 1945, 'anchor_year': 1955, 'decade': '1970s'}) == 1945
@@ -135,3 +137,30 @@ def test_atomic_manifest_concurrent_updates(client):
     with ThreadPoolExecutor(max_workers=8) as workers:
         list(workers.map(increment, range(80)))
     assert read_manifest('atomic-test')['count'] == 80
+
+
+def test_create_job_accepts_weather_enabled(client, monkeypatch):
+    monkeypatch.setattr(settings, 'weather_enabled', False)
+
+    async def noop(_job_id):
+        return None
+
+    monkeypatch.setattr(main, '_run', noop)
+    response = client.post(
+        '/jobs',
+        files={'image': ('pano.jpg', panorama(), 'image/jpeg')},
+        data={'target_year': '1925', 'weather_enabled': 'true', 'weathers': 'clear,rain'},
+    )
+    assert response.status_code == 201
+    job_id = response.json()['job_id']
+    manifest = read_manifest(job_id)
+    assert manifest['weather']['enabled'] is True
+    assert manifest['weather']['ids'] == ['clear', 'rain']
+    assert manifest['weather']['active'] == 'clear'
+
+    bad = client.post(
+        '/jobs',
+        files={'image': ('pano.jpg', panorama(), 'image/jpeg')},
+        data={'target_year': '1925', 'weather_enabled': 'true', 'weathers': 'fog'},
+    )
+    assert bad.status_code == 422
