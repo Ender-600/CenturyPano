@@ -1,28 +1,15 @@
-"""Seam-aware compositing: carve the cut where tiles agree, feather where they don't.
+"""Seam-aware compositing: align overlaps, then carve or feather the cut.
 
 Each tile is generated independently, so neighbours disagree inside their shared
-overlap in two different ways, and the two need opposite treatments.
+overlap. Continuity is enforced in two stages:
 
-A *tonal* disagreement — one tile a little brighter or cooler than the next — is
-spread out: a wide cosine feather turns the step into a gradient nobody can see.
-That is what this module used to do for every seam, and for tonal differences it
-is still the right answer.
+1. `fuse_overlaps` registers neighbours (translation + edge-guided optical flow)
+   and writes one shared, full-overlap feather strip so thin structures track
+   without hard-pasting one tile's appearance onto the other.
+2. `seam_plan` / `stitch` then choose a minimum-cost cut when residual structural
+   disagreement remains, or a wide cosine feather when the leftover is only tonal.
 
-A *structural* disagreement — the two tiles drew a different lamp post, a
-different bench, a different clock face in the same strip — is the opposite. A
-wide feather averages two different objects and produces a ghosted double
-exposure, the single most visible defect in the panorama. The fix is the one
-panorama stitchers use for parallax: find the vertical path through the overlap
-along which the two tiles agree most (a minimum-cost cut, by dynamic
-programming), take the left tile on one side of it and the right tile on the
-other, and feather only a dozen pixels around the cut. The mismatch is not
-averaged away, it is routed around.
-
-Which of the two a seam needs is measured, not assumed: the cut is used only
-when it is materially cheaper than the centre line. On flat or purely tonal
-overlaps the cut saves nothing, the seam falls back to the wide feather, and the
-plan records why — so the manifest can show, per seam, what was done and what it
-bought.
+Failed tiles stay as the original photograph and are left out of fusion.
 """
 from __future__ import annotations
 
@@ -71,25 +58,88 @@ def feather_weights(index: int, x: list[int], tile_w: int = TILE) -> np.ndarray:
     return weights
 
 
-def overlap_cost(left: Image.Image | np.ndarray, right: Image.Image | np.ndarray, overlap: int) -> np.ndarray:
-    """Per-pixel Lab ΔE between the two tiles inside their shared strip.
+def fuse_overlaps(
+    tiles: list[Image.Image],
+    x: list[int],
+    *,
+    fade_px: int | None = None,
+    fixed: frozenset[int] | None = None,
+) -> list[Image.Image]:
+    """Align neighbours in every overlap, then share one smooth strip.
 
-    The strips are sliced before conversion, not after: only ~17% of each tile
-    lies in the overlap, and converting the whole tile to throw most of it away
-    was the bulk of this pass's memory traffic.
+    1. Translate the whole right tile when the shift improves edge agreement
+       (incl. a gated 1D height lock).
+    2. Dense-warp the right strip onto the left strip (railings / wires follow).
+    3. Cosine-blend left → warped-right across the full overlap and write that
+       strip into both tiles so the exit into the right body stays continuous —
+       avoid hard-pasting the left tile, which reads as a collage.
+
+    Tiles listed in `fixed` (typically failed originals) are left untouched and
+    do not overwrite their neighbours.
     """
+    from .alignment import (
+        MAX_SHIFT_PX,
+        MIN_SHIFT_PX,
+        apply_shift,
+        edge_agreement,
+        estimate_shift,
+        warp_to_reference,
+    )
+
+    if len(tiles) != len(x):
+        raise ValueError("A tile is required for every planned position")
+    skip = fixed or frozenset()
+    arrays = [np.asarray(tile.convert("RGB"), dtype=np.float32).copy() for tile in tiles]
+    for index in range(len(tiles) - 1):
+        if index in skip or (index + 1) in skip:
+            continue
+        overlap = int(x[index] + TILE - x[index + 1])
+        if overlap <= 0:
+            continue
+        left_img = Image.fromarray(np.round(np.clip(arrays[index][:, -overlap:], 0, 255)).astype(np.uint8))
+        right_img = Image.fromarray(np.round(np.clip(arrays[index + 1][:, :overlap], 0, 255)).astype(np.uint8))
+        before = edge_agreement(left_img, right_img)
+        for _ in range(2):
+            dx, dy = estimate_shift(left_img, right_img)
+            if not (MIN_SHIFT_PX <= float(np.hypot(dx, dy)) <= MAX_SHIFT_PX):
+                break
+            right_tile = Image.fromarray(np.round(np.clip(arrays[index + 1], 0, 255)).astype(np.uint8))
+            shifted = apply_shift(right_tile, dx, dy)
+            shifted_strip = Image.fromarray(np.asarray(shifted)[:, :overlap])
+            after = edge_agreement(left_img, shifted_strip)
+            if after < before + 0.01:
+                break
+            arrays[index + 1] = np.asarray(shifted, dtype=np.float32)
+            right_img = shifted_strip
+            before = after
+        warped_right = warp_to_reference(left_img, right_img, max_flow=12.0, scale=0.5)
+        left = arrays[index][:, -overlap:]
+        right = np.asarray(warped_right, dtype=np.float32)
+        # Full-overlap feather: left-weighted at the left edge, right-weighted where
+        # the strip meets the right tile body — natural continuity without a paste cut.
+        span = overlap if fade_px is None else max(8, min(int(fade_px), overlap))
+        if span >= overlap:
+            ramp = (.5 - .5 * np.cos(np.pi * np.linspace(0.0, 1.0, overlap, dtype=np.float32)))[None, :, None]
+            strip = left * (1.0 - ramp) + right * ramp
+        else:
+            # Legacy short-tail path used by older tests that pass an explicit fade_px.
+            strip = left.copy()
+            ramp = (.5 - .5 * np.cos(np.pi * np.linspace(0.0, 1.0, span, dtype=np.float32)))[None, :, None]
+            strip[:, -span:] = left[:, -span:] * (1.0 - ramp) + right[:, -span:] * ramp
+        arrays[index][:, -overlap:] = strip
+        arrays[index + 1][:, :overlap] = strip
+    return [Image.fromarray(np.round(np.clip(array, 0, 255)).astype(np.uint8)) for array in arrays]
+
+
+def overlap_cost(left: Image.Image | np.ndarray, right: Image.Image | np.ndarray, overlap: int) -> np.ndarray:
+    """Per-pixel Lab ΔE between the two tiles inside their shared strip."""
     a = rgb_to_lab(np.asarray(left.convert("RGB") if isinstance(left, Image.Image) else left)[:, -overlap:])
     b = rgb_to_lab(np.asarray(right.convert("RGB") if isinstance(right, Image.Image) else right)[:, :overlap])
     return delta_e(a, b)
 
 
 def min_cut(cost: np.ndarray) -> np.ndarray:
-    """Cheapest top-to-bottom path, moving at most one column per row.
-
-    Standard seam-carving dynamic program: `acc[y, c]` is the cheapest cost of
-    reaching column `c` on row `y`, and `back` remembers which of the three
-    predecessors was taken so the path can be walked back from the bottom.
-    """
+    """Cheapest top-to-bottom path, moving at most one column per row."""
     rows, columns = cost.shape
     acc = cost.astype(np.float64, copy=True)
     back = np.zeros((rows, columns), dtype=np.int8)
@@ -122,8 +172,6 @@ def seam_plan(tiles: list[Image.Image | np.ndarray], x: list[int]) -> list[Seam]
         centre = float(cost[:, overlap // 2].mean())
         cut = min_cut(cost)
         cut_de = float(cost[np.arange(cost.shape[0]), cut].mean())
-        # A cut that is no cheaper than the centre line means the disagreement is
-        # tonal, not structural; a hard cut would then be more visible than a ramp.
         carved = centre > 1e-6 and cut_de <= centre * CARVE_GAIN_MIN
         plan.append(Seam(index, overlap, centre, cut_de, carved, cut if carved else None))
     return plan
@@ -152,8 +200,6 @@ def stitch(tiles: list[Image.Image | np.ndarray | None], x: list[int], overlap: 
         plan = seam_plan(resolved, x)
     carved = {seam.index: seam.cut for seam in plan if seam.carved and seam.cut is not None}
 
-    # Composite left to right: every tile blends against whatever already covers
-    # its left overlap, so a carved seam and a feathered seam can coexist.
     canvas = np.zeros((H, width, 3), dtype=np.float32)
     covered = np.zeros(width, dtype=bool)
     canvas[:, x[0]:x[0] + TILE] = resolved[0]
@@ -180,8 +226,6 @@ def stitch(tiles: list[Image.Image | np.ndarray | None], x: list[int], overlap: 
         raise ValueError("The tile plan left uncovered pixels")
     result = canvas
     if wrap:
-        # The right extension and original left edge represent the same pixels.
-        # Fold them together before cropping to avoid a hard wrap seam.
         extra = width - W
         if extra > 0:
             ramp = (.5 - .5 * np.cos(np.pi * np.linspace(0, 1, extra)))[None, :, None]

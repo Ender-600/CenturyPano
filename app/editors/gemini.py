@@ -24,6 +24,7 @@ class GeminiEditor:
         self, image: bytes, prompt: str, *, reference: bytes | None = None,
         strength: float | None = None, seed: int | None = None,
         negative: str | None = None, timeout_s: float = 60.0,
+        structure_lock: bool | None = None,
     ) -> bytes:
         # `strength` and `seed` are part of the shared editor interface and are used
         # by other providers. generateContent exposes neither, so fidelity to the
@@ -31,6 +32,8 @@ class GeminiEditor:
         from app.config import settings
         if not self.api_key:
             raise ProviderError("GEMINI_API_KEY is not configured", provider=self.name, retryable=False)
+        if structure_lock is None:
+            structure_lock = settings.structure_lock
         with Image.open(io.BytesIO(image)) as source:
             source_size = source.size
         parts = [
@@ -41,7 +44,7 @@ class GeminiEditor:
             # Must agree with the structure policy the prompt carries, or the model
             # picks whichever instruction gives it more freedom.
             from app.constraints import REFERENCE_INSTRUCTION_LOCKED, REFERENCE_INSTRUCTION_OPEN
-            instruction = REFERENCE_INSTRUCTION_LOCKED if settings.structure_lock else REFERENCE_INSTRUCTION_OPEN
+            instruction = REFERENCE_INSTRUCTION_LOCKED if structure_lock else REFERENCE_INSTRUCTION_OPEN
             parts.extend([
                 {"text": instruction},
                 {"inlineData": {"mimeType": "image/jpeg", "data": base64.b64encode(reference).decode("ascii")}},

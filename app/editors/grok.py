@@ -32,7 +32,9 @@ class GrokImagineEditor:
         self, image: bytes, prompt: str, *, reference: bytes | None = None,
         strength: float | None = None, seed: int | None = None,
         negative: str | None = None, timeout_s: float = 60.0,
+        structure_lock: bool = False,
     ) -> bytes:
+        del structure_lock  # No dedicated lock parameter; pipeline preserve_structure handles seams.
         if not self.api_key:
             raise ProviderError("XAI_API_KEY is not configured", provider=self.name, retryable=False)
         with Image.open(io.BytesIO(image)) as source:

@@ -18,6 +18,7 @@ class ImageEditor(Protocol):
         self, image: bytes, prompt: str, *, reference: bytes | None = None,
         strength: float | None = None, seed: int | None = None,
         negative: str | None = None, timeout_s: float = 60.0,
+        structure_lock: bool = False,
     ) -> bytes: ...
 
 
@@ -98,10 +99,16 @@ def get_editor(name: str) -> ImageEditor:
     if name == "fal":
         from .fal import FalImg2ImgEditor
         return FalImg2ImgEditor()
+    if name == "openai":
+        from .openai import OpenAIImageEditor
+        return OpenAIImageEditor()
+    if name == "qwen":
+        from .qwen import QwenImageEditor
+        return QwenImageEditor()
     if name == "demo":
         from .demo import DemoEditor
         return DemoEditor()
-    raise ValueError("PROVIDER must be demo, gemini, grok, or fal")
+    raise ValueError("PROVIDER must be demo, gemini, grok, fal, qwen, or openai")
 
 
 def _configured(editor: ImageEditor) -> bool:
@@ -123,6 +130,7 @@ class EditorPool:
         self, primary: str | ImageEditor | None = None,
         fallback: str | ImageEditor | None = None, *, max_attempts: int = 3,
         backoff: tuple[float, ...] = (1.0, 2.0, 4.0),
+        max_concurrency: int | None = None,
     ) -> None:
         from app.config import settings
 
@@ -146,13 +154,17 @@ class EditorPool:
         self.primary_open = False
         self._primary_failures = 0
         self._limited_providers: set[str] = set()
-        self._limit = max(1, settings.max_concurrency)
+        limit = settings.max_concurrency if max_concurrency is None else max_concurrency
+        self._limit = max(1, int(limit))
         self._active = 0
         self._gate = asyncio.Condition()
 
     @property
     def max_concurrency(self) -> int:
         return self._limit
+
+    def set_max_concurrency(self, limit: int) -> None:
+        self._limit = max(1, int(limit))
 
     async def _invoke(self, editor: ImageEditor, image: bytes, prompt: str, **kwargs) -> bytes:
         async with self._gate:
@@ -185,7 +197,8 @@ class EditorPool:
     async def edit(
         self, image: bytes, prompt: str, *, reference: bytes | None = None,
         strength: float | None = None, seed: int | None = None,
-        negative: str | None = None, timeout_s: float = 60.0,
+        negative: str | None = None, timeout_s: float = 120.0,
+        structure_lock: bool = False,
     ) -> EditResult:
         attempts = 0
         current_negative = negative
@@ -209,6 +222,7 @@ class EditorPool:
                     result = await self._invoke(
                         editor, image, prompt, reference=reference, strength=strength,
                         seed=seed, negative=current_negative, timeout_s=timeout_s,
+                        structure_lock=structure_lock,
                     )
                     if editor is self.primary:
                         self._primary_failures = 0

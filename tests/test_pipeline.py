@@ -50,6 +50,7 @@ def workspace(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "in_dir", tmp_path / "in")
     monkeypatch.setattr(settings, "out_dir", tmp_path / "out")
     monkeypatch.setattr(settings, "provider", "demo")
+    monkeypatch.setattr(settings, "tile_concurrency", 3)
     monkeypatch.setattr(settings, "max_concurrency", 3)
     settings.in_dir.mkdir()
     settings.out_dir.mkdir()
@@ -144,7 +145,9 @@ def test_tile_failure_preserves_outputs_and_finishes_partial(workspace):
     assert np.abs(np.asarray(fallback, dtype=float) - np.asarray(expected, dtype=float)).mean() < 2
 
 
-def test_anchor_failure_still_generates_tiles_without_color_transfer(workspace):
+def test_anchor_failure_still_generates_tiles_without_color_transfer(workspace, monkeypatch):
+    # Color-match comparison is meaningful without structure preserve (which also edits tiles).
+    monkeypatch.setattr(settings, "structure_lock", False)
     FakePool.fail_anchor = True
     create_job("no-anchor")
     result = asyncio.run(pipeline.run_job("no-anchor"))
@@ -194,10 +197,48 @@ def test_request_cache_versions_history_and_preserves_exact_location(monkeypatch
     original = pipeline._request_key(b"image", manifest, "demo")
     next_year = {**manifest, "target_year": 1946}
     next_site = {**manifest, "place": {**manifest["place"], "lat": 35.7}}
+    weather_on = {**manifest, "weather": {"enabled": True, "ids": ["clear", "rain"]}}
     assert pipeline._request_key(b"image", next_year, "demo") != original
     assert pipeline._request_key(b"image", next_site, "demo") != original
+    assert pipeline._request_key(b"image", weather_on, "demo") != original
     monkeypatch.setattr(pipeline, "PROMPT_VERSION", pipeline.PROMPT_VERSION + "-next")
     assert pipeline._request_key(b"image", manifest, "demo") != original
+
+
+def test_weather_lanes_run_in_parallel_with_distinct_prompts(workspace, monkeypatch):
+    monkeypatch.setattr(settings, "tile_concurrency", 2)
+    monkeypatch.setattr(settings, "weather_concurrency", 3)
+    create_job("weathered")
+    update_manifest("weathered", lambda m: m.update(weather={
+        "enabled": True, "active": "clear", "ids": ["clear", "rain", "snow"], "variants": {},
+    }))
+    result = asyncio.run(pipeline.run_job("weathered"))
+    assert result["status"] == "done", result
+    assert result["weather"]["enabled"] is True
+    assert set(result["weather"]["ids"]) == {"clear", "rain", "snow"}
+    assert result["weather"]["concurrency"] == {"weather": 3, "tile": 2}
+    assert FakePool.instances[0].peak == 6
+    prompts = FakePool.instances[0].prompts
+    assert any("clear sunny day" in prompt for prompt in prompts)
+    assert any("Weather: rain" in prompt for prompt in prompts)
+    assert any("Weather: snow" in prompt for prompt in prompts)
+    assert any("WEATHER_OVERRIDE" in prompt for prompt in prompts)
+    # Weather anchors use the full era prompt, not the thin generic decade probe.
+    era = result["constraints"]["prompt_global"]
+    weather_prompts = [p for p in prompts if "WEATHER_OVERRIDE" in p]
+    assert weather_prompts and all(era in p for p in weather_prompts)
+    for weather_id in ("clear", "rain", "snow"):
+        variant = result["weather"]["variants"][weather_id]
+        assert variant["status"] == "done"
+        assert (settings.out_dir / "weathered" / "weathers" / weather_id / "result.jpg").is_file()
+        for tile in variant["tiles"]:
+            assert (settings.out_dir / "weathered" / "weathers" / weather_id / f"t{tile['i']}.jpg").is_file()
+    assert (settings.out_dir / "weathered" / "result.jpg").is_file()
+    # Primary lane mirrors to root for legacy URLs.
+    assert result["result"]["path"] == "out/weathered/result.jpg"
+    n = result["geometry"]["n"]
+    # One shared era path is not used raw: each weather gets anchor + n tiles.
+    assert FakePool.instances[0].image_calls == 3 * (n + 1)
 
 
 def test_live_history_failure_is_not_cached_and_old_fallback_cache_does_not_block_recovery(workspace, monkeypatch):

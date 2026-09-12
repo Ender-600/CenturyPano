@@ -12,7 +12,7 @@ from pillow_heif import register_heif_opener
 
 from app import main, pipeline
 from app.config import settings
-from app.location import exif_gps, location_context, resolve_place
+from app.location import coords_for_place, exif_gps, location_context, resolve_place
 
 register_heif_opener()
 GPS = (40.44, -79.99)
@@ -154,6 +154,17 @@ def test_ambiguous_or_unresolved_manual_place_is_not_invented(name):
     assert place['source'] == 'manual' and place['prompt_safe'] is False
     context = location_context(place)
     assert context['city'] == '' and context['coordinates'] is None and context['precision'] == 'unknown'
+
+
+def test_coords_for_place_prefers_gps_then_city_centroid():
+    assert coords_for_place({'lat': 40.44, 'lon': -79.99, 'name': 'Anywhere'}) == pytest.approx((40.44, -79.99))
+    city = coords_for_place({'name': 'Pittsburgh', 'admin1': 'Pennsylvania', 'cc': 'US'})
+    assert city is not None and city == pytest.approx((40.44062, -79.99589), abs=0.02)
+    typed = coords_for_place({'name': 'Pittsburgh, PA, US'})
+    assert typed is not None and typed[0] == pytest.approx(40.44, abs=0.05)
+    assert coords_for_place({'name': 'Definitely Not A Real City Xx'}) is None
+    assert coords_for_place(None) is None
+    assert coords_for_place('Pittsburgh') is not None
 
 
 def test_history_location_context_rejects_invalid_coordinates_and_raw_manual_data():
