@@ -1,12 +1,12 @@
 # CENTURY PANO
 
-同一个地方，另一个时代。用自己拍摄的全景照片选择 1900s、1920s、1950s 或 1970s，逐块生成过去的想象重建，拖动或转动手机探索，并用滑杆比较现在与过去。
+同一个地方，另一个时代。用自己拍摄的全景照片选择 1800 年至当年的任意整数年份，逐块生成过去的想象重建，拖动或转动手机探索，并用滑杆比较现在与过去。
 
 **想象重建，非历史影像。** HackCMU 2026 · Traveling。
 
 ## 当前可运行版本
 
-已实现移动端页面、FastAPI 图像流水线、Gemini 主服务、fal 回退、IFM K2 年代约束、磁盘缓存、渐进瓦片、前后对比、陀螺仪与拖动、音频揭幕、离线回放和串行基线。
+已实现移动端页面、FastAPI 图像流水线、Gemini 主服务、fal 回退、精确年份与地点历史背景推理、磁盘缓存、渐进瓦片、前后对比、陀螺仪与拖动、音频揭幕、离线回放和串行基线。
 
 仓库自带的是 **工程示例**：程序绘制的街景插画经过本地色调变换，没有调用 AI，不是实拍照片，不代表历史重建画质。真实模型效果、真实模型性能、iPhone 的实体传感器验收需在配置密钥后完成，不能把下方本地数值作为 Gemini 的结果。
 
@@ -22,9 +22,9 @@ PROVIDER=demo uv run python scripts/seed_demo.py
 ./scripts/serve.sh
 ```
 
-打开 <http://localhost:8000>。点击「先来一场时光旅行」选工程示例；或者选择相册中的全景，预览、选择年代并生成。
+打开 <http://localhost:8000>。点击「先来一场时光旅行」选工程示例；或者选择相册中的全景，预览、选择年份并生成。
 
-`seed_demo.py` 只允许 `PROVIDER=demo`，会生成城市、校园街区、360 三份插画回放和各自的串行基线。重复上传相同输入、年代、位置和提供方会命中缓存，保留原始指标并显示回放标记。离线前需要在同一浏览器至少完整打开一次所需回放，等待「旅程已保存 · 断网后可从时光档案重访」。
+`seed_demo.py` 只允许 `PROVIDER=demo`，会生成城市、校园街区、360 三份插画回放和各自的串行基线。重复上传相同输入、精确年份、位置、提示词版本和提供方会命中缓存，保留原始指标并显示回放标记。离线前需要在同一浏览器至少完整打开一次所需回放，等待「旅程已保存 · 断网后可从时光档案重访」。
 
 ## 前端设计 Demo
 
@@ -47,13 +47,13 @@ K2_MODEL=IFM/K2-Horizon-375B-A23B
 MAX_CONCURRENCY=6
 ```
 
-这里的 K2 是 HackCMU 赞助方 **IFM K2**。未配置 K2 或调用失败时，使用保守的内置年代约束；VLM 失败使用默认场景，锚点失败仍继续瓦片。真实图像服务失败时不会偷偷退回本地色调变换：失败瓦片使用原图并标记 `done_partial`。
+这里的 K2 是 HackCMU 赞助方 **IFM K2**。未配置完整 K2 时可使用 Gemini 文本模型；历史推理不可用时采用精确年份通用约束，并明确标记地点历史尚未确认。VLM 失败使用默认场景，锚点失败仍继续瓦片。真实图像服务失败时不会偷偷退回本地色调变换：失败瓦片使用原图并标记 `done_partial`。
 
 先验证单次调用，再准备实拍回放。下列命令会使用所配置服务并产生对应服务用量；基线会额外完整运行一次。
 
 ```bash
 uv run python scripts/probe_providers.py /absolute/path/panorama.jpg
-uv run python scripts/make_replay.py /absolute/path/panorama.jpg 1920s --place Pittsburgh
+uv run python scripts/make_replay.py /absolute/path/panorama.jpg 1945 --place "Pittsburgh, Pennsylvania, US"
 # 省略基线：附加 --no-baseline
 # 单独补跑串行基线：
 uv run python scripts/baseline.py JOB_ID
@@ -82,10 +82,12 @@ docker run --rm -p 8000:8000 --env-file .env -v "$PWD/data:/data" century-pano
 ## 架构与数据
 
 ```text
-上传原图 → EXIF/离线城市 → 预处理 → VLM 场景
-                                   ├─ IFM K2 → 冻结全局提示词 ─┐
-                                   └─ Gemini 锚点 ────────────┤
-                                                             ↓
+上传原图 → EXIF/离线城市 → 预处理 → VLM 当前场景
+                                      ↓
+                    精确年份 + GPS/城市 → 当地历史与地块变化
+                                      ↓
+                          冻结统一提示词 → Gemini 锚点
+                                      ↓
                          视口优先的并行瓦片 → Lab 颜色匹配 → 余弦羽化拼接
                                       ↓                          ↓
                               原始/匹配瓦片                   结果 + 指标
@@ -103,13 +105,21 @@ docker run --rm -p 8000:8000 --env-file .env -v "$PWD/data:/data" century-pano
 - `data/out/JOB_ID/`：原子 manifest、band、anchor、`tN_raw.jpg`、`tN.jpg`、result。
 - `data/out/.cache/`：精确缓存键以及避免再次调用文本模型的请求索引。
 
-所有 manifest 写入都经过同一任务锁和临时文件替换。前端只能读取生成输出和缩放预览。定位优先级为浏览器定位、原图 EXIF、手动城市、无；坐标仅在服务器离线解析，模型提示词只使用城市和国家。未知手动文本仅显示、不进入模型提示词。
+所有 manifest 写入都经过同一任务锁和临时文件替换。前端只能读取生成输出和缩放预览。定位优先级为手动地点覆盖、原图 EXIF、浏览器定位、无。浏览器定位仅作为拍摄位置的后备，应核对它是否与照片一致。可用 GPS、解析后的城市/州省/国家会用于历史推理及图像提示词；坐标不能证明该地块的历史。手动城市不会被伪装成精确 GPS，同名地点需用州省/国家消歧；未知手动文本仅显示、不进入模型提示词。
+
+## 年份与地点历史
+
+年份滑杆按 1 年移动，也可直接输入年份；默认 1925。每年以 **7 月 1 日** 为明确参考时点，避免把年内事件前后混成一幅图。1945 和 1950 会分别根据位置推理，不能只套用相同的年代风格，也不能把一场战争的状态套用到所有城市。
+
+历史模型接收具体年份、拍摄位置和当前场景，返回当地历史时期、事件背景、地块是否已开发、建筑更替建议与不确定性。相机位置、方向和投影固定，建筑高度、轮廓、道路和土地用途允许按历史背景改变；尚未开发的地块可以呈现自然地貌或农田。锚点与全部瓦片使用同一份提示词。
+
+当前推理使用模型知识，**未接入历史地图、地籍或档案检索**。界面会展示推测依据与待核实事项；城市级位置不能证明具体地块的历史。Demo 模式仍仅模拟色调，不代表建筑重建。完整契约见 [历史背景说明](docs/HISTORICAL_CONTEXT.md)。
 
 ## API
 
 | 方法 | 路径 | 用途 |
 |---|---|---|
-| POST | `/jobs` | multipart `image`, `decade`, `lat`, `lon`, `place`, `heading`, `is_360` |
+| POST | `/jobs` | multipart `image`, `target_year`, `lat`, `lon`, `place`, `heading`, `is_360` |
 | GET | `/jobs/{id}/manifest` | 单一状态来源，`Cache-Control: no-store` |
 | GET | `/jobs/{id}/preview` | 去除 EXIF 的工作图 |
 | GET | `/jobs/{id}/tiles/{i}?raw=1` | 原始瓦片；去掉 raw 参数获取匹配版本 |
@@ -119,7 +129,9 @@ docker run --rm -p 8000:8000 --env-file .env -v "$PWD/data:/data" century-pano
 | GET | `/replays` | 已完成的回放列表 |
 | POST | `/preview` | HEIC 浏览器解码失败时的服务器 JPEG 预览 |
 | POST | `/location/resolve` | 离线城市查询 |
-| GET | `/health` | 提供方和配置状态，无密钥 |
+| GET | `/health` | 提供方、配置状态与可选年份范围，无密钥 |
+
+`target_year` 接受 1800 至当年的整数，优先于旧 `decade` 字段。旧四个年代请求及已存回放仍可读取；manifest 的 `target_year` 和 `anchor_year` 都是实际目标年份，`decade` 仅为归类。
 
 ## 测试与已测指标
 

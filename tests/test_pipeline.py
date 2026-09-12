@@ -1,4 +1,5 @@
 import asyncio
+from dataclasses import replace
 from types import SimpleNamespace
 
 import numpy as np
@@ -64,13 +65,15 @@ def workspace(tmp_path, monkeypatch):
     return tmp_path
 
 
-def create_job(job_id, decade="1920s"):
+def create_job(job_id, decade="1920s", *, target_year=None):
     update_manifest(job_id, lambda m: m.update({
         "job_id": job_id, "status": "running", "decade": decade, "provider": "demo",
         "source": {"path": "in/source.jpg", "w": 600, "h": 240, "is_360": False},
         "place": {"name": "Pittsburgh", "cc": "US", "source": "manual"},
         "heading": .5, "job_seed": 12,
     }))
+    if target_year is not None:
+        update_manifest(job_id, lambda m: m.update(target_year=target_year))
 
 
 def test_complete_pipeline_progress_cache_and_serial_isolation(workspace, monkeypatch):
@@ -78,7 +81,7 @@ def test_complete_pipeline_progress_cache_and_serial_isolation(workspace, monkey
     final = asyncio.run(pipeline.run_job("first"))
     assert final["status"] == "done", final
     assert FakePool.instances[0].peak == 3
-    assert len(set(FakePool.instances[0].prompts[1:])) == 1
+    assert set(FakePool.instances[0].prompts) == {final["constraints"]["prompt_global"]}
     assert final["metrics"]["image_calls"] == final["geometry"]["n"] + 1
     times = [final["metrics"][key] for key in ("started_at", "anchor_done_at", "first_tile_at", "finished_at")]
     assert times == sorted(times) and all(times)
@@ -144,8 +147,87 @@ def test_anchor_failure_still_generates_tiles_without_color_transfer(workspace):
     assert result["metrics"]["seam_err"]["raw"] == result["metrics"]["seam_err"]["after_color_match"]
 
 
-def test_cache_key_uses_exact_bytes_decade_provider_and_prompt():
-    original = pipeline.cache_key(b"image", "1920s", "demo", "prompt")
-    variants = [(b"image2", "1920s", "demo", "prompt"), (b"image", "1950s", "demo", "prompt"),
-                (b"image", "1920s", "gemini", "prompt"), (b"image", "1920s", "demo", "other")]
+def test_cache_key_uses_exact_bytes_year_provider_and_prompt():
+    original = pipeline.cache_key(b"image", 1945, "demo", "prompt")
+    variants = [(b"image2", 1945, "demo", "prompt"), (b"image", 1946, "demo", "prompt"),
+                (b"image", 1945, "gemini", "prompt"), (b"image", 1945, "demo", "other")]
     assert all(pipeline.cache_key(*args) != original for args in variants)
+
+
+def test_same_decade_years_cannot_replay_each_others_history(workspace):
+    create_job("year-1945", "1940s", target_year=1945)
+    first = asyncio.run(pipeline.run_job("year-1945"))
+    create_job("year-1946", "1940s", target_year=1946)
+    second = asyncio.run(pipeline.run_job("year-1946"))
+    assert first["status"] == second["status"] == "done"
+    assert not first["cache_hit"] and not second["cache_hit"]
+    assert first["cache_key"] != second["cache_key"]
+    assert first["constraints"]["target_year"] == first["anchor_year"] == 1945
+    assert second["constraints"]["target_year"] == second["anchor_year"] == 1946
+    assert len(FakePool.instances) == 2
+    for pool, result in zip(FakePool.instances, (first, second)):
+        assert set(pool.prompts) == {result["constraints"]["prompt_global"]}
+
+    create_job("year-1945-replay", "1940s", target_year=1945)
+    replay = asyncio.run(pipeline.run_job("year-1945-replay"))
+    assert replay["status"] == "done" and replay["mode"] == "replay"
+    assert replay["cache_source_job_id"] == "year-1945"
+    assert len(FakePool.instances) == 2
+
+
+def test_request_cache_versions_history_and_preserves_exact_location(monkeypatch):
+    manifest = {
+        "decade": "1940s", "target_year": 1945,
+        "source": {"is_360": False},
+        "place": {"name": "Tokyo", "lat": 35.6762, "lon": 139.6503},
+    }
+    original = pipeline._request_key(b"image", manifest, "demo")
+    next_year = {**manifest, "target_year": 1946}
+    next_site = {**manifest, "place": {**manifest["place"], "lat": 35.7}}
+    assert pipeline._request_key(b"image", next_year, "demo") != original
+    assert pipeline._request_key(b"image", next_site, "demo") != original
+    monkeypatch.setattr(pipeline, "PROMPT_VERSION", pipeline.PROMPT_VERSION + "-next")
+    assert pipeline._request_key(b"image", manifest, "demo") != original
+
+
+def test_live_history_failure_is_not_cached_and_old_fallback_cache_does_not_block_recovery(workspace, monkeypatch):
+    history_calls = []
+
+    async def parsed_scene(*args, **kwargs):
+        return {**scene.DEFAULT_SCENE_SPEC, "_tokens": 0, "fallback": False}
+
+    async def history(place, year, parsed, **kwargs):
+        history_calls.append(year)
+        spec = await constraints.build_constraints(place, year, parsed, provider="demo")
+        if len(history_calls) > 1:
+            spec = replace(spec, fallback=False, historical_context={
+                **spec.historical_context, "evidence_basis": "model_knowledge_unverified",
+            })
+        return spec
+
+    monkeypatch.setattr(pipeline, "parse_scene", parsed_scene)
+    monkeypatch.setattr(pipeline, "build_constraints", history)
+    create_job("history-unavailable", "1940s", target_year=1945)
+    update_manifest("history-unavailable", lambda m: m.update(provider="gemini"))
+    first = asyncio.run(pipeline.run_job("history-unavailable"))
+    assert first["status"] == "done" and first["constraints"]["fallback"]
+    cache_dir = settings.out_dir / ".cache"
+    assert not list(cache_dir.glob("requests/*.json"))
+
+    # A request index left by the earlier implementation must also be rejected.
+    request_key = pipeline._request_key((settings.in_dir / "source.jpg").read_bytes(), first, "gemini")
+    pipeline._atomic_json(cache_dir / f"{first['cache_key']}.json", {"job_id": "history-unavailable"})
+    pipeline._atomic_json(cache_dir / "requests" / f"{request_key}.json", {"cache_key": first["cache_key"]})
+    create_job("history-recovered", "1940s", target_year=1945)
+    update_manifest("history-recovered", lambda m: m.update(provider="gemini"))
+    second = asyncio.run(pipeline.run_job("history-recovered"))
+    assert second["status"] == "done" and not second["cache_hit"]
+    assert not second["constraints"]["fallback"]
+    assert history_calls == [1945, 1945] and len(FakePool.instances) == 2
+
+    create_job("history-recovered-replay", "1940s", target_year=1945)
+    update_manifest("history-recovered-replay", lambda m: m.update(provider="gemini"))
+    third = asyncio.run(pipeline.run_job("history-recovered-replay"))
+    assert third["status"] == "done" and third["mode"] == "replay"
+    assert third["cache_source_job_id"] == "history-recovered"
+    assert history_calls == [1945, 1945] and len(FakePool.instances) == 2

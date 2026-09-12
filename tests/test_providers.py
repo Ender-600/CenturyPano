@@ -217,12 +217,25 @@ def test_demo_never_calls_vlm_or_llm_even_with_keys(monkeypatch):
     assert calls == [] and spec.fallback and scene_result["fallback"]
 
 
-def test_constraints_are_frozen_city_only_and_anchor_year(monkeypatch):
+def historical_facts():
+    return {
+        "era_facts": ["period transport", "painted signs", "period lamps", "natural fabrics"],
+        "period_summary": "A period of local rebuilding and changing transport.",
+        "local_context": ["Use the supplied city and exact year to interpret the scene."],
+        "site_state": "unknown",
+        "site_history": "The specific site's earlier use has not been verified.",
+        "reconstruction_changes": ["Remove buildings known to postdate the target year."],
+        "uncertainties": ["No archival evidence for this exact parcel was supplied."],
+    }
+
+
+def test_constraints_are_frozen_and_include_explicit_location_and_year(monkeypatch):
     configured(monkeypatch, provider="demo")
     place = {"name": "Pittsburgh", "cc": "US", "admin1": "Pennsylvania", "lat": 40.443, "lon": -79.94, "prompt_safe": True}
     spec = asyncio.run(constraints.build_constraints(place, "1920s", scene.DEFAULT_SCENE_SPEC))
-    assert "1925 in Pittsburgh, USA" in spec.prompt_global
-    assert "Pennsylvania" not in spec.prompt_global and "40.443" not in spec.prompt_global
+    assert "1925" in spec.prompt_global and "Pittsburgh" in spec.prompt_global
+    assert "Pennsylvania" in spec.prompt_global and "40.443" in spec.prompt_global
+    assert spec.target_year == spec.anchor_year == 1925
     assert isinstance(spec.era_facts, tuple)
     with pytest.raises(FrozenInstanceError):
         spec.prompt_global = "changed"
@@ -235,10 +248,13 @@ def test_successful_llm_facts_freeze_and_token_usage(monkeypatch):
     configured(monkeypatch, provider="gemini", k2_api_key="test-key", k2_base_url="https://api.ifm.ai/v1", k2_model="IFM/K2-Horizon-375B-A23B")
 
     async def facts(*args):
-        return ("period transport", "painted signs", "period lamps", "natural fabrics"), 234
+        return historical_facts(), 234
 
     monkeypatch.setattr(constraints, "_request_facts", facts)
-    spec = asyncio.run(constraints.build_constraints({}, "1950s", scene.DEFAULT_SCENE_SPEC))
+    spec = asyncio.run(constraints.build_constraints(
+        {"name": "Pittsburgh", "cc": "US", "lat": 40.443, "lon": -79.94, "source": "exif"},
+        "1950s", scene.DEFAULT_SCENE_SPEC,
+    ))
     assert spec._tokens == 234 and not spec.fallback
     assert "1955" in spec.prompt_global
     assert "period transport" in spec.prompt_global
@@ -251,7 +267,7 @@ def test_ifm_k2_request_uses_official_api_contract(monkeypatch):
     def respond(request):
         requests.append(request)
         return httpx.Response(200, json={"choices": [{"message": {
-            "content": json.dumps({"era_facts": ["period transport", "painted signs", "period lamps", "natural fabrics"]}),
+            "content": json.dumps(historical_facts()),
             "reasoning_content": "private trace must not be used or stored",
         }}], "usage": {"total_tokens": 56}})
 
@@ -269,7 +285,7 @@ def test_ifm_k2_request_uses_official_api_contract(monkeypatch):
 
 
 def test_incomplete_k2_configuration_uses_templates(monkeypatch):
-    configured(monkeypatch, provider="gemini", k2_api_key="test-key", k2_base_url="", k2_model="")
+    configured(monkeypatch, provider="gemini", k2_api_key="test-key", k2_base_url="", k2_model="", gemini_api_key="")
     calls = []
 
     async def forbidden(*args):

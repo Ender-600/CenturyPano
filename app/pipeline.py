@@ -12,26 +12,28 @@ from pathlib import Path
 
 from PIL import Image
 
-from .config import COLOR_MATCH_K, DECADE_ANCHOR, H, TILE, settings
+from .config import COLOR_MATCH_K, H, TILE, settings
 from .consistency import anchor_crop, color_match, squeeze_anchor
-from .constraints import build_constraints, generic_decade_prompt
+from .constraints import PROMPT_VERSION, build_constraints
 from .editors.base import EditorPool
 from .geometry import image_bytes, open_rgb, preprocess, viewport_priority
 from .manifest import job_dir, read_manifest, update_manifest
 from .metrics import seam_metrics, timing_metrics
 from .scene import parse_scene
 from .stitch import stitch
+from .temporal import decade_for_year, manifest_year
 
 
-def cache_key(image: bytes, decade: str, provider: str, prompt_global: str) -> str:
+def cache_key(image: bytes, decade: str | int, provider: str, prompt_global: str) -> str:
     """The public cache contract deliberately includes the exact original bytes."""
-    return hashlib.sha256(image + decade.encode() + provider.encode() + prompt_global.encode()).hexdigest()
+    return hashlib.sha256(image + str(decade).encode() + provider.encode() + prompt_global.encode()).hexdigest()
 
 
 def _request_key(image: bytes, manifest: dict, provider: str) -> str:
     # This index allows a replay lookup before making any scene/constraint calls.
     # Location and the 360 override affect interpretation and must not collide.
-    context = json.dumps({"decade": manifest["decade"], "provider": provider,
+    context = json.dumps({"target_year": manifest_year(manifest), "provider": provider,
+                          "prompt_version": PROMPT_VERSION,
                           "place": manifest.get("place", {}),
                           "is_360": manifest["source"].get("is_360")},
                          sort_keys=True, separators=(",", ":"))
@@ -62,7 +64,13 @@ def _replay_hit(job_id: str, request_key: str, original: bytes, current: dict, p
         cached_index = json.loads((directory / f"{index['cache_key']}.json").read_text())
         cached = read_manifest(cached_index["job_id"])
         prompt = cached["constraints"]["prompt_global"]
-        if cache_key(original, current["decade"], provider, prompt) != index["cache_key"]:
+        if cached["constraints"].get("prompt_version") != PROMPT_VERSION:
+            return False
+        if provider != "demo" and cached["constraints"].get("fallback", True):
+            return False  # A recovered historian must get another chance on retry.
+        if manifest_year(cached) != manifest_year(current):
+            return False
+        if cache_key(original, manifest_year(current), provider, prompt) != index["cache_key"]:
             return False
         if cached.get("status") != "done" or cached.get("baseline_of"):
             return False
@@ -142,12 +150,25 @@ async def run_job(job_id: str, *, concurrency: int | None = None, use_cache: boo
         band_bytes = await asyncio.to_thread(image_bytes, prepared.band)
         scene = await parse_scene(band_bytes, provider=provider)
         tokens_vlm = int(scene.pop("_tokens", 0))
-        update_manifest(job_id, lambda m: (m.update(scene=scene, stage="anchor"),
+        update_manifest(job_id, lambda m: (m.update(scene=scene, stage="history"),
                                            m["metrics"]["tokens"].update(vlm=tokens_vlm)))
+        stage = "history"
+        year = manifest_year(manifest)
+        constraints = await build_constraints(manifest.get("place", {}), year, scene, provider=provider)
+        constraint_data = constraints.to_dict() if hasattr(constraints, "to_dict") else dict(constraints)
+        prompt = constraint_data["prompt_global"]  # One immutable string shared by anchor and every tile.
+        negative = constraint_data.get("negative")
+        tokens_llm = int(getattr(constraints, "_tokens", constraint_data.pop("_tokens", 0)))
+        strength = .7 if constraint_data.get("historical_context", {}).get("site_state") in {
+            "undeveloped", "agricultural"
+        } else .55
+        update_manifest(job_id, lambda m: (m.update(constraints=constraint_data, stage="anchor",
+                                                   target_year=year, anchor_year=year,
+                                                   decade=decade_for_year(year)),
+                                          m["metrics"]["tokens"].update(llm=tokens_llm)))
         stage = "anchor"
         pool = EditorPool(primary=provider, fallback=settings.provider_fallback)
         seed = int(manifest.get("job_seed", 0))
-        decade = manifest["decade"]
 
         async def generate_anchor():
             start_at = time.perf_counter()
@@ -155,7 +176,7 @@ async def run_job(job_id: str, *, concurrency: int | None = None, use_cache: boo
             try:
                 squeezed = await asyncio.to_thread(squeeze_anchor, prepared.band)
                 result = await pool.edit(await asyncio.to_thread(image_bytes, squeezed),
-                                         generic_decade_prompt(decade), seed=seed, strength=.45)
+                                         prompt, seed=seed, strength=strength, negative=negative)
                 anchor = await asyncio.to_thread(open_rgb, result.image)
                 await asyncio.to_thread(_save_image, directory / "anchor.jpg", anchor)
                 update_manifest(job_id, lambda m: m["anchor"].update(status="done", provider=result.provider,
@@ -171,12 +192,7 @@ async def run_job(job_id: str, *, concurrency: int | None = None, use_cache: boo
                 update_manifest(job_id, lambda m: m["metrics"].update(anchor_done_at=time.time(),
                                                                        image_calls=pool.image_calls))
 
-        constraints, anchor = await asyncio.gather(build_constraints(manifest.get("place", {}), decade, scene, provider=provider),
-                                                    generate_anchor())
-        constraint_data = constraints.to_dict() if hasattr(constraints, "to_dict") else dict(constraints)
-        prompt = constraint_data["prompt_global"]  # One immutable string shared by every tile.
-        negative = constraint_data.get("negative")
-        tokens_llm = int(getattr(constraints, "_tokens", constraint_data.pop("_tokens", 0)))
+        anchor = await generate_anchor()
         priority = viewport_priority(geometry["x"], manifest.get("heading", .5),
                                      geometry["W_ext"], geometry["wrap"])
         tiles = [{"i": i, "x": x, "priority": priority[i], "status": "pending",
@@ -184,9 +200,7 @@ async def run_job(job_id: str, *, concurrency: int | None = None, use_cache: boo
                   "path": _output_path(job_id, f"t{i}.jpg"), "ms": None, "attempts": 0,
                   "provider": provider, "error": None}
                  for i, x in enumerate(geometry["x"])]
-        update_manifest(job_id, lambda m: (m.update(constraints=constraint_data, tiles=tiles, stage="tiles",
-                                                    anchor_year=DECADE_ANCHOR[decade]),
-                                          m["metrics"]["tokens"].update(llm=tokens_llm)))
+        update_manifest(job_id, lambda m: m.update(tiles=tiles, stage="tiles"))
         originals = [prepared.band_ext.crop((x, 0, x + TILE, H)) for x in geometry["x"]]
         stage = "tiles"
         gate = asyncio.Semaphore(max(1, min(6, concurrency or settings.max_concurrency)))
@@ -200,7 +214,7 @@ async def run_job(job_id: str, *, concurrency: int | None = None, use_cache: boo
                         geometry["W"], wrap=geometry["wrap"]) if anchor is not None else None
                     reference_bytes = await asyncio.to_thread(image_bytes, reference) if reference is not None else None
                     result = await pool.edit(await asyncio.to_thread(image_bytes, originals[index]), prompt,
-                                             reference=reference_bytes, seed=seed, strength=.45, negative=negative)
+                                             reference=reference_bytes, seed=seed, strength=strength, negative=negative)
                     raw = await asyncio.to_thread(open_rgb, result.image)
                     if raw.size != (TILE, H):
                         raw = raw.resize((TILE, H), Image.Resampling.LANCZOS)
@@ -248,9 +262,10 @@ async def run_job(job_id: str, *, concurrency: int | None = None, use_cache: boo
             m["result"]["status"] = "done"
             m["status"] = "done_partial" if any(t["status"] == "error" for t in m["tiles"]) else "done"
             m["stage"] = "complete"
-            m["cache_key"] = cache_key(original_bytes, decade, provider, prompt)
+            m["cache_key"] = cache_key(original_bytes, year, provider, prompt)
         final = update_manifest(job_id, complete)
-        if use_cache and final["status"] == "done":
+        history_cacheable = provider == "demo" or not constraint_data.get("fallback", True)
+        if use_cache and final["status"] == "done" and history_cacheable:
             cache_dir = settings.out_dir / ".cache"
             await asyncio.to_thread(_atomic_json, cache_dir / f"{final['cache_key']}.json", {"job_id": job_id})
             await asyncio.to_thread(_atomic_json, cache_dir / "requests" / f"{request_hash}.json",

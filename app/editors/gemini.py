@@ -35,7 +35,10 @@ class GeminiEditor:
         ]
         if reference:
             parts.extend([
-                {"text": "Edit image 1 to match the era, lighting, palette and sky of image 2. Keep image 1's composition. Image 2 is a style reference only. Return only the edited image 1."},
+                {"text": "Edit image 1 using the exact date and site history in the reconstruction prompt. "
+                 "Match the lighting, palette and sky of image 2. Keep image 1's composition and camera projection, "
+                 "but remove or replace buildings and roads when the historical context requires it. "
+                 "Image 2 is a consistency reference, not historical evidence. Return only the edited image 1."},
                 {"inlineData": {"mimeType": "image/jpeg", "data": base64.b64encode(reference).decode("ascii")}},
             ])
         if negative:

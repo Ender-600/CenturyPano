@@ -3,10 +3,13 @@
 (() => {
   const $ = (id) => document.getElementById(id);
   const screens = ['capture', 'preview', 'result'];
-  const years = { '1900s': 1905, '1920s': 1925, '1950s': 1955, '1970s': 1975 };
+  const legacyYears = { '1900s': 1905, '1920s': 1925, '1950s': 1955, '1970s': 1975 };
+  const defaultTitle = document.title;
   const state = {
-    screen: 'capture', file: null, fileURL: null, decade: '1920s',
+    screen: 'capture', file: null, fileURL: null, targetYear: 1925,
+    minYear: 1800, maxYear: new Date().getFullYear(), yearEdited: false,
     imageWidth: 0, imageHeight: 0, location: null, locationSource: null,
+    manualPlace: false, locationPromise: null,
     offset: 0, renderWidth: 0, renderHeight: 0, wrap: false,
     manifest: null, jobId: null, generation: 0, pollTimer: null,
     geometryKey: null, originalImage: null, loadedTiles: new Set(),
@@ -37,6 +40,7 @@
   }
   function goHome() {
     stopJourney(); showScreen('capture');
+    document.title = defaultTitle;
     if (location.search) history.replaceState(null, '', location.pathname);
   }
   function connectionStatus() {
@@ -47,7 +51,14 @@
   async function checkHealth() {
     try {
       const response = await fetch('/health');
-      if (response.ok) state.health = await response.json();
+      if (response.ok) {
+        state.health = await response.json();
+        const min = Number(state.health.min_year), max = Number(state.health.max_year);
+        if (Number.isInteger(min) && Number.isInteger(max) && min <= max) {
+          state.minYear = min; state.maxYear = max;
+        }
+        setTargetYear(!state.yearEdited ? (state.health.default_year ?? state.targetYear) : state.targetYear);
+      }
     } catch { /* Replay remains available when the live service is offline. */ }
     connectionStatus();
     text('provider-note', state.health?.provider === 'demo' ? '本地效果演示 · 未调用 AI' : '想象重建，非历史影像');
@@ -61,19 +72,43 @@
   $('new-journey-button').addEventListener('click', goHome);
   document.querySelector('.brand').addEventListener('click', (event) => { event.preventDefault(); goHome(); });
   $('place-input').addEventListener('input', () => {
-    state.location = null; state.locationSource = 'manual';
-    text('location-note', '将使用你填写的城市；留空也可以继续。');
+    state.manualPlace = true;
+    text('location-note', $('place-input').value.trim() ? '手填城市会覆盖照片 GPS 和设备定位，仅提供城市级背景；可补充州和国家以准确识别。' : '未填写城市时，优先使用照片 GPS；没有照片 GPS 时使用设备定位。');
   });
-  $('decade-options').addEventListener('click', (event) => {
-    const button = event.target.closest('[data-decade]');
-    if (!button) return;
-    state.decade = button.dataset.decade;
-    document.querySelectorAll('[data-decade]').forEach((item) => {
-      item.classList.toggle('active', item === button);
-      item.setAttribute('aria-pressed', String(item === button));
+  function yearOf(manifest) {
+    return manifest.target_year ?? manifest.anchor_year ?? legacyYears[manifest.decade] ?? null;
+  }
+  function setTargetYear(value, edited = false) {
+    const year = Number(value);
+    if (!Number.isInteger(year)) return false;
+    state.targetYear = Math.max(state.minYear, Math.min(state.maxYear, year));
+    state.yearEdited ||= edited;
+    for (const id of ['year-range', 'year-input']) {
+      $(id).min = state.minYear; $(id).max = state.maxYear; $(id).value = state.targetYear;
+    }
+    $('year-range').setAttribute('aria-valuetext', `${state.targetYear} 年，以 7 月 1 日为参考`);
+    text('year-min', state.minYear); text('year-max', state.maxYear);
+    document.querySelectorAll('[data-year]').forEach((item) => {
+      const active = Number(item.dataset.year) === state.targetYear;
+      item.classList.toggle('active', active); item.setAttribute('aria-pressed', String(active));
+      item.disabled = Number(item.dataset.year) < state.minYear || Number(item.dataset.year) > state.maxYear;
     });
-    text('generate-button', `走进 ${state.decade.slice(0, 4)} 年代`);
+    text('generate-button', `走进 ${state.targetYear} 年`);
     $('generate-button').insertAdjacentHTML('beforeend', '<svg><use href="#i-arrow"/></svg>');
+    return true;
+  }
+  $('year-range').addEventListener('input', (event) => setTargetYear(event.target.value, true));
+  $('year-input').addEventListener('input', (event) => {
+    const year = Number(event.target.value);
+    if (event.target.value && Number.isInteger(year) && year >= state.minYear && year <= state.maxYear) setTargetYear(year, true);
+  });
+  $('year-input').addEventListener('change', (event) => {
+    if (!event.target.value || !setTargetYear(event.target.value, true)) setTargetYear(state.targetYear);
+  });
+  $('year-options').addEventListener('click', (event) => {
+    const button = event.target.closest('[data-year]');
+    if (!button) return;
+    setTargetYear(button.dataset.year, true);
   });
 
   function loadImage(url) {
@@ -104,17 +139,17 @@
       stopJourney();
       if (state.fileURL) URL.revokeObjectURL(state.fileURL);
       state.file = file; state.fileURL = url; state.imageWidth = image.naturalWidth; state.imageHeight = image.naturalHeight;
-      state.location = null; state.locationSource = null;
+      state.location = null; state.locationSource = null; state.manualPlace = false;
       state.offset = 0; state.wrap = false;
       $('preview-image').src = url; $('place-input').value = '';
       $('is-360').checked = Math.abs(state.imageWidth / state.imageHeight - 2) < 0.1;
       const narrow = state.imageWidth / state.imageHeight < 2;
       $('image-warning').hidden = !narrow;
       text('image-warning', '这张照片看起来较窄。仍然可以继续，横向全景会带来更开阔的体验。');
-      text('location-note', '正在查找城市… 也可以直接手动填写。');
+      text('location-note', '正在读取照片位置… 也可以手动填写拍摄城市。');
       showScreen('preview');
       requestAnimationFrame(() => { resizeViewport(); state.offset = Math.max(0, (state.renderWidth - $('preview-window').clientWidth) / 2); render(); });
-      locate(file, request);
+      state.locationPromise = locate(file, request);
     } catch (error) { showToast(error.message || '照片读取失败，请重新选择。'); }
     finally { $('capture-button').disabled = false; $('album-button').disabled = false; $('camera-input').value = ''; $('album-input').value = ''; }
   }
@@ -163,25 +198,34 @@
     return null;
   }
   async function locate(file, request) {
-    const browserLocation = new Promise((resolve) => {
+    // The photo describes a place that may be far from the device's current location.
+    const exif = await readExifGPS(file);
+    if (request !== state.loadingFile) return;
+    const geo = exif ? null : await new Promise((resolve) => {
       if (!navigator.geolocation) { resolve(null); return; }
       const timer = setTimeout(() => resolve(null), 5200);
       navigator.geolocation.getCurrentPosition((position) => { clearTimeout(timer); resolve({ lat: position.coords.latitude, lon: position.coords.longitude }); }, () => { clearTimeout(timer); resolve(null); }, { timeout: 5000, maximumAge: 120000, enableHighAccuracy: false });
     });
-    const [geo, exif] = await Promise.all([browserLocation, readExifGPS(file)]);
-    if (request !== state.loadingFile || state.locationSource === 'manual') return;
-    const coordinates = geo || exif;
-    if (!coordinates) { text('location-note', '未获取位置。填一个城市，或留空继续。'); return; }
-    state.location = coordinates; state.locationSource = geo ? 'geolocation' : 'exif';
+    if (request !== state.loadingFile) return;
+    const coordinates = exif || geo;
+    if (!coordinates) {
+      if (!state.manualPlace) text('location-note', '浏览器未读取到位置；服务器会尝试照片 GPS，也可以手动填写拍摄城市。');
+      return;
+    }
+    state.location = coordinates; state.locationSource = exif ? 'exif' : 'geolocation';
+    if (state.manualPlace) return;
+    resolveDetectedLocation(coordinates, !!exif, request);
+  }
+  async function resolveDetectedLocation(coordinates, photoGPS, request) {
     try {
       const response = await fetch('/location/resolve', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(coordinates) });
       if (!response.ok) throw new Error('unavailable');
       const result = await response.json(); const city = result.place || result;
-      if (request !== state.loadingFile || state.locationSource === 'manual') return;
+      if (request !== state.loadingFile || state.manualPlace) return;
       $('place-input').value = city.name || '';
-      text('location-note', `${geo ? '设备定位' : '照片位置'} · 仅使用城市：${city.name || '已定位'}${city.cc ? '，' + city.cc : ''}`);
+      text('location-note', `${photoGPS ? '照片 GPS' : '设备定位（照片 GPS 由服务器优先读取）'} · ${city.name || '已定位'}${city.cc ? '，' + city.cc : ''}。可手动覆盖；设备位置可能与拍摄地不同。`);
     } catch {
-      text('location-note', '已获取位置，将在生成时离线解析城市；也可以手动修改。');
+      if (request === state.loadingFile && !state.manualPlace) text('location-note', '已获取坐标，将用于推测当地历史背景；可手动填写拍摄城市覆盖。');
     }
   }
 
@@ -338,15 +382,19 @@
 
   $('generate-button').addEventListener('click', async () => {
     if (!state.file || $('generate-button').disabled) return;
+    if (!$('year-input').checkValidity()) { $('year-input').reportValidity(); return; }
     unlockAudio();
-    const heading = state.renderWidth ? ((state.offset + $('preview-window').clientWidth / 2) / state.renderWidth) : 0.5;
-    const form = new FormData(); form.append('image', state.file); form.append('decade', state.decade);
-    form.append('heading', String(Math.max(0, Math.min(1, heading)))); form.append('is_360', String($('is-360').checked));
-    if (state.location && state.locationSource === 'geolocation') { form.append('lat', String(state.location.lat)); form.append('lon', String(state.location.lon)); }
-    if (state.locationSource === 'manual' || !state.location) { const place = $('place-input').value.trim(); if (place) form.append('place', place); }
     const button = $('generate-button'); button.disabled = true;
+    const file = state.file, targetYear = state.targetYear;
+    const heading = state.renderWidth ? ((state.offset + $('preview-window').clientWidth / 2) / state.renderWidth) : 0.5;
     try {
       if (!navigator.onLine) throw new Error('目前处于离线状态，请打开时光档案，重访已保存的旅程。');
+      if (!state.manualPlace || !$('place-input').value.trim()) await state.locationPromise;
+      if (file !== state.file || state.screen !== 'preview') return;
+      const form = new FormData(); form.append('image', file); form.append('target_year', String(targetYear));
+      form.append('heading', String(Math.max(0, Math.min(1, heading)))); form.append('is_360', String($('is-360').checked));
+      if (state.location && state.locationSource === 'geolocation') { form.append('lat', String(state.location.lat)); form.append('lon', String(state.location.lon)); }
+      if (state.manualPlace) { const place = $('place-input').value.trim(); if (place) form.append('place', place); }
       const response = await fetch('/jobs', { method: 'POST', body: form });
       if (!response.ok) {
         let detail = await response.text();
@@ -355,15 +403,17 @@
       }
       const job = await response.json();
       if (!job.job_id) throw new Error('服务未返回旅程编号，请重试。');
-      await startJob(job.job_id, false, heading);
+      if (file !== state.file || state.screen !== 'preview') return;
+      await startJob(job.job_id, false, heading, targetYear);
     } catch (error) { showToast(error.message || '连接失败，照片已保留，可以再次尝试。', 8000); }
     finally { button.disabled = false; }
   });
 
-  async function startJob(jobId, replay = false, heading = 0.5) {
+  async function startJob(jobId, replay = false, heading = 0.5, targetYear = null) {
     stopJourney();
     state.jobId = jobId; state.manifest = null; state.geometryKey = null;
     state.viewingReplay = replay;
+    state.expectedYear = replay ? null : targetYear;
     state.loadedTiles = new Set(); state.originalImage = null; state.finalLoaded = false;
     state.revealed = false; state.pastPercent = 0; state.offlineSaved = false;
     state.initialHeading = heading; state.wrap = false; state.offset = 0;
@@ -371,11 +421,13 @@
     text('generation-title', replay ? '重访这一刻' : '让时间慢下来');
     text('generation-detail', replay ? '正在打开保存的全景…' : '正在读取你的全景…');
     text('progress-text', '准备出发'); text('progress-count', '0 / 0'); $('progress-fill').style.width = '0%';
-    $('download-button').hidden = true; $('metrics-panel').hidden = true;
+    $('download-button').hidden = true; $('metrics-panel').hidden = true; $('historical-context').hidden = true; $('place-warning').hidden = true;
     $('metrics-toggle').setAttribute('aria-expanded', 'false');
     $('replay-badge').hidden = !replay; text('result-mode', '');
     text('result-place', ''); text('result-subtitle', '旧日的风景，正在眼前展开。');
-    text('result-year', years[state.decade]); text('reveal-year', years[state.decade]);
+    text('result-year', targetYear ?? '—'); text('reveal-year', targetYear ?? '—');
+    $('past-label').innerHTML = `${escapeHTML(targetYear ?? '待确认')} 年 <span>REIMAGINED</span>`;
+    document.title = `${targetYear ?? '读取旅程'} · CENTURY PANO`;
     for (const canvas of [$('original-canvas'), $('past-canvas')]) { canvas.width = 1; canvas.height = 1; }
     if (!replay && state.fileURL) {
       try {
@@ -414,25 +466,55 @@
   }
   function placeName(place) { return typeof place === 'string' ? place : place?.name || '未知城市'; }
   function isDemo(manifest) { return !!manifest.demo || manifest.provider === 'demo' || manifest.tiles?.some((tile) => tile.provider === 'demo'); }
+  function renderHistoricalContext(manifest) {
+    const context = manifest.constraints?.historical_context;
+    const panel = $('historical-context'); panel.hidden = false;
+    if (!context) {
+      panel.innerHTML = '<h3>历史背景</h3><p>此旅程暂无地点历史背景记录。画面为想象重建，具体建筑和土地用途尚未核实。</p>';
+      return;
+    }
+    const fallback = context.evidence_basis === 'fallback';
+    const date = /^(\d{4})-(\d{2})-(\d{2})$/.exec(context.reference_date || '');
+    const reference = date ? `${date[1]} 年 ${Number(date[2])} 月 ${Number(date[3])} 日` : `${context.target_year ?? yearOf(manifest) ?? '所选'} 年 7 月 1 日`;
+    const siteLabels = { undeveloped: '未开发', agricultural: '农业用地', built: '已建成', mixed: '混合用途', unknown: '尚未确认' };
+    const list = (heading, values) => Array.isArray(values) && values.length ? `<div class="history-section"><h4>${heading}</h4><ul>${values.map((value) => `<li>${escapeHTML(value)}</li>`).join('')}</ul></div>` : '';
+    panel.innerHTML = `<div class="history-heading"><h3>历史背景推测</h3><span>${escapeHTML(reference)} · 参考时点</span></div>`
+      + `<p class="history-status">${fallback ? '地点历史尚未确认 · 使用保守推测' : '基于模型知识的推测 · 未经史料核实'}</p>`
+      + `<p>${escapeHTML(context.period_summary || '该地点在目标年份的背景尚未确认。')}</p>`
+      + `<p><strong>推测土地用途：${escapeHTML(siteLabels[context.site_state] || siteLabels.unknown)}</strong>${context.site_history ? `<br>${escapeHTML(context.site_history)}` : ''}</p>`
+      + list('当地背景', context.local_context)
+      + list('画面重建依据', context.reconstruction_changes)
+      + list('仍待确认', context.uncertainties)
+      + '<p class="history-footnote">同一地点可能曾是荒地、农田，或存在不同建筑。当前全景不代表这些建筑在所选年份已经存在；影像与背景均需史料核实。</p>';
+  }
   function updateMetadata(manifest) {
     const demo = isDemo(manifest), replay = manifest.mode === 'replay' || state.viewingReplay;
-    text('result-place', placeName(manifest.place)); text('result-year', manifest.anchor_year || years[manifest.decade] || '1925');
-    text('reveal-year', manifest.anchor_year || years[manifest.decade] || '1925');
-    $('past-label').innerHTML = `${escapeHTML(manifest.decade?.slice(0, 4) || '1920')} 年代 <span>REIMAGINED</span>`;
+    const year = yearOf(manifest);
+    const unrecognizedCity = manifest.place?.source === 'manual' && manifest.place?.prompt_safe === false;
+    $('place-warning').hidden = !unrecognizedCity;
+    if (unrecognizedCity) {
+      const warning = '手填城市未识别，未用于历史推理，请补充州 / 国家或使用照片定位。';
+      text('place-warning', warning); text('location-note', warning);
+    }
+    text('result-place', placeName(manifest.place)); text('result-year', year ?? '—');
+    text('reveal-year', year ?? '—');
+    $('past-label').innerHTML = `${escapeHTML(year ?? '待确认')} 年 <span>REIMAGINED</span>`;
+    document.title = `${year ?? '年份待确认'} · ${placeName(manifest.place)} · CENTURY PANO`;
     $('replay-badge').hidden = !replay;
     text('result-mode', demo ? '本地效果演示 · 未调用 AI' : replay ? '已存档旅程 · 无生成调用' : 'AI 想象重建');
-    text('result-note', demo ? '工程示例 / 本地调色用于验证交互与流程，不代表 AI 重建效果。' : '以你拍摄的全景为起点，重新想象另一个年代。');
+    text('result-note', demo ? '工程示例 / 本地调色用于验证交互与流程，不代表 AI 重建效果。' : '结合所选年份与拍摄地点推测历史场景，建筑和土地用途可能与今天不同。');
     const done = manifest.tiles?.filter((tile) => ['done', 'error'].includes(tile.status)).length || 0;
     const total = manifest.geometry?.n || manifest.tiles?.length || 0;
     $('progress-fill').style.width = `${total ? done / total * 100 : 0}%`;
     text('progress-count', `${done} / ${total || '—'} 个画面`);
     const stage = manifest.stage;
-    let progress = done ? '时光正在展开，已完成的区域可以拖动探索' : manifest.anchor?.status === 'running' ? '正在建立统一的年代色彩与天空' : stage === 'preprocess' ? '正在准备全景' : '正在理解场景与年代风格';
+    let progress = done ? '时光正在展开，已完成的区域可以拖动探索' : stage === 'history' ? '正在判断该年份的当地历史与地块变化' : manifest.anchor?.status === 'running' ? '正在建立统一的历史场景与环境' : stage === 'preprocess' ? '正在准备全景' : '正在理解拍摄场景与所选年份';
     if (manifest.status === 'done') progress = replay ? '已打开存档 · 数据来自原始运行' : '旅程已完成';
     if (manifest.status === 'done_partial') progress = '部分画面未生成，已保留对应原图';
     if (manifest.status === 'error') progress = '旅程暂时中断';
     text('progress-text', progress); text('generation-detail', progress);
     if (done > 0) { $('generation-overlay').hidden = true; if (!state.finalLoaded && state.pastPercent === 0) setPastPercent(100); }
+    renderHistoricalContext(manifest);
     renderMetrics(manifest);
   }
   async function applyManifest(manifest, generation) {
@@ -486,6 +568,13 @@
       if (!response.ok) throw new Error(response.status === 404 ? '这个旅程不存在，或当前设备还没有保存它。' : '暂时无法连接服务');
       const manifest = await response.json();
       if (generation !== state.generation) return;
+      if (state.expectedYear !== null && yearOf(manifest) !== null && yearOf(manifest) !== state.expectedYear) {
+        $('generation-overlay').hidden = false;
+        text('generation-title', '返回的年份与选择不一致');
+        text('generation-detail', `你选择了 ${state.expectedYear} 年，请重新生成。`);
+        text('progress-text', '已停止加载，避免显示其他年份的结果');
+        return;
+      }
       await applyManifest(manifest, generation);
       if (generation !== state.generation) return;
       if (manifest.status === 'error') {
@@ -542,7 +631,7 @@
   function renderMetrics(manifest) {
     const metrics = manifest.metrics || {}, seam = metrics.seam_err || {};
     const cells = [
-      ['首个可见画面', metricNumber(metrics.first_view_s), '首次完成调色的画面'],
+      ['首个可见画面', metricNumber(metrics.first_view_s), '首次完成的重建画面'],
       ['完整旅程', metricNumber(metrics.total_s), '本次运行实际用时'],
       ['接缝色差 · 调色前 / 后', `${metricNumber(seam.raw, '')} / ${metricNumber(seam.after_color_match, '')}`, `原图参考值 ${metricNumber(seam.originals_floor, '')}`],
       ['相对串行加速', metricNumber(metrics.speedup, '×'), metrics.serial_baseline_s == null ? '尚未测量串行基线' : `串行基线 ${metricNumber(metrics.serial_baseline_s)}`],
@@ -606,7 +695,7 @@
       const channel = new MessageChannel();
       channel.port1.onmessage = (event) => {
         if (!event.data?.ok) return;
-        const entry = { job_id: manifest.job_id, place: manifest.place, decade: manifest.decade, anchor_year: manifest.anchor_year, metrics: manifest.metrics, provider: manifest.provider, demo: isDemo(manifest), mode: 'replay' };
+        const entry = { job_id: manifest.job_id, place: manifest.place, target_year: manifest.target_year, decade: manifest.decade, anchor_year: manifest.anchor_year, metrics: manifest.metrics, provider: manifest.provider, demo: isDemo(manifest), mode: 'replay' };
         const replays = localReplays().filter((replay) => replay.job_id !== entry.job_id);
         replays.unshift(entry);
         try { localStorage.setItem('century-replays', JSON.stringify(replays.slice(0, 12))); } catch { /* Quota restriction does not affect the current viewer. */ }
@@ -632,8 +721,8 @@
     entries.forEach((entry) => {
       const button = document.createElement('button'); button.className = 'replay-card';
       const demo = isDemo(entry), cached = device.some((item) => item.job_id === entry.job_id);
-      button.innerHTML = `<img src="/jobs/${encodeURIComponent(entry.job_id)}/result" alt="${escapeHTML(placeName(entry.place))}全景缩略图"><span class="replay-card-content"><strong>${escapeHTML(entry.anchor_year || years[entry.decade] || entry.decade)}</strong><span>${escapeHTML(placeName(entry.place))}</span><small>${demo ? '工程示例 · 本地调色' : '已完成的想象重建'}${cached ? ' · 已存本机' : ''}</small></span><span>↗</span>`;
-      button.addEventListener('click', () => { unlockAudio(); dialog.close(); state.decade = entry.decade || '1920s'; startJob(entry.job_id, true); });
+      button.innerHTML = `<img src="/jobs/${encodeURIComponent(entry.job_id)}/result" alt="${escapeHTML(placeName(entry.place))}全景缩略图"><span class="replay-card-content"><strong>${escapeHTML(yearOf(entry) ?? '年份待确认')}</strong><span>${escapeHTML(placeName(entry.place))}</span><small>${demo ? '工程示例 · 本地调色' : '已完成的想象重建'}${cached ? ' · 已存本机' : ''}</small></span><span>↗</span>`;
+      button.addEventListener('click', () => { unlockAudio(); dialog.close(); startJob(entry.job_id, true, 0.5, yearOf(entry)); });
       $('replay-list').appendChild(button);
     });
   }
@@ -642,6 +731,7 @@
   $('replay-dialog').addEventListener('click', (event) => { if (event.target === $('replay-dialog')) { const rect = $('replay-dialog').getBoundingClientRect(); if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) $('replay-dialog').close(); } });
   window.addEventListener('offline', connectionStatus); window.addEventListener('online', () => { checkHealth(); });
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => { /* HTTPS or localhost is needed for offline mode. */ });
+  setTargetYear(state.targetYear);
   checkHealth();
   const replayId = new URLSearchParams(location.search).get('replay');
   if (replayId && /^[a-zA-Z0-9_-]{1,100}$/.test(replayId)) startJob(replayId, true);

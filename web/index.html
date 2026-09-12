@@ -52,9 +52,9 @@
           <div class="hero-bottom"><span>一张全景，无数种时光。</span><span class="illustration-label">概念插画 · 非历史影像</span></div>
         </div>
         <div class="visual-caption"><span>01 — REIMAGINE YOUR SURROUNDINGS</span><span class="little-compass">N ↑</span></div>
-        <div class="decade-rail" aria-label="可探索的年代"><span>CHOOSE YOUR ERA</span><div>1900<small>s</small></div><div class="selected">1920<small>s</small><i></i></div><div>1950<small>s</small></div><div>1970<small>s</small></div></div>
+        <div class="decade-rail" aria-label="按年探索历史"><span>CHOOSE ANY YEAR</span><div>1800</div><div class="selected">1925<i></i></div><div>1945</div><div>1950</div></div>
       </div>
-      <div class="how-it-works"><div><span class="step-number">01</span><p>留住眼前<small>拍摄或上传一张全景</small></p></div><span class="step-connector"></span><div><span class="step-number">02</span><p>选择年代<small>从世纪之交到七十年代</small></p></div><span class="step-connector"></span><div><span class="step-number">03</span><p>转动，穿越<small>拖动或用手机探索时光</small></p></div><span class="journey-note">YOUR VIEW.<br>ANOTHER CENTURY.</span></div>
+      <div class="how-it-works"><div><span class="step-number">01</span><p>留住眼前<small>拍摄或上传一张全景</small></p></div><span class="step-connector"></span><div><span class="step-number">02</span><p>选择年份<small>逐年探索此地的历史背景</small></p></div><span class="step-connector"></span><div><span class="step-number">03</span><p>转动，穿越<small>拖动或用手机探索时光</small></p></div><span class="journey-note">YOUR VIEW.<br>ANOTHER CENTURY.</span></div>
     </section>
 
     <section id="preview-screen" class="screen preview-screen" hidden>
@@ -63,20 +63,28 @@
       <div class="preview-window" id="preview-window" tabindex="0" aria-label="全景预览，使用左右方向键或拖动平移"><img id="preview-image" alt="你上传的全景预览" draggable="false"><span class="preview-crosshair"></span><div class="viewport-hint">↔ &nbsp; 左右拖动，调整视角</div></div>
       <p id="image-warning" class="warning-note" hidden></p>
       <div class="preview-controls">
-        <div class="era-control"><div class="field-label"><span>01</span> 想去哪个年代？</div><div class="decade-options" id="decade-options"><button data-decade="1900s" aria-pressed="false">1900<span>s</span><small>世纪之交</small></button><button data-decade="1920s" aria-pressed="true" class="active">1920<span>s</span><small>摩登年代</small></button><button data-decade="1950s" aria-pressed="false">1950<span>s</span><small>复古日常</small></button><button data-decade="1970s" aria-pressed="false">1970<span>s</span><small>胶片记忆</small></button></div></div>
-        <div class="location-control"><label class="field-label" for="place-input"><span>02</span> 这是哪里？<small>可选</small></label><div class="place-input-wrap"><svg><use href="#i-location"/></svg><input id="place-input" maxlength="160" placeholder="城市，例如 Pittsburgh" autocomplete="address-level2"></div><p id="location-note" class="field-note">只使用城市信息，帮助重现当地风格。</p><label class="check-label"><input id="is-360" type="checkbox">这是一张 360° 等距柱状全景</label></div>
-        <div class="continue-control"><button class="button button-primary" id="generate-button">走进 1920 年代<svg><use href="#i-arrow"/></svg></button><p id="provider-note">想象重建，非历史影像</p></div>
+        <div class="era-control">
+          <label class="field-label" for="year-input"><span>01</span> 想去哪一年？<small>逐年选择</small></label>
+          <div class="year-entry"><input id="year-input" type="number" inputmode="numeric" min="1800" max="2026" step="1" value="1925" required aria-describedby="year-note"><span>年</span></div>
+          <input id="year-range" class="year-range" type="range" min="1800" max="2026" step="1" value="1925" aria-label="选择历史年份" aria-describedby="year-note">
+          <div class="year-scale" aria-hidden="true"><span id="year-min">1800</span><span id="year-max">2026</span></div>
+          <div class="year-options" id="year-options" aria-label="快捷年份"><button data-year="1905" aria-pressed="false">1905</button><button data-year="1925" aria-pressed="true" class="active">1925</button><button data-year="1945" aria-pressed="false">1945</button><button data-year="1950" aria-pressed="false">1950</button></div>
+          <p id="year-note" class="field-note">以当年 7 月 1 日为参考，结合拍摄地点推测当时的历史背景。</p>
+        </div>
+        <div class="location-control"><label class="field-label" for="place-input"><span>02</span> 这是哪里？<small>可手填城市覆盖定位</small></label><div class="place-input-wrap"><svg><use href="#i-location"/></svg><input id="place-input" maxlength="160" placeholder="城市，例如 Pittsburgh, PA, US" autocomplete="off"></div><p id="location-note" class="field-note">优先使用照片 GPS，没有时尝试设备定位。手填城市仅提供城市级背景。</p><p class="field-note location-privacy">上传的照片 GPS、设备定位或已识别的手填城市会用于 AI 历史背景推测；具体建筑与土地用途仍需史料核实。</p><label class="check-label"><input id="is-360" type="checkbox">这是一张 360° 等距柱状全景</label></div>
+        <div class="continue-control"><button class="button button-primary" id="generate-button">走进 1925 年<svg><use href="#i-arrow"/></svg></button><p id="provider-note">想象重建，非历史影像</p></div>
       </div>
     </section>
 
     <section id="result-screen" class="screen result-screen" hidden>
       <div class="result-top chrome"><button class="back-button" id="new-journey-button">← <span>新的旅程</span></button><div class="result-place"><svg><use href="#i-location"/></svg><span id="result-place">未知城市</span><span id="replay-badge" class="badge" hidden>回放</span></div><span id="result-mode" class="result-mode"></span></div>
+      <p id="place-warning" class="warning-note chrome" role="status" hidden></p>
       <div class="result-heading chrome"><div><span class="eyebrow">A WINDOW THROUGH TIME</span><h2>此刻，<span id="result-year">1925</span><span class="year-dot">.</span></h2></div><p id="result-subtitle">旧日的风景，正在眼前展开。</p></div>
       <div class="pano-viewport" id="pano-viewport" tabindex="0" aria-label="全景对比，拖动或按左右键平移">
         <div class="pano-layer original-layer" id="original-layer"><canvas id="original-canvas"></canvas></div>
         <div class="past-clip" id="past-clip"><div class="pano-layer past-layer" id="past-layer"><canvas id="past-canvas"></canvas></div></div>
         <div class="viewport-gradient"></div>
-        <div class="viewport-label present-label chrome">现在 <span>ORIGINAL</span></div><div class="viewport-label past-label chrome" id="past-label">1920 年代 <span>REIMAGINED</span></div>
+        <div class="viewport-label present-label chrome">现在 <span>ORIGINAL</span></div><div class="viewport-label past-label chrome" id="past-label">1925 年 <span>REIMAGINED</span></div>
         <div class="slider-handle" id="slider-handle" role="slider" tabindex="0" aria-label="过去影像显示比例" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span class="slider-grip">‹<i></i>›</span></div>
         <div class="generation-overlay" id="generation-overlay"><span class="processing-orbit"></span><strong id="generation-title">让时间慢下来</strong><span id="generation-detail">正在读取你的全景…</span></div>
         <div class="pan-indicator chrome"><span>↔</span> 拖动探索全景 <i></i> 拖动圆点对比今昔</div>
@@ -85,7 +93,8 @@
       <div class="progress-strip chrome" id="progress-strip"><div class="progress-track"><span id="progress-fill"></span></div><p><span id="progress-text">准备出发</span><span id="progress-count">0 / 0</span></p></div>
       <div class="result-toolbar chrome"><div class="gyro-controls"><button class="button button-small" id="gyro-button"><svg><use href="#i-gyro"/></svg>开启转动跟随</button><button class="text-button" id="recenter-button" hidden>以当前朝向为中心</button></div><div class="result-tools"><button class="icon-button" id="audio-button" aria-label="播放年代氛围音" title="播放氛围音"><svg><use href="#i-sound"/></svg></button><a class="button button-small" id="download-button" hidden download="century-pano.jpg"><svg><use href="#i-image"/></svg>保存全景</a></div></div>
       <p id="gyro-hint" class="gyro-hint chrome" hidden></p>
-      <div class="result-bottom chrome"><p class="reconstruction-notice"><span>✳</span> 想象重建，非历史影像<small id="result-note">以你拍摄的全景为起点，重新想象另一个年代。</small></p><button class="text-button" id="metrics-toggle" aria-expanded="false">本次旅程的数据 <span>+</span></button></div>
+      <section id="historical-context" class="historical-context chrome" aria-label="历史背景与不确定性" hidden></section>
+      <div class="result-bottom chrome"><p class="reconstruction-notice"><span>✳</span> 想象重建，非历史影像<small id="result-note">结合所选年份与拍摄地点推测历史场景，建筑和土地用途可能与今天不同。</small></p><button class="text-button" id="metrics-toggle" aria-expanded="false">本次旅程的数据 <span>+</span></button></div>
       <div id="metrics-panel" class="metrics-panel chrome" hidden></div>
     </section>
   </main>

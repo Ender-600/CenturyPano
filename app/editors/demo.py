@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import io
 import os
+import re
 
 from PIL import Image, ImageEnhance, ImageOps
 
@@ -29,13 +30,15 @@ class DemoEditor:
         with Image.open(io.BytesIO(data)) as source:
             original = source.convert("RGB")
         mono = ImageOps.grayscale(original)
-        if "1975" in prompt or "1970s" in prompt:
+        match = re.search(r"photograph taken in (\d{4})|photograph in (\d{4})", prompt)
+        year = int(next(value for value in match.groups() if value)) if match else 1925
+        if year >= 1970:
             tinted = ImageOps.colorize(mono, "#292d39", "#f0ce8a")
             tinted = Image.blend(tinted, ImageEnhance.Color(original).enhance(0.55), 0.55)
-        elif "1955" in prompt or "1950s" in prompt:
+        elif year >= 1950:
             tinted = ImageOps.colorize(mono, "#24303b", "#e6dfc9")
             tinted = Image.blend(tinted, ImageEnhance.Color(original).enhance(0.35), 0.25)
-        elif "1905" in prompt or "1900s" in prompt:
+        elif year < 1910:
             tinted = ImageOps.colorize(mono, "#2c2118", "#e0c594")
         else:
             tinted = ImageOps.colorize(mono, "#292016", "#f1d6a5")
