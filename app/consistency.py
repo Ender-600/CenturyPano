@@ -4,7 +4,7 @@ from __future__ import annotations
 import numpy as np
 from PIL import Image
 
-from .color import lab_to_image, rgb_to_lab
+from .color import delta_e, lab_to_image, rgb_to_lab
 from .config import ANCHOR_MAX_ASPECT, COLOR_MATCH_K, H, TILE
 
 
@@ -33,8 +33,15 @@ def anchor_crop(anchor: Image.Image, x: int, W: int, *, wrap: bool = False) -> I
                             resample=Image.Resampling.BICUBIC)
 
 
-GAIN_LIMIT = (.92, 1.09)                       # a visible change beyond this is the model's, not ours
-BIAS_LIMIT = np.array([4.0, 2.5, 2.5])         # Lab units: L, a, b
+# Deliberately tight. The seam metric only sees the overlap, so it happily
+# rewards a solve that satisfies the seam by making one tile's centre 15%
+# brighter than its neighbour's — banding the metric is structurally blind to.
+# Measured on a real five-tile job: widening these to +-9% bought 1.57 dE on the
+# seams but cost a 15.3% step between adjacent tile centres, and after the carve
+# the final result differed by 0.10 dE. The carve does the work; this only has to
+# remove genuine drift without introducing a gradient of its own.
+GAIN_LIMIT = (.98, 1.02)
+BIAS_LIMIT = np.array([2.0, 1.5, 1.5])         # Lab units: L, a, b
 COMPENSATION_PASSES = 3
 IDENTITY_PULL = 1.2
 
@@ -83,13 +90,24 @@ def compensate_exposure(tiles: list[Image.Image | np.ndarray], x: list[int], *,
     if not any(overlap > 0 for overlap in overlaps):
         return [_as_image(tile) for tile in tiles], {"applied": False, "reason": "no usable overlap"}
 
-    base = {}
+    strips, base = {}, {}
     for index, overlap in enumerate(overlaps):
         if overlap <= 0:
             continue
-        left = np.asarray(_as_image(tiles[index]))[:, TILE - overlap:]
-        right = np.asarray(_as_image(tiles[index + 1]))[:, :overlap]
-        base[index] = (_strip_stats(rgb_to_lab(left)), _strip_stats(rgb_to_lab(right)))
+        left = rgb_to_lab(np.asarray(_as_image(tiles[index]))[:, TILE - overlap:])
+        right = rgb_to_lab(np.asarray(_as_image(tiles[index + 1]))[:, :overlap])
+        # Kept, not just summarised: the candidate is scored on these exact pixels
+        # before it is allowed anywhere near the panorama.
+        strips[index] = (left, right)
+        base[index] = (_strip_stats(left), _strip_stats(right))
+
+    def strip_error(candidate_gain, candidate_bias) -> float:
+        errors = []
+        for seam, (left, right) in strips.items():
+            moved_left = left * candidate_gain[seam] + candidate_bias[seam]
+            moved_right = right * candidate_gain[seam + 1] + candidate_bias[seam + 1]
+            errors.append(float(delta_e(moved_left, moved_right).mean()))
+        return float(np.mean(errors)) if errors else 0.0
 
     gain, bias = np.ones((count, 3)), np.zeros((count, 3))
     for _ in range(COMPENSATION_PASSES):
@@ -133,12 +151,26 @@ def compensate_exposure(tiles: list[Image.Image | np.ndarray], x: list[int], *,
             solution, *_ = np.linalg.lstsq(np.array(rows), np.array(targets), rcond=None)
             step_gain = np.clip(solution[0::2], *GAIN_LIMIT)
             step_bias = np.clip(solution[1::2], -BIAS_LIMIT[channel], BIAS_LIMIT[channel])
-            gain[:, channel] *= step_gain
-            bias[:, channel] = bias[:, channel] * step_gain + step_bias
-    gain = np.clip(gain, *GAIN_LIMIT)
-    bias = np.clip(bias, -BIAS_LIMIT, BIAS_LIMIT)
+            # Clamp what has accumulated, not merely this step. Clamping only the
+            # step lets three passes reach 0.92**3 and then get truncated at the
+            # end, which breaks the agreement the least squares just solved for
+            # and drives neighbouring tiles to opposite bounds.
+            gain[:, channel] = np.clip(gain[:, channel] * step_gain, *GAIN_LIMIT)
+            bias[:, channel] = np.clip(bias[:, channel] * step_gain + step_bias,
+                                       -BIAS_LIMIT[channel], BIAS_LIMIT[channel])
     gain[list(fixed)] = 1.0
     bias[list(fixed)] = 0.0
+
+    # Do no harm. This step is a nudge worth a fraction of a Lab unit; the carve
+    # does the real work. If the solve did not actually reduce the disagreement on
+    # the overlaps it was fitted to, discard it rather than repaint the panorama.
+    identity_gain, identity_bias = np.ones((count, 3)), np.zeros((count, 3))
+    before = strip_error(identity_gain, identity_bias)
+    after = strip_error(gain, bias)
+    if after >= before:
+        return [_as_image(tile) for tile in tiles], {
+            "applied": False, "reason": "no measured improvement on the overlaps",
+            "seam_de_before": round(before, 4), "seam_de_after": round(after, 4)}
     output = []
     for index, tile in enumerate(tiles):
         if index in fixed:
@@ -151,7 +183,11 @@ def compensate_exposure(tiles: list[Image.Image | np.ndarray], x: list[int], *,
         np.clip(adjusted[..., 1:], -128, 127, out=adjusted[..., 1:])
         output.append(lab_to_image(adjusted))
         del adjusted
-    record = {"applied": True, "fixed": sorted(fixed), "max_gain_deviation": round(float(np.abs(gain - 1).max()), 4),
+    neighbour_step = max((abs(gain[i + 1, 0] / gain[i, 0] - 1) for i in range(count - 1)), default=0.0)
+    record = {"applied": True, "fixed": sorted(fixed),
+              "max_neighbour_step": round(float(neighbour_step), 4),
+              "seam_de_before": round(before, 4), "seam_de_after": round(after, 4),
+              "max_gain_deviation": round(float(np.abs(gain - 1).max()), 4),
               "max_bias": round(float(np.abs(bias).max()), 3),
               "gain_l": [round(float(value), 4) for value in gain[:, 0]],
               "bias_l": [round(float(value), 3) for value in bias[:, 0]]}

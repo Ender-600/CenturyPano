@@ -147,3 +147,34 @@ def test_a_failed_tile_is_never_repainted_to_match_its_neighbours():
     assert record["fixed"] == [2]
     assert np.array_equal(np.asarray(compensated[2]), untouched)
     assert not np.array_equal(np.asarray(compensated[1]), np.asarray(tiles[1]))
+
+
+def test_compensation_is_declined_when_it_does_not_help():
+    # The solve is fitted to noisy evidence; it must never be allowed to make the
+    # measured disagreement worse just because it ran.
+    _, _, overlap, positions = plan_tiles(4 * 849 + TILE)
+    tiles = [Image.fromarray(_structured(seed)) for seed in (11, 12, 13, 14, 15)]
+    before = seam_error(tiles, positions)
+    compensated, record = compensate_exposure(tiles, positions)
+    after = seam_error(compensated, positions)
+    assert after <= before + 1e-6, "compensation must do no harm"
+    if not record["applied"]:
+        assert record["reason"] == "no measured improvement on the overlaps"
+        assert all(np.array_equal(np.asarray(a), np.asarray(b)) for a, b in zip(compensated, tiles))
+
+
+def test_compensation_never_bands_the_panorama():
+    """A seam-only metric rewards satisfying the seam by dimming a whole tile.
+
+    The clamps exist to stop that, so they are pinned here: whatever the solve
+    wants, no two neighbouring tiles may end up more than a few percent apart.
+    """
+    _, _, overlap, positions = plan_tiles(4 * 849 + TILE)
+    base = _structured(7)
+    ramp = [1.0, 1.25, 0.8, 1.3, 0.75]            # far more drift than the clamps allow
+    tiles = [Image.fromarray(np.clip(base * factor, 0, 255).astype(np.uint8)) for factor in ramp]
+    _, record = compensate_exposure(tiles, positions)
+    if record["applied"]:
+        assert record["max_gain_deviation"] <= 0.02 + 1e-9
+        assert record["max_neighbour_step"] <= 0.05, "adjacent tiles must not be visibly banded"
+        assert record["max_bias"] <= 2.0 + 1e-9

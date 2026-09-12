@@ -4,6 +4,7 @@ from __future__ import annotations
 import numpy as np
 from PIL import Image
 
+from .alignment import MAX_SHIFT_PX as MAX_PLAUSIBLE_SHIFT_PX
 from .color import delta_e, rgb_to_lab
 from .config import TILE
 
@@ -55,12 +56,25 @@ def timing_metrics(metrics: dict, finished_at: float) -> dict:
 
 
 def alignment_metrics(tiles: list[dict]) -> dict:
-    """Aggregate per-tile registration records into one panorama-level number."""
+    """Aggregate per-tile registration records into one panorama-level number.
+
+    `mean_shift_px` averages only the registrations that were actually applied.
+    A rejected estimate is a spurious phase-correlation peak — when a 2020s glass
+    facade is reconstructed as 1900 brick the two edge maps share little
+    structure, and the correlation peak can land hundreds of pixels away. Those
+    are discarded rather than warped, so averaging them in reported a drift the
+    panorama never had. They are counted instead, under `rejected`.
+    """
     records = [tile.get("align") for tile in tiles if isinstance(tile.get("align"), dict)]
     if not records:
-        return {"score_before": None, "score_after": None, "mean_shift_px": None, "applied": 0}
-    before = float(np.mean([r["score_before"] for r in records]))
-    after = float(np.mean([r["score_after"] for r in records]))
-    shift = float(np.mean([float(np.hypot(r["dx"], r["dy"])) for r in records]))
-    return {"score_before": round(before, 4), "score_after": round(after, 4),
-            "mean_shift_px": round(shift, 2), "applied": sum(1 for r in records if r.get("applied"))}
+        return {"score_before": None, "score_after": None, "mean_shift_px": None,
+                "applied": 0, "steady": 0, "rejected": 0}
+    used = [r for r in records if r.get("applied")]
+    magnitude = [float(np.hypot(r["dx"], r["dy"])) for r in records]
+    rejected = sum(1 for r, size in zip(records, magnitude)
+                   if not r.get("applied") and size > MAX_PLAUSIBLE_SHIFT_PX)
+    return {"score_before": round(float(np.mean([r["score_before"] for r in records])), 4),
+            "score_after": round(float(np.mean([r["score_after"] for r in records])), 4),
+            "mean_shift_px": round(float(np.mean([float(np.hypot(r["dx"], r["dy"])) for r in used])), 2)
+            if used else 0.0,
+            "applied": len(used), "steady": len(records) - len(used) - rejected, "rejected": rejected}
