@@ -7,7 +7,7 @@
   const defaultTitle = document.title;
   const motionDevice = matchMedia('(pointer: coarse)').matches || navigator.maxTouchPoints > 0;
   const state = {
-    screen: 'capture', file: null, fileURL: null, targetYear: 1925,
+    screen: 'capture', file: null, fileURL: null, targetYear: 1920,
     minYear: 1800, maxYear: new Date().getFullYear(), yearEdited: false, yearDraft: null, expectedYear: null,
     imageWidth: 0, imageHeight: 0, location: null, locationSource: null,
     manualPlace: false, locationPromise: null, locationRevision: 0,
