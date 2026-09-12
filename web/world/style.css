@@ -211,6 +211,16 @@ details > label, details > nav { margin-top: 18px; }
 }
 
 .selected-year-note { margin: 0 0 8px; color: #f5f4edb3; font-size: 11px; line-height: 1.5; }
-/* The host reserves the app tabs above this viewport, including the device safe area. */
-.embedded-world .site-header { top: 14px; }
+/* The host's glass tabs float over the full-bleed scene, including this canvas. */
+.embedded-world { --mode-tabs-top: max(12px, env(safe-area-inset-top)); --mode-tabs-height: 56px; }
+.embedded-world .site-header { top: calc(var(--mode-tabs-top) + var(--mode-tabs-height) + 12px); }
+.embedded-world .scene-progress { top: calc(var(--mode-tabs-top) + var(--mode-tabs-height) + 70px); }
+.embedded-world #message { top: calc(var(--mode-tabs-top) + var(--mode-tabs-height) + 102px); bottom: auto; }
 .embedded-world .window { height: 100%; }
+@media (max-width: 600px) {
+  .embedded-world { --mode-tabs-height: 54px; }
+}
+@media (max-height: 640px) and (orientation: landscape) {
+  .embedded-world #message { left: max(24px, env(safe-area-inset-left)); width: min(360px, calc(100% - 320px)); transform: none; }
+  .embedded-world .scene-progress { left: max(24px, env(safe-area-inset-left)); width: min(360px, calc(100% - 320px)); transform: none; text-align: left; }
+}
