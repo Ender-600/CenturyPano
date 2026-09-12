@@ -17,7 +17,9 @@ class DemoEditor:
         self, image: bytes, prompt: str, *, reference: bytes | None = None,
         strength: float | None = None, seed: int | None = None,
         negative: str | None = None, timeout_s: float = 60.0,
+        structure_lock: bool = False,
     ) -> bytes:
+        del structure_lock  # Demo path is deterministic; lock is enforced in the pipeline.
         # A fixed, disclosed simulated wait makes progressive UI behavior visible.
         # It is never described as inference time, and DEMO_DELAY_S=0 disables it.
         delay = max(0.0, min(5.0, float(os.getenv("DEMO_DELAY_S", "0.45"))))

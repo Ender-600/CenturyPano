@@ -173,7 +173,8 @@ async def create_job(
     if len(_tasks) >= 4:
         raise HTTPException(429, '已有任务正在处理，请稍后再试。')
     if settings.provider != 'demo' and not {
-        'gemini': settings.gemini_api_key, 'fal': settings.fal_key, 'qwen': settings.k2_api_key,
+        'gemini': settings.gemini_api_key, 'grok': settings.grok_api_key, 'fal': settings.fal_key,
+        'qwen': settings.k2_api_key, 'openai': settings.openai_api_key,
     }.get(settings.provider):
         raise HTTPException(503, '请先在服务器 .env 中配置图像服务密钥并重启服务，或使用回放示例。')
     raw = await read_upload(image)
@@ -296,7 +297,8 @@ async def resolve(coords: Coordinates):
 @app.get('/health')
 async def health():
     configured = settings.provider == 'demo' or bool({
-        'gemini': settings.gemini_api_key, 'fal': settings.fal_key, 'qwen': settings.k2_api_key,
+        'gemini': settings.gemini_api_key, 'grok': settings.grok_api_key,
+        'fal': settings.fal_key, 'qwen': settings.k2_api_key, 'openai': settings.openai_api_key,
     }.get(settings.provider))
     return {'status': 'ok', 'provider': settings.provider, 'configured': configured, 'version': '0.1.0',
             'min_year': MIN_YEAR, 'max_year': MAX_YEAR, 'default_year': DEFAULT_YEAR}

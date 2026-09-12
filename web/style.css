@@ -542,6 +542,16 @@ body.clean .slider-handle { visibility: hidden; }
 .history-heading h3, .historical-context > h3 { margin: 0; color: #526b58; font-size: 13px; font-weight: 500; }
 .history-heading > span, .history-status { font-size: 10px; color: #8a795b; }
 .historical-context p, .history-section { margin: 11px 0; font-size: 11px; line-height: 1.9; }
+.history-literary { color: #4f5f54; font-size: 12px; line-height: 2; letter-spacing: 0.02em; }
+.history-raw { margin: 14px 0 0; border-top: 1px solid #24403412; padding-top: 10px; }
+.history-raw > summary {
+  cursor: pointer; list-style: none; color: #7a6a4e; font-size: 11px; font-weight: 500;
+  user-select: none;
+}
+.history-raw > summary::-webkit-details-marker { display: none; }
+.history-raw > summary::after { content: ' ›'; }
+.history-raw[open] > summary::after { content: ' ˄'; }
+.history-raw-lead { margin-top: 12px; }
 .history-section h4 { margin: 0 0 5px; font-size: 11px; font-weight: 500; }
 .history-section ul { padding-left: 17px; margin: 0; }
 .historical-context .history-footnote { padding-top: 11px; border-top: 1px solid #24403412; color: #859082; font-size: 10px; }
@@ -682,3 +692,5 @@ body.clean .slider-handle { visibility: hidden; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
 }
+
+.scene-hint{opacity:.85}

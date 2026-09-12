@@ -35,3 +35,15 @@ def timing_metrics(metrics: dict, finished_at: float) -> dict:
     return {"finished_at": finished_at, "total_s": total,
             "first_view_s": round(max(0, first_tile - start), 4) if first_tile else None,
             "speedup": round(baseline / total, 3) if baseline and total else None}
+
+
+def alignment_metrics(tiles: list[dict]) -> dict:
+    """Aggregate per-tile registration records into one panorama-level number."""
+    records = [tile.get("align") for tile in tiles if isinstance(tile.get("align"), dict)]
+    if not records:
+        return {"score_before": None, "score_after": None, "mean_shift_px": None, "applied": 0}
+    before = float(np.mean([r["score_before"] for r in records]))
+    after = float(np.mean([r["score_after"] for r in records]))
+    shift = float(np.mean([float(np.hypot(r["dx"], r["dy"])) for r in records]))
+    return {"score_before": round(before, 4), "score_after": round(after, 4),
+            "mean_shift_px": round(shift, 2), "applied": sum(1 for r in records if r.get("applied"))}

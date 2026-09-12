@@ -62,6 +62,8 @@ def workspace(tmp_path, monkeypatch):
     FakePool.fail_tile = False
     FakePool.fail_anchor = False
     monkeypatch.setattr(pipeline, "EditorPool", FakePool)
+    # The fake provider answers in 100 ms; a real head start would serialise it.
+    monkeypatch.setattr(settings, "priority_stagger_s", 0.0)
     return tmp_path
 
 
@@ -81,7 +83,11 @@ def test_complete_pipeline_progress_cache_and_serial_isolation(workspace, monkey
     final = asyncio.run(pipeline.run_job("first"))
     assert final["status"] == "done", final
     assert FakePool.instances[0].peak == 3
-    assert set(FakePool.instances[0].prompts) == {final["constraints"]["prompt_global"]}
+    # Every tile shares one immutable prompt (FR-04). Under the pixel lock the anchor
+    # may run early on a generic year prompt so it can overlap scene parsing.
+    tile_prompts = FakePool.instances[0].prompts[1:]
+    assert set(tile_prompts) == {final["constraints"]["prompt_global"]}
+    assert FakePool.instances[0].prompts[0] in {final["constraints"]["prompt_global"], pipeline.generic_decade_prompt(1925)}
     assert final["metrics"]["image_calls"] == final["geometry"]["n"] + 1
     times = [final["metrics"][key] for key in ("started_at", "anchor_done_at", "first_tile_at", "finished_at")]
     assert times == sorted(times) and all(times)
@@ -137,7 +143,9 @@ def test_tile_failure_preserves_outputs_and_finishes_partial(workspace):
     assert np.abs(np.asarray(fallback, dtype=float) - np.asarray(expected, dtype=float)).mean() < 2
 
 
-def test_anchor_failure_still_generates_tiles_without_color_transfer(workspace):
+def test_anchor_failure_still_generates_tiles_without_color_transfer(workspace, monkeypatch):
+    # Color-match comparison is meaningful without structure preserve (which also edits tiles).
+    monkeypatch.setattr(settings, "structure_lock", False)
     FakePool.fail_anchor = True
     create_job("no-anchor")
     result = asyncio.run(pipeline.run_job("no-anchor"))
@@ -166,7 +174,10 @@ def test_same_decade_years_cannot_replay_each_others_history(workspace):
     assert second["constraints"]["target_year"] == second["anchor_year"] == 1946
     assert len(FakePool.instances) == 2
     for pool, result in zip(FakePool.instances, (first, second)):
-        assert set(pool.prompts) == {result["constraints"]["prompt_global"]}
+        # Tiles share the exact-year prompt; the early anchor may use the generic year prompt.
+        assert set(pool.prompts[1:]) == {result["constraints"]["prompt_global"]}
+        assert pool.prompts[0] in {result["constraints"]["prompt_global"],
+                                   pipeline.generic_decade_prompt(result["anchor_year"])}
 
     create_job("year-1945-replay", "1940s", target_year=1945)
     replay = asyncio.run(pipeline.run_job("year-1945-replay"))

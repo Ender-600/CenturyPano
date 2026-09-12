@@ -13,6 +13,7 @@ from app.editors.base import EditorPool, ProviderError
 from app.editors.demo import DemoEditor
 from app.editors.fal import FalImg2ImgEditor
 from app.editors.gemini import GeminiEditor
+from app.editors.grok import GrokImagineEditor
 
 
 def picture(size=(96, 48), color=(90, 135, 180)):
@@ -91,6 +92,41 @@ def test_fal_will_not_fetch_untrusted_output_host():
     with pytest.raises(ProviderError):
         asyncio.run(editor.edit(picture(), "frozen prompt"))
     assert len(requests) == 1
+
+
+def test_grok_imagine_edits_with_base64_and_normalizes_output():
+    source, reference = picture(), picture((24, 24))
+    requests = []
+
+    def respond(request):
+        requests.append(request)
+        return httpx.Response(200, json={"data": [{
+            "b64_json": base64.b64encode(picture((32, 32))).decode(),
+        }]})
+
+    editor = GrokImagineEditor(
+        api_key="test-only-key", model="grok-imagine-image-2.0",
+        transport=httpx.MockTransport(respond),
+    )
+    output = asyncio.run(editor.edit(source, "One frozen prompt", reference=reference, negative="LED signs"))
+    payload = json.loads(requests[0].content)
+    assert str(requests[0].url) == "https://api.x.ai/v1/images/edits"
+    assert requests[0].headers["authorization"] == "Bearer test-only-key"
+    assert payload["model"] == "grok-imagine-image-2.0"
+    assert payload["response_format"] == "b64_json"
+    assert len(payload["images"]) == 2
+    assert payload["images"][0]["url"].startswith("data:image/jpeg;base64,")
+    assert "Avoid these visual elements: LED signs" in payload["prompt"]
+    assert "test-only-key" not in str(requests[0].url)
+    assert Image.open(io.BytesIO(output)).size == (96, 48)
+
+
+def test_grok_imagine_requires_xai_key():
+    editor = GrokImagineEditor(api_key="", transport=httpx.MockTransport(lambda _: httpx.Response(500)))
+    with pytest.raises(ProviderError) as error:
+        asyncio.run(editor.edit(picture(), "test"))
+    assert str(error.value) == "XAI_API_KEY is not configured"
+    assert not error.value.retryable
 
 
 class ScriptedEditor:
