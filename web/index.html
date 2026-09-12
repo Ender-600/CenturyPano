@@ -4,10 +4,11 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#32372f">
-  <meta name="description" content="CENTURY PANO — 让手机成为时间的视窗。同一个地方，另一个年代。">
-  <title>CENTURY PANO · 时间视窗</title>
+  <meta name="description" content="CENTURY PANO — your phone as a window onto time. The same place, another era.">
+  <title>CENTURY PANO · A Window Onto Time</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%2332372f'/%3E%3Cpath d='M7 13V7h6m6 0h6v6M7 19v6h6m6 0h6v-6' stroke='white' stroke-width='1.5' fill='none'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="/style.css">
+  <script src="/capture.js" defer></script>
   <script src="/motion.js" defer></script>
   <script src="/app.js" defer></script>
 </head>
@@ -19,7 +20,6 @@
     <symbol id="i-image" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="3"/><circle cx="8" cy="9" r="1.5"/><path d="m4 17 5-5 4 4 3-3 5 5"/></symbol>
     <symbol id="i-location" viewBox="0 0 24 24"><path d="M18 10c0 4-6 10-6 10S6 14 6 10a6 6 0 1 1 12 0Z"/><circle cx="12" cy="10" r="2"/></symbol>
     <symbol id="i-rotate" viewBox="0 0 24 24"><path d="M4 9a8 8 0 1 1 1 8M4 4v5h5"/><path d="M12 7v5l3 2"/></symbol>
-    <symbol id="i-sound" viewBox="0 0 24 24"><path d="m3 9 5 0 5-4v14l-5-4H3zM17 8a6 6 0 0 1 0 8m3-11a10 10 0 0 1 0 14"/></symbol>
     <symbol id="i-gyro" viewBox="0 0 24 24"><rect x="8" y="3" width="8" height="18" rx="2"/><path d="M4 7c-3 3-3 7 0 10m16-10c3 3 3 7 0 10M11 17h2"/></symbol>
     <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></symbol>
     <symbol id="i-close" viewBox="0 0 24 24"><path d="m6 6 12 12M6 18 18 6"/></symbol>
@@ -30,143 +30,156 @@
     <symbol id="i-play" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="m10 8 6 4-6 4Z"/></symbol>
   </defs></svg>
 
-  <main id="main" class="window" aria-label="时间全景视窗">
-    <section id="capture-screen" class="screen capture-screen" tabindex="0" aria-label="概念全景，左右拖动或使用方向键探索">
-      <img id="hero-image" class="hero-image" src="/window-scene.png" alt="匹兹堡河岸与金色桥梁的概念全景" draggable="false">
+  <main id="main" class="window" aria-label="Panoramic window onto time">
+    <section id="capture-screen" class="screen capture-screen" tabindex="0" aria-label="Concept panorama. Drag sideways or use the arrow keys to explore.">
+      <img id="hero-image" class="hero-image" src="/window-scene.png" alt="Concept panorama of the Pittsburgh riverfront and its golden bridges" draggable="false">
       <div id="hero-past" class="hero-past" aria-hidden="true"></div>
     </section>
 
-    <section id="preview-screen" class="screen preview-screen" hidden aria-label="预览你的全景">
-      <div class="preview-window" id="preview-window" tabindex="0" aria-label="全景预览，使用左右方向键或拖动平移">
-        <img id="preview-image" alt="你上传的全景预览" draggable="false">
+    <section id="preview-screen" class="screen preview-screen" hidden aria-label="Preview your panorama">
+      <div class="preview-window" id="preview-window" tabindex="0" aria-label="Panorama preview. Drag or use the left and right arrow keys to pan.">
+        <img id="preview-image" alt="Preview of the panorama you loaded" draggable="false">
       </div>
     </section>
 
-    <section id="result-screen" class="screen result-screen" hidden aria-label="探索重建后的全景">
-      <div class="pano-viewport" id="pano-viewport" tabindex="0" aria-label="全景对比，拖动或按左右键平移">
+    <section id="result-screen" class="screen result-screen" hidden aria-label="Explore the reconstructed panorama">
+      <div class="pano-viewport" id="pano-viewport" tabindex="0" aria-label="Panorama comparison. Drag or use the arrow keys to pan.">
         <div class="pano-layer original-layer" id="original-layer" aria-hidden="true"><canvas id="original-canvas"></canvas></div>
         <div class="past-clip" id="past-clip" aria-hidden="true"><div class="pano-layer past-layer" id="past-layer"><canvas id="past-canvas"></canvas></div></div>
-        <div class="viewport-label present-label chrome" hidden>现在 <span>ORIGINAL</span></div>
-        <div class="viewport-label past-label chrome" id="past-label" hidden>1920 年代 <span>REIMAGINED</span></div>
-        <div class="slider-handle" id="slider-handle" role="slider" tabindex="0" aria-label="过去影像显示比例" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" hidden><span class="slider-grip">‹<i></i>›</span></div>
+        <div class="viewport-label present-label chrome" hidden>TODAY <span>ORIGINAL</span></div>
+        <div class="viewport-label past-label chrome" id="past-label" hidden>1920s <span>REIMAGINED</span></div>
+        <div class="slider-handle" id="slider-handle" role="slider" tabindex="0" aria-label="How much of the past to reveal" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" hidden><span class="slider-grip">‹<i></i>›</span></div>
         <div class="generation-overlay" id="generation-overlay" role="status">
           <span class="processing-orbit" aria-hidden="true"></span>
-          <strong id="generation-title">让时间慢下来</strong>
-          <span id="generation-detail">正在读取你的全景…</span>
+          <strong id="generation-title">Slowing time down</strong>
+          <span id="generation-detail">Reading your panorama…</span>
         </div>
         <div class="reveal-title" id="reveal-title" aria-hidden="true"><span>WELCOME TO</span><strong id="reveal-year">1925</strong></div>
       </div>
       <div class="progress-strip chrome" id="progress-strip" role="status">
         <div class="progress-track"><span id="progress-fill"></span></div>
-        <p><span id="progress-text">准备出发</span><span id="progress-count">0 / 0</span></p>
+        <p><span id="progress-text">Ready</span><span id="progress-count">0 / 0</span></p>
       </div>
     </section>
 
     <div class="window-shade" aria-hidden="true"></div>
 
     <header class="site-header chrome" id="site-header">
-      <a href="/" class="brand" aria-label="CENTURY PANO 首页"><svg><use href="#i-window"/></svg><span>CENTURY<span class="brand-light"> PANO</span></span></a>
+      <a href="/" class="brand" aria-label="CENTURY PANO home"><svg><use href="#i-window"/></svg><span>CENTURY<span class="brand-light"> PANO</span></span></a>
       <div class="window-place"><svg><use href="#i-location"/></svg><span id="window-place">Pittsburgh</span></div>
-      <button class="round-button menu-button" id="menu-button" aria-label="打开视窗选项" aria-haspopup="dialog"><svg><use href="#i-more"/></svg></button>
+      <button class="round-button menu-button" id="menu-button" aria-label="Open window options" aria-haspopup="dialog"><svg><use href="#i-more"/></svg></button>
     </header>
 
-    <div class="gesture-hint chrome" id="gesture-hint"><span aria-hidden="true">↔</span> 左右滑动，探索此地</div>
-    <button class="gesture-hint motion-button chrome" id="motion-button" hidden><svg aria-hidden="true"><use href="#i-gyro"/></svg><span id="motion-label">点按开启转动视窗</span></button>
+    <div class="gesture-hint chrome" id="gesture-hint"><span aria-hidden="true">↔</span> Swipe sideways to explore this place</div>
+    <button class="gesture-hint motion-button chrome" id="motion-button" hidden><svg aria-hidden="true"><use href="#i-gyro"/></svg><span id="motion-label">Tap to look around by turning</span></button>
 
-    <section class="journey-controls chrome" id="journey-controls" aria-label="年份与视窗控制">
+    <section class="journey-controls chrome" id="journey-controls" aria-label="Year and window controls">
       <div class="time-caption">
-        <p id="window-caption">同一个地方，另一个年代。</p>
-        <h1><button id="year-picker-button" aria-label="选择具体年份" aria-haspopup="dialog"><span id="window-year">1925</span><span class="year-suffix" id="window-year-suffix">年</span></button></h1>
+        <p id="window-caption">The same place, another era.</p>
+        <h1><button id="year-picker-button" aria-label="Choose a specific year" aria-haspopup="dialog"><span id="window-year">1925</span><span class="year-suffix" id="window-year-suffix"></span></button></h1>
       </div>
-      <div class="year-options" id="year-options" role="group" aria-label="快捷选择年份">
+      <div class="year-options" id="year-options" role="group" aria-label="Jump to a year">
         <button data-year="1900" aria-pressed="false">1900<span class="era-dot" aria-hidden="true"></span></button>
         <button data-year="1920" aria-pressed="false">1920<span class="era-dot" aria-hidden="true"></span></button>
         <button data-year="1950" aria-pressed="false">1950<span class="era-dot" aria-hidden="true"></span></button>
         <button data-year="1970" aria-pressed="false">1970<span class="era-dot" aria-hidden="true"></span></button>
-        <button id="present-button" aria-pressed="false">现在<span class="era-dot" aria-hidden="true"></span></button>
+        <button id="present-button" aria-pressed="false">Today<span class="era-dot" aria-hidden="true"></span></button>
       </div>
-      <button class="generate-button" id="generate-button" hidden>走进 1925 年<svg><use href="#i-arrow"/></svg></button>
+      <button class="generate-button" id="generate-button" hidden>Step into 1925<svg><use href="#i-arrow"/></svg></button>
       <div class="action-row">
-        <button class="subtle-button" id="album-button"><svg><use href="#i-image"/></svg><span>换张全景</span></button>
-        <button class="quiet-button" id="clean-button" aria-label="进入纯净模式，隐藏界面" title="纯净模式"><svg><use href="#i-window"/></svg></button>
-        <button class="subtle-button" id="compare-button" aria-pressed="false"><svg><use href="#i-compare"/></svg><span>今昔对比</span></button>
+        <button class="subtle-button" id="album-button"><svg><use href="#i-image"/></svg><span>Another panorama</span></button>
+        <button class="quiet-button" id="clean-button" aria-label="Enter clean mode and hide the interface" title="Clean mode"><svg><use href="#i-window"/></svg></button>
+        <button class="subtle-button" id="compare-button" aria-pressed="false"><svg><use href="#i-compare"/></svg><span>Then and now</span></button>
       </div>
-      <p class="provider-note" id="provider-note">概念影像 · 上传全景，开启旅程</p>
+      <p class="provider-note" id="provider-note">Concept image · load a panorama to begin</p>
     </section>
 
-    <button class="round-button restore-button" id="restore-button" aria-label="退出纯净模式，显示界面" hidden><svg><use href="#i-eye"/></svg></button>
+    <button class="round-button restore-button" id="restore-button" aria-label="Leave clean mode and show the interface" hidden><svg><use href="#i-eye"/></svg></button>
   </main>
 
   <dialog id="options-dialog" class="options-sheet" aria-labelledby="options-title">
     <div class="sheet-handle" aria-hidden="true"></div>
     <div class="sheet-heading">
-      <div><p class="eyebrow">CENTURY PANO</p><h2 id="options-title">你的时光视窗</h2></div>
-      <button class="sheet-close icon-button" id="close-options" aria-label="关闭视窗选项"><svg><use href="#i-close"/></svg></button>
+      <div><p class="eyebrow">CENTURY PANO</p><h2 id="options-title">Your window onto time</h2></div>
+      <button class="sheet-close icon-button" id="close-options" aria-label="Close window options"><svg><use href="#i-close"/></svg></button>
     </div>
 
     <section id="year-settings" class="sheet-section year-settings" aria-labelledby="year-settings-title">
-      <div class="year-heading"><label id="year-settings-title" for="year-input">选择年份</label><span class="year-entry"><input id="year-input" type="number" inputmode="numeric" min="1800" max="2026" step="1" value="1925" required><span>年</span></span></div>
-      <input id="year-range" class="year-range" type="range" min="1800" max="2026" step="1" value="1925" aria-label="选择具体年份">
+      <div class="year-heading"><label id="year-settings-title" for="year-input">Choose a year</label><span class="year-entry"><input id="year-input" type="number" inputmode="numeric" min="1800" max="2026" step="1" value="1925" required></span></div>
+      <input id="year-range" class="year-range" type="range" min="1800" max="2026" step="1" value="1925" aria-label="Choose a specific year">
       <div class="year-scale"><span id="year-min">1800</span><span id="year-max">2026</span></div>
-      <p class="field-note">每年以 7 月 1 日为参考。也可以直接输入年份。</p>
+      <p class="field-note">Every year is read as 1 July. You can also type a year directly.</p>
     </section>
 
     <div class="sheet-actions">
-      <button id="capture-button"><svg><use href="#i-camera"/></svg><span>拍下眼前的风景<small>使用手机全景模式，慢慢转身。</small></span><svg class="sheet-arrow"><use href="#i-arrow"/></svg></button>
-      <button id="sample-button"><svg><use href="#i-play"/></svg><span>先来一场时光旅行<small>打开示例，感受完整的视窗。</small></span><svg class="sheet-arrow"><use href="#i-arrow"/></svg></button>
-      <button id="nav-replays"><svg><use href="#i-archive"/></svg><span>时光档案<small>重访已经保存的旅程。</small></span><svg class="sheet-arrow"><use href="#i-arrow"/></svg></button>
+      <button id="capture-button"><svg><use href="#i-camera"/></svg><span>Capture what you see<small>Turn slowly on the spot and we build the panorama.</small></span><svg class="sheet-arrow"><use href="#i-arrow"/></svg></button>
+      <button id="sample-button"><svg><use href="#i-play"/></svg><span>Take a journey first<small>Open a sample and see the whole thing.</small></span><svg class="sheet-arrow"><use href="#i-arrow"/></svg></button>
+      <button id="nav-replays"><svg><use href="#i-archive"/></svg><span>The archive<small>Revisit a journey already saved.</small></span><svg class="sheet-arrow"><use href="#i-arrow"/></svg></button>
     </div>
 
     <section id="photo-settings" class="sheet-section" hidden aria-labelledby="photo-settings-title">
-      <h3 id="photo-settings-title">这一次，从哪里出发？</h3>
-      <div class="location-field-heading"><label class="field-label" for="place-input">城市 <span>可选</span></label><button class="text-button locate-button" id="locate-button"><svg><use href="#i-location"/></svg>使用当前位置</button></div>
-      <div class="place-input-wrap"><svg><use href="#i-location"/></svg><input id="place-input" maxlength="160" placeholder="城市，例如 Pittsburgh, PA, US" autocomplete="address-level2"></div>
-      <p id="location-note" class="field-note">照片位置用于推测当地历史；也可手动填写拍摄城市。</p>
-      <p class="field-note">手填城市优先于照片 GPS；当前位置可能与拍摄地不同。可用坐标及城市会用于历史推理。</p>
-      <label class="check-label"><input id="is-360" type="checkbox">这是一张 360° 等距柱状全景</label>
-      <p class="field-note scene-hint">室外街景效果最佳。室内场景只会更换陈设与材质，画面改变有限。</p>
+      <h3 id="photo-settings-title">Where does this one begin?</h3>
+      <div class="location-field-heading"><label class="field-label" for="place-input">City <span>optional</span></label><button class="text-button locate-button" id="locate-button"><svg><use href="#i-location"/></svg>Use my location</button></div>
+      <div class="place-input-wrap"><svg><use href="#i-location"/></svg><input id="place-input" maxlength="160" placeholder="City, for example Pittsburgh, PA, US" autocomplete="address-level2"></div>
+      <p id="location-note" class="field-note">The photo's location guides the local history. You can also type the city yourself.</p>
+      <p class="field-note">A city you type wins over the photo's GPS, and your current location may not be where the photo was taken. Whatever coordinates and city are available are used to reason about the history.</p>
+      <label class="check-label"><input id="is-360" type="checkbox">This is a 360° equirectangular panorama</label>
+      <p class="field-note scene-hint">Outdoor street scenes work best. Indoors, only furnishings and materials change, so the difference is smaller.</p>
       <p id="image-warning" class="warning-note" hidden></p>
-      <button class="text-button return-button" id="retake-button">重新选择照片 <span>↗</span></button>
+      <button class="text-button return-button" id="retake-button">Choose another photo <span>↗</span></button>
     </section>
 
     <section id="journey-info" class="sheet-section journey-info" hidden aria-labelledby="journey-info-title">
-      <div class="journey-info-heading"><h3 id="journey-info-title">此刻，<span id="result-year">1925</span>。</h3><span id="replay-badge" class="badge" hidden>回放</span></div>
-      <div class="result-place"><svg><use href="#i-location"/></svg><span id="result-place">未知城市</span></div>
-      <p id="result-subtitle" class="field-note">旧日的风景，正在眼前展开。</p>
+      <div class="journey-info-heading"><h3 id="journey-info-title"><span id="result-year">1925</span>, right here.</h3><span id="replay-badge" class="badge" hidden>Replay</span></div>
+      <div class="result-place"><svg><use href="#i-location"/></svg><span id="result-place">Unknown city</span></div>
+      <p id="result-subtitle" class="field-note">An older view, opening up in front of you.</p>
       <p id="result-mode" class="result-mode"></p>
-      <p id="result-note" class="result-note">以你拍摄的全景为起点，重新想象另一个年代。</p>
+      <p id="result-note" class="result-note">Reimagined from the panorama you shot, in another era.</p>
       <p id="place-warning" class="warning-note" role="status" hidden></p>
       <div id="historical-context" class="historical-context" hidden></div>
-      <button class="text-button metrics-toggle" id="metrics-toggle" aria-expanded="false" aria-controls="metrics-panel">本次旅程的数据 <span>+</span></button>
+      <button class="text-button metrics-toggle" id="metrics-toggle" aria-expanded="false" aria-controls="metrics-panel">The numbers behind this journey <span>+</span></button>
       <div id="metrics-panel" class="metrics-panel" hidden></div>
     </section>
 
-    <section class="sheet-section" aria-label="手机转动视窗">
-      <button class="button button-small" id="gyro-button" aria-pressed="false"><svg><use href="#i-gyro"/></svg>开启转动跟随</button>
-      <button class="text-button recenter-button" id="recenter-button" hidden>以当前朝向为中心</button>
+    <section class="sheet-section" aria-label="Look around by turning the phone">
+      <button class="button button-small" id="gyro-button" aria-pressed="false"><svg><use href="#i-gyro"/></svg>Follow my phone</button>
+      <button class="text-button recenter-button" id="recenter-button" hidden>Centre on where I'm facing</button>
       <p id="gyro-hint" class="gyro-hint" hidden></p>
     </section>
 
-    <section id="result-actions" class="sheet-section result-actions" hidden aria-label="全景工具">
-      <button class="button audio-button" id="audio-button" aria-label="播放年代氛围音" title="播放年代氛围音"><svg><use href="#i-sound"/></svg>播放年代氛围音</button>
-      <a class="button button-small download-button" id="download-button" hidden download="century-pano.jpg"><svg><use href="#i-image"/></svg>保存全景</a>
-      <button class="text-button return-button" id="new-journey-button">开启新的旅程 <span>↗</span></button>
+    <section id="result-actions" class="sheet-section result-actions" hidden aria-label="Panorama tools">
+      <a class="button button-small download-button" id="download-button" hidden download="century-pano.jpg"><svg><use href="#i-image"/></svg>Save the panorama</a>
+      <button class="text-button return-button" id="new-journey-button">Start a new journey <span>↗</span></button>
     </section>
 
-    <div class="sheet-footnote"><p>想象重建，非历史影像。<br>每一次穿越，都是从你的视角出发。</p><span id="connection-status" class="connection"><i aria-hidden="true"></i><span>准备探索</span></span></div>
+    <div class="sheet-footnote"><p>An imagined reconstruction, not a historical photograph.<br>Every journey starts from your own viewpoint.</p><span id="connection-status" class="connection"><i aria-hidden="true"></i><span>Ready</span></span></div>
   </dialog>
 
   <dialog id="replay-dialog" class="options-sheet replay-sheet" aria-labelledby="replays-title">
     <div class="sheet-handle" aria-hidden="true"></div>
-    <div class="sheet-heading dialog-header"><div><p class="eyebrow">THE TIME ARCHIVE</p><h2 id="replays-title">时光档案</h2></div><button class="sheet-close icon-button" id="close-replays" aria-label="关闭时光档案"><svg><use href="#i-close"/></svg></button></div>
-    <p class="dialog-intro">已完成的旅程，可以一遍遍重访。<br>回放使用已保存的结果，不调用生成服务。</p>
+    <div class="sheet-heading dialog-header"><div><p class="eyebrow">THE TIME ARCHIVE</p><h2 id="replays-title">The Archive</h2></div><button class="sheet-close icon-button" id="close-replays" aria-label="Close the archive"><svg><use href="#i-close"/></svg></button></div>
+    <p class="dialog-intro">Finished journeys, to revisit as often as you like.<br>A replay uses results already saved and calls no generation service.</p>
     <div id="replay-list" class="replay-list"></div>
-    <p class="dialog-footnote">工程示例为程序绘制的虚构场景与本地调色，不代表 AI 重建效果。</p>
+    <p class="dialog-footnote">The engineering sample is a drawn fictional scene with local colour grading. It does not represent AI reconstruction.</p>
   </dialog>
 
-  <input id="camera-input" type="file" accept="image/*,.heic,.heif" capture="environment" aria-label="拍摄全景照片" hidden>
-  <input id="album-input" type="file" accept="image/*,.heic,.heif" aria-label="选择本地全景照片" hidden>
+  <div class="capture-overlay" id="capture-overlay" hidden role="dialog" aria-modal="true" aria-labelledby="capture-overlay-title">
+    <video id="capture-video" playsinline muted autoplay></video>
+    <div class="capture-guide">
+      <p class="eyebrow">CAPTURE</p>
+      <h2 id="capture-overlay-title">Turn slowly on the spot</h2>
+      <p class="capture-hint" id="capture-hint">Hold the phone upright and sweep steadily in one direction.</p>
+      <div class="capture-progress" role="progressbar" aria-labelledby="capture-overlay-title" aria-valuemin="0" aria-valuemax="360" aria-valuenow="0" id="capture-progress"><i id="capture-progress-fill"></i></div>
+      <p class="capture-readout"><strong id="capture-degrees">0°</strong><span id="capture-target">keep going to about 120°</span></p>
+    </div>
+    <div class="capture-actions">
+      <button class="button" id="capture-done" disabled>Use this panorama</button>
+      <button class="text-button" id="capture-cancel">Cancel</button>
+    </div>
+  </div>
+  <input id="camera-input" type="file" accept="image/*,.heic,.heif" aria-label="Take a panorama" hidden>
+  <input id="album-input" type="file" accept="image/*,.heic,.heif" aria-label="Choose a panorama from this device" hidden>
   <div class="toast" id="toast" role="status" hidden></div>
-  <noscript><p class="noscript">开启 JavaScript 后，即可拖动全景、选择年代和载入照片。</p></noscript>
+  <noscript><p class="noscript">Turn on JavaScript to drag the panorama, choose an era and load a photo.</p></noscript>
 </body>
 </html>

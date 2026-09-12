@@ -493,7 +493,7 @@ body.clean .slider-handle { visibility: hidden; }
 .icon-button { display: grid; place-items: center; width: 44px; height: 44px; border-radius: 50%; color: #69796d; }
 .sheet-close { flex-shrink: 0; background: #213b3108; }
 .sheet-close svg { width: 17px; height: 17px; }
-.sheet-close:hover, .audio-button:hover { background: #213b3110; }
+.sheet-close:hover { background: #213b3110; }
 .sheet-actions { border-top: 1px solid #24403412; }
 .sheet-actions button {
   width: 100%;
@@ -694,3 +694,38 @@ body.clean .slider-handle { visibility: hidden; }
 }
 
 .scene-hint{opacity:.85}
+
+/* In-app panorama capture: a full-screen viewfinder with a sweep readout. */
+.capture-overlay {
+  position: fixed; inset: 0; z-index: 60; background: #0b0f0d;
+  display: flex; flex-direction: column; justify-content: flex-end;
+}
+.capture-overlay[hidden] { display: none; }
+.capture-overlay video {
+  position: absolute; inset: 0; width: 100%; height: 100%;
+  object-fit: cover; background: #0b0f0d;
+}
+.capture-guide, .capture-actions { position: relative; padding: 0 20px; color: #f4f1ea; }
+.capture-guide {
+  margin-top: auto; padding-top: 24px;
+  background: linear-gradient(to top, #0b0f0dcc, #0b0f0d00);
+}
+.capture-guide h2 { margin: 2px 0 6px; font-size: 1.25rem; }
+.capture-guide .eyebrow { color: #f4f1ea99; }
+.capture-hint { margin: 0 0 14px; font-size: .85rem; color: #f4f1eacc; }
+.capture-progress {
+  height: 4px; border-radius: 999px; background: #f4f1ea2e; overflow: hidden;
+}
+.capture-progress i { display: block; height: 100%; width: 0; background: #f4f1ea; transition: width .12s linear; }
+.capture-readout {
+  display: flex; justify-content: space-between; align-items: baseline; gap: 12px;
+  margin: 8px 0 0; font-size: .8rem; color: #f4f1eacc;
+}
+.capture-readout strong { font-size: 1.1rem; color: #f4f1ea; font-variant-numeric: tabular-nums; }
+.capture-actions {
+  display: flex; flex-direction: column; align-items: stretch; gap: 6px;
+  padding-top: 14px; padding-bottom: max(20px, env(safe-area-inset-bottom));
+  background: #0b0f0dcc;
+}
+.capture-actions .text-button { color: #f4f1eacc; justify-content: center; }
+.capture-actions .button[disabled] { opacity: .45; }
