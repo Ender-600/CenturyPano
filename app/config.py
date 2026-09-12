@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 from .temporal import DECADE_ANCHOR as DECADE_ANCHOR
 
 ROOT = Path(__file__).resolve().parent.parent
-load_dotenv(ROOT / '.env')
+load_dotenv(ROOT / '.env', override=True)
 
 TILE = H = 1024
 STEP_TARGET = 870
@@ -37,7 +37,9 @@ class Settings:
     gemini_image_model: str = field(default_factory=lambda: os.getenv('GEMINI_IMAGE_MODEL', 'gemini-2.5-flash-image'))
     gemini_text_model: str = field(default_factory=lambda: os.getenv('GEMINI_TEXT_MODEL', 'gemini-2.5-flash'))
     k2_model: str = field(default_factory=lambda: os.getenv('K2_MODEL', 'IFM/K2-Horizon-375B-A23B'))
+    k2_vl_model: str = field(default_factory=lambda: os.getenv('K2_VL_MODEL', 'qwen3-vl-plus'))
     k2_base_url: str = field(default_factory=lambda: os.getenv('K2_BASE_URL', 'https://api.ifm.ai/v1'))
+    qwen_image_model: str = field(default_factory=lambda: os.getenv('QWEN_IMAGE_MODEL', 'qwen-image-edit'))
     fal_model: str = field(default_factory=lambda: os.getenv('FAL_MODEL', 'fal-ai/flux/dev/image-to-image'))
 
 
