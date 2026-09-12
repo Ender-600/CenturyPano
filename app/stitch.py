@@ -30,8 +30,8 @@ from dataclasses import dataclass
 
 import numpy as np
 from PIL import Image
-from skimage.color import rgb2lab
 
+from .color import delta_e, rgb_to_lab
 from .config import H, TILE
 
 CARVE_GAIN_MIN = .70       # carve only if the cut costs <= 70% of the centre line
@@ -71,16 +71,16 @@ def feather_weights(index: int, x: list[int], tile_w: int = TILE) -> np.ndarray:
     return weights
 
 
-def _lab(tile: Image.Image | np.ndarray) -> np.ndarray:
-    array = np.asarray(tile, dtype=np.float32)
-    return rgb2lab(array / 255.0 if array.max(initial=0) > 1 else array)
-
-
 def overlap_cost(left: Image.Image | np.ndarray, right: Image.Image | np.ndarray, overlap: int) -> np.ndarray:
-    """Per-pixel Lab ΔE between the two tiles inside their shared strip."""
-    a = _lab(left)[:, -overlap:, :]
-    b = _lab(right)[:, :overlap, :]
-    return np.sqrt(((a - b) ** 2).sum(axis=2)).astype(np.float32)
+    """Per-pixel Lab ΔE between the two tiles inside their shared strip.
+
+    The strips are sliced before conversion, not after: only ~17% of each tile
+    lies in the overlap, and converting the whole tile to throw most of it away
+    was the bulk of this pass's memory traffic.
+    """
+    a = rgb_to_lab(np.asarray(left.convert("RGB") if isinstance(left, Image.Image) else left)[:, -overlap:])
+    b = rgb_to_lab(np.asarray(right.convert("RGB") if isinstance(right, Image.Image) else right)[:, :overlap])
+    return delta_e(a, b)
 
 
 def min_cut(cost: np.ndarray) -> np.ndarray:

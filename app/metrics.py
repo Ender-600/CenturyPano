@@ -3,8 +3,8 @@ from __future__ import annotations
 
 import numpy as np
 from PIL import Image
-from skimage.color import rgb2lab
 
+from .color import delta_e, rgb_to_lab
 from .config import TILE
 
 
@@ -14,10 +14,9 @@ def seam_error(tiles: list[Image.Image | np.ndarray], x: list[int]) -> float:
         overlap = x[index] + TILE - x[index + 1]
         if overlap <= 0:
             continue
-        left = np.asarray(tiles[index], dtype=np.float32)[:, TILE - overlap:] / 255.0
-        right = np.asarray(tiles[index + 1], dtype=np.float32)[:, :overlap] / 255.0
-        delta = rgb2lab(left) - rgb2lab(right)
-        errors.append(float(np.linalg.norm(delta, axis=-1).mean()))
+        left = rgb_to_lab(np.asarray(tiles[index])[:, TILE - overlap:])
+        right = rgb_to_lab(np.asarray(tiles[index + 1])[:, :overlap])
+        errors.append(float(delta_e(left, right).mean()))
     return round(float(np.mean(errors)), 5) if errors else 0.0
 
 

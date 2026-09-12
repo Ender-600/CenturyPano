@@ -1,11 +1,10 @@
 """Global style anchor and deterministic Lab color transfer."""
 from __future__ import annotations
 
-import warnings
 import numpy as np
 from PIL import Image
-from skimage.color import lab2rgb, rgb2lab
 
+from .color import lab_to_image, rgb_to_lab
 from .config import ANCHOR_MAX_ASPECT, COLOR_MATCH_K, H, TILE
 
 
@@ -40,6 +39,13 @@ COMPENSATION_PASSES = 3
 IDENTITY_PULL = 1.2
 
 
+def _strip_stats(strip: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Per-channel median and median absolute deviation — robust to content."""
+    middle = np.median(strip, axis=(0, 1))
+    spread = np.median(np.abs(strip - middle), axis=(0, 1)) + 1e-3
+    return middle.astype(np.float64), spread.astype(np.float64)
+
+
 def compensate_exposure(tiles: list[Image.Image | np.ndarray], x: list[int], *,
                         fixed: set[int] | frozenset[int] = frozenset()) -> tuple[list[Image.Image], dict]:
     """Remove left-to-right exposure drift by solving one gain+bias per tile.
@@ -58,6 +64,12 @@ def compensate_exposure(tiles: list[Image.Image | np.ndarray], x: list[int], *,
     what it is meant for — a nudge that removes drift — and leave the visible
     disagreement to the seam carve, which is the right tool for it.
 
+    Only the overlap strips are ever converted to Lab for the solve, and the
+    iteration updates their statistics arithmetically rather than re-converting:
+    the transform is affine, so a median maps to `gain * median + bias` and a
+    spread to `gain * spread` exactly. Each tile is converted once, at the end,
+    to apply the result.
+
     Tiles listed in `fixed` are returned untouched and the seams touching them are
     dropped from the solve. That is how a failed tile — which is the unedited
     present-day crop, not a reconstruction — stays identical to the photograph
@@ -71,8 +83,14 @@ def compensate_exposure(tiles: list[Image.Image | np.ndarray], x: list[int], *,
     if not any(overlap > 0 for overlap in overlaps):
         return [_as_image(tile) for tile in tiles], {"applied": False, "reason": "no usable overlap"}
 
-    labs = [_lab(tile) for tile in tiles]
-    current = [lab.copy() for lab in labs]
+    base = {}
+    for index, overlap in enumerate(overlaps):
+        if overlap <= 0:
+            continue
+        left = np.asarray(_as_image(tiles[index]))[:, TILE - overlap:]
+        right = np.asarray(_as_image(tiles[index + 1]))[:, :overlap]
+        base[index] = (_strip_stats(rgb_to_lab(left)), _strip_stats(rgb_to_lab(right)))
+
     gain, bias = np.ones((count, 3)), np.zeros((count, 3))
     for _ in range(COMPENSATION_PASSES):
         for channel in range(3):
@@ -80,19 +98,20 @@ def compensate_exposure(tiles: list[Image.Image | np.ndarray], x: list[int], *,
             for index, overlap in enumerate(overlaps):
                 if overlap <= 0:
                     continue
-                left = current[index][:, TILE - overlap:, channel]
-                right = current[index + 1][:, :overlap, channel]
-                left_mid, right_mid = np.median(left), np.median(right)
-                # Median absolute deviation: a robust stand-in for spread.
-                left_spread = np.median(np.abs(left - left_mid)) + 1e-3
-                right_spread = np.median(np.abs(right - right_mid)) + 1e-3
+                (left_mid, left_spread), (right_mid, right_spread) = base[index]
+                neighbour = index + 1
+                # Where the strips sit after everything applied so far.
+                current_left = gain[index, channel] * left_mid[channel] + bias[index, channel]
+                current_right = gain[neighbour, channel] * right_mid[channel] + bias[neighbour, channel]
+                scaled_left = gain[index, channel] * left_spread[channel]
+                scaled_right = gain[neighbour, channel] * right_spread[channel]
                 row = np.zeros(2 * count)
-                row[2 * index], row[2 * index + 1] = left_mid, 1.0
-                row[2 * (index + 1)], row[2 * (index + 1) + 1] = -right_mid, -1.0
+                row[2 * index], row[2 * index + 1] = current_left, 1.0
+                row[2 * neighbour], row[2 * neighbour + 1] = -current_right, -1.0
                 rows.append(row)
                 targets.append(0.0)
                 row = np.zeros(2 * count)
-                row[2 * index], row[2 * (index + 1)] = left_spread, -right_spread
+                row[2 * index], row[2 * neighbour] = scaled_left, -scaled_right
                 rows.append(row)
                 targets.append(0.0)
             for index in range(count):
@@ -116,21 +135,22 @@ def compensate_exposure(tiles: list[Image.Image | np.ndarray], x: list[int], *,
             step_bias = np.clip(solution[1::2], -BIAS_LIMIT[channel], BIAS_LIMIT[channel])
             gain[:, channel] *= step_gain
             bias[:, channel] = bias[:, channel] * step_gain + step_bias
-            for index in range(count):
-                current[index][..., channel] = current[index][..., channel] * step_gain[index] + step_bias[index]
     gain = np.clip(gain, *GAIN_LIMIT)
     bias = np.clip(bias, -BIAS_LIMIT, BIAS_LIMIT)
     gain[list(fixed)] = 1.0
     bias[list(fixed)] = 0.0
     output = []
-    for index, lab in enumerate(labs):
+    for index, tile in enumerate(tiles):
         if index in fixed:
-            output.append(_as_image(tiles[index]))
+            output.append(_as_image(tile))
             continue
-        adjusted = lab * gain[index] + bias[index]
-        adjusted[..., 0] = np.clip(adjusted[..., 0], 0, 100)
-        adjusted[..., 1:] = np.clip(adjusted[..., 1:], -128, 127)
-        output.append(_from_lab(adjusted))
+        adjusted = rgb_to_lab(_as_image(tile))
+        adjusted *= gain[index].astype(np.float32)
+        adjusted += bias[index].astype(np.float32)
+        np.clip(adjusted[..., 0], 0, 100, out=adjusted[..., 0])
+        np.clip(adjusted[..., 1:], -128, 127, out=adjusted[..., 1:])
+        output.append(lab_to_image(adjusted))
+        del adjusted
     record = {"applied": True, "fixed": sorted(fixed), "max_gain_deviation": round(float(np.abs(gain - 1).max()), 4),
               "max_bias": round(float(np.abs(bias).max()), 3),
               "gain_l": [round(float(value), 4) for value in gain[:, 0]],
@@ -144,35 +164,14 @@ def _as_image(tile: Image.Image | np.ndarray) -> Image.Image:
     return Image.fromarray(np.round(np.clip(np.asarray(tile, dtype=np.float32), 0, 255)).astype(np.uint8))
 
 
-def _lab(tile: Image.Image | np.ndarray) -> np.ndarray:
-    array = np.asarray(tile, dtype=np.float32)
-    return rgb2lab(np.clip(array / 255.0 if array.max(initial=0) > 1 else array, 0, 1))
-
-
-def _from_lab(lab: np.ndarray) -> Image.Image:
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", UserWarning)
-        rgb = lab2rgb(lab)
-    return Image.fromarray(np.round(np.clip(rgb, 0, 1) * 255).astype(np.uint8))
-
-
 def color_match(tile_rgb: Image.Image | np.ndarray, ref_rgb: Image.Image | np.ndarray,
                 k: float = COLOR_MATCH_K) -> Image.Image:
     """Apply the specified channel-wise Reinhard transfer in CIE Lab."""
-    tile = np.asarray(tile_rgb, dtype=np.float32)
-    reference = np.asarray(ref_rgb, dtype=np.float32)
-    if tile.max(initial=0) > 1:
-        tile /= 255.0
-    if reference.max(initial=0) > 1:
-        reference /= 255.0
-    lab = rgb2lab(np.clip(tile, 0, 1))
-    target = rgb2lab(np.clip(reference, 0, 1))
+    lab = rgb_to_lab(tile_rgb)
+    target = rgb_to_lab(ref_rgb)
     for channel in range(3):
         values, ref = lab[..., channel], target[..., channel]
         mean, std = values.mean(), values.std() + 1e-6
         ref_mean, ref_std = ref.mean(), ref.std() + 1e-6
         lab[..., channel] = (values - mean) * (ref_std / std) * k + (ref_mean * k + mean * (1 - k))
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", UserWarning)
-        output = lab2rgb(lab)
-    return Image.fromarray(np.round(np.clip(output, 0, 1) * 255).astype(np.uint8))
+    return lab_to_image(lab)

@@ -19,7 +19,6 @@ from dataclasses import dataclass
 import numpy as np
 from PIL import Image
 from scipy.ndimage import shift as nd_shift
-from skimage.color import rgb2gray
 from skimage.feature import canny
 from skimage.filters import gaussian, sobel
 from skimage.registration import phase_cross_correlation
@@ -43,12 +42,22 @@ class Alignment:
                 "applied": self.applied}
 
 
+# Rec. 709 luma, as scikit-image uses. Written out rather than called as a
+# matrix product: `rgb2gray` is `array @ coeffs` in float64, and this runs on
+# every tile inside a worker thread, which is exactly the BLAS path that
+# segfaulted the stitch pass. See app/color.py.
+_LUMA = (0.2125, 0.7154, 0.0721)
+
+
 def _gray(image: Image.Image | np.ndarray) -> np.ndarray:
     array = np.asarray(image, dtype=np.float32)
+    if array.max(initial=0) > 1:
+        array = array / np.float32(255.0)
     if array.ndim == 3:
-        array = rgb2gray(array / 255.0 if array.max(initial=0) > 1 else array)
-    elif array.max(initial=0) > 1:
-        array = array / 255.0
+        gray = array[..., 0] * np.float32(_LUMA[0])
+        gray += array[..., 1] * np.float32(_LUMA[1])
+        gray += array[..., 2] * np.float32(_LUMA[2])
+        return gray
     return array.astype(np.float32)
 
 
