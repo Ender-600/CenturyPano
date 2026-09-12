@@ -170,6 +170,29 @@ def test_pool_enforces_timeout():
     asyncio.run(run())
 
 
+def test_pool_uses_each_providers_timeout_when_falling_back():
+    async def run():
+        primary = ScriptedEditor('openai', [ProviderError('unavailable', retryable=False)])
+        primary.default_timeout_s = 180.0
+        fallback = ScriptedEditor('gemini', [picture()])
+        pool = EditorPool(primary, fallback, backoff=())
+        result = await pool.edit(picture(), 'test')
+        assert result.provider == 'gemini'
+        assert primary.calls[0][2]['timeout_s'] == 180.0
+        assert fallback.calls[0][2]['timeout_s'] == 60.0
+    asyncio.run(run())
+
+
+def test_pool_explicit_timeout_overrides_provider_default():
+    async def run():
+        primary = ScriptedEditor('openai', [picture()])
+        primary.default_timeout_s = 180.0
+        pool = EditorPool(primary, fallback='', backoff=())
+        await pool.edit(picture(), 'test', timeout_s=12.0)
+        assert primary.calls[0][2]['timeout_s'] == 12.0
+    asyncio.run(run())
+
+
 def test_demo_is_deterministic_and_explicit(monkeypatch):
     monkeypatch.setenv("DEMO_DELAY_S", "0")
 

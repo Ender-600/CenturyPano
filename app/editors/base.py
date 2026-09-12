@@ -77,6 +77,9 @@ class _CircuitOpen(Exception):
 
 def get_editor(name: str) -> ImageEditor:
     name = name.strip().lower()
+    if name == "openai":
+        from .openai import OpenAIImageEditor
+        return OpenAIImageEditor()
     if name == "gemini":
         from .gemini import GeminiEditor
         return GeminiEditor()
@@ -86,7 +89,7 @@ def get_editor(name: str) -> ImageEditor:
     if name == "demo":
         from .demo import DemoEditor
         return DemoEditor()
-    raise ValueError("PROVIDER must be demo, gemini, or fal")
+    raise ValueError("PROVIDER must be demo, openai, gemini, or fal")
 
 
 class EditorPool:
@@ -159,7 +162,7 @@ class EditorPool:
     async def edit(
         self, image: bytes, prompt: str, *, reference: bytes | None = None,
         strength: float | None = None, seed: int | None = None,
-        negative: str | None = None, timeout_s: float = 60.0,
+        negative: str | None = None, timeout_s: float | None = None,
     ) -> EditResult:
         attempts = 0
         current_negative = negative
@@ -176,7 +179,8 @@ class EditorPool:
                 try:
                     result = await self._invoke(
                         editor, image, prompt, reference=reference, strength=strength,
-                        seed=seed, negative=current_negative, timeout_s=timeout_s,
+                        seed=seed, negative=current_negative,
+                        timeout_s=timeout_s if timeout_s is not None else getattr(editor, "default_timeout_s", 60.0),
                     )
                     if editor is self.primary:
                         self._primary_failures = 0

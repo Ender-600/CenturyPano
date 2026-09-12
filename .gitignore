@@ -8,6 +8,7 @@ __pycache__/
 *.pyc
 data/in/
 data/out/
+data/probes/
 data/certs/
 data/*.png
 node_modules/

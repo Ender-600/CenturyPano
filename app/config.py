@@ -27,9 +27,14 @@ DEFAULT_DECADE = '1920s'
 class Settings:
     in_dir: Path = field(default_factory=lambda: Path(os.getenv('IN_DIR', str(ROOT / 'data/in'))).resolve())
     out_dir: Path = field(default_factory=lambda: Path(os.getenv('OUT_DIR', str(ROOT / 'data/out'))).resolve())
-    provider: str = field(default_factory=lambda: os.getenv('PROVIDER', 'gemini' if os.getenv('GEMINI_API_KEY') else 'demo'))
+    provider: str = field(default_factory=lambda: os.getenv('PROVIDER',
+        'openai' if os.getenv('OPENAI_API_KEY') else 'gemini' if os.getenv('GEMINI_API_KEY') else 'demo'))
     provider_fallback: str = field(default_factory=lambda: os.getenv('PROVIDER_FALLBACK', 'fal'))
     max_concurrency: int = field(default_factory=lambda: max(1, min(6, int(os.getenv('MAX_CONCURRENCY', '6')))))
+    openai_api_key: str = field(default_factory=lambda: os.getenv('OPENAI_API_KEY', ''), repr=False)
+    openai_image_model: str = field(default_factory=lambda: os.getenv('OPENAI_IMAGE_MODEL', 'gpt-image-2.5-sunburst'))
+    openai_image_quality: str = field(default_factory=lambda: os.getenv('OPENAI_IMAGE_QUALITY', 'medium'))
+    openai_image_timeout_s: float = field(default_factory=lambda: float(os.getenv('OPENAI_IMAGE_TIMEOUT_S', '180')))
     gemini_api_key: str = field(default_factory=lambda: os.getenv('GEMINI_API_KEY', ''), repr=False)
     fal_key: str = field(default_factory=lambda: os.getenv('FAL_KEY', ''), repr=False)
     k2_api_key: str = field(default_factory=lambda: os.getenv('K2_API_KEY', ''), repr=False)
@@ -38,6 +43,12 @@ class Settings:
     k2_model: str = field(default_factory=lambda: os.getenv('K2_MODEL', 'IFM/K2-Horizon-375B-A23B'))
     k2_base_url: str = field(default_factory=lambda: os.getenv('K2_BASE_URL', 'https://api.ifm.ai/v1'))
     fal_model: str = field(default_factory=lambda: os.getenv('FAL_MODEL', 'fal-ai/flux/dev/image-to-image'))
+
+    def provider_configured(self, provider: str | None = None) -> bool:
+        selected = provider if provider is not None else self.provider
+        return selected == 'demo' or bool({
+            'openai': self.openai_api_key, 'gemini': self.gemini_api_key, 'fal': self.fal_key,
+        }.get(selected))
 
 
 settings = Settings()

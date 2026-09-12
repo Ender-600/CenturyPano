@@ -1,4 +1,6 @@
 import asyncio
+import hashlib
+import json
 from types import SimpleNamespace
 
 import numpy as np
@@ -8,7 +10,7 @@ from PIL import Image
 from app import constraints, pipeline, scene
 from app.config import settings
 from app.geometry import image_bytes, open_rgb
-from app.manifest import update_manifest
+from app.manifest import read_manifest, update_manifest
 
 
 class FakePool:
@@ -17,6 +19,8 @@ class FakePool:
     fail_anchor = False
 
     def __init__(self, **kwargs):
+        self.primary = kwargs.get("primary", "demo")
+        self.provider = self.primary if isinstance(self.primary, str) else self.primary.name
         self.image_calls = 0
         self.max_concurrency = 6
         self.active = 0
@@ -38,7 +42,7 @@ class FakePool:
             array = np.asarray(source, dtype=np.float32)
             array *= np.array([1.03, .91, .73], dtype=np.float32)
             output = Image.fromarray(np.clip(array, 0, 255).astype(np.uint8))
-            return SimpleNamespace(image=image_bytes(output), provider="demo", attempts=1)
+            return SimpleNamespace(image=image_bytes(output), provider=self.provider, attempts=1)
         finally:
             self.active -= 1
 
@@ -86,6 +90,19 @@ def test_complete_pipeline_progress_cache_and_serial_isolation(workspace, monkey
         assert (settings.out_dir / "first" / f"t{tile['i']}_raw.jpg").is_file()
         assert (settings.out_dir / "first" / f"t{tile['i']}.jpg").is_file()
     assert final["metrics"]["seam_err"]["originals_floor"] == 0
+
+    # Keep compatibility with the legacy request hash and indirect index shape.
+    assert "image_config" not in final
+    image_data = (settings.in_dir / "source.jpg").read_bytes()
+    legacy_context = json.dumps({"decade": final["decade"], "provider": "demo",
+                                 "place": final["place"], "is_360": False},
+                                sort_keys=True, separators=(",", ":"))
+    request_hash = pipeline._request_key(image_data, final, "demo")
+    assert request_hash == hashlib.sha256(image_data + legacy_context.encode()).hexdigest()
+    index_file = settings.out_dir / ".cache/requests" / f"{request_hash}.json"
+    legacy_index = json.loads(index_file.read_text())
+    legacy_index.pop("job_id")
+    index_file.write_text(json.dumps(legacy_index))
 
     create_job("cached")
     async def forbidden(*args, **kwargs):
@@ -149,3 +166,104 @@ def test_cache_key_uses_exact_bytes_decade_provider_and_prompt():
     variants = [(b"image2", "1920s", "demo", "prompt"), (b"image", "1950s", "demo", "prompt"),
                 (b"image", "1920s", "gemini", "prompt"), (b"image", "1920s", "demo", "other")]
     assert all(pipeline.cache_key(*args) != original for args in variants)
+
+
+@pytest.fixture
+def openai_workspace(workspace, monkeypatch):
+    from app.editors import openai
+
+    class FakeOpenAIEditor:
+        name = "openai"
+
+        def __init__(self, *, model, quality):
+            self.model = model
+            self.quality = quality
+
+    async def offline_scene(image, **kwargs):
+        return {**scene.DEFAULT_SCENE_SPEC, "fallback": True, "_tokens": 0}
+
+    async def offline_constraints(place, decade, parsed_scene, **kwargs):
+        return await constraints.build_constraints(place, decade, parsed_scene, provider="demo")
+
+    monkeypatch.setattr(openai, "OpenAIImageEditor", FakeOpenAIEditor)
+    monkeypatch.setattr(pipeline, "parse_scene", offline_scene)
+    monkeypatch.setattr(pipeline, "build_constraints", offline_constraints)
+    monkeypatch.setattr(settings, "provider", "openai")
+    monkeypatch.setattr(settings, "openai_image_model", "gpt-image-2.5-sunburst")
+    monkeypatch.setattr(settings, "openai_image_quality", "medium")
+    return workspace
+
+
+def create_openai_job(job_id, profile=None):
+    create_job(job_id)
+    update_manifest(job_id, lambda m: m.update(provider="openai"))
+    if profile is not None:
+        update_manifest(job_id, lambda m: m.update(image_config=profile))
+
+
+def test_openai_model_quality_caches_survive_shared_exact_key_overwrite(openai_workspace, monkeypatch):
+    profiles = [
+        {"model": "gpt-image-2.5-sunburst", "quality": "medium"},
+        {"model": "gpt-image-2.5-sunburst", "quality": "high"},
+        {"model": "another-configured-image-model", "quality": "medium"},
+    ]
+    originals = []
+    for index, profile in enumerate(profiles):
+        monkeypatch.setattr(settings, "openai_image_model", profile["model"])
+        monkeypatch.setattr(settings, "openai_image_quality", profile["quality"])
+        create_openai_job(f"profile-{index}")
+        result = asyncio.run(pipeline.run_job(f"profile-{index}"))
+        assert result["status"] == "done" and result["cache_hit"] is False, result
+        assert result["image_config"] == profile
+        primary = FakePool.instances[-1].primary
+        assert (primary.model, primary.quality) == (profile["model"], profile["quality"])
+        originals.append(result)
+    assert len(FakePool.instances) == 3
+    # The unchanged public contract intentionally produces the same exact key.
+    assert len({result["cache_key"] for result in originals}) == 1
+    shared_index = settings.out_dir / ".cache" / f"{originals[0]['cache_key']}.json"
+    assert json.loads(shared_index.read_text())["job_id"] == "profile-2"
+
+    async def forbidden(*args, **kwargs):
+        raise AssertionError("A profile cache hit must make zero model calls")
+    monkeypatch.setattr(pipeline, "parse_scene", forbidden)
+    monkeypatch.setattr(pipeline, "build_constraints", forbidden)
+    for index, profile in enumerate(profiles):
+        monkeypatch.setattr(settings, "openai_image_model", profile["model"])
+        monkeypatch.setattr(settings, "openai_image_quality", profile["quality"])
+        create_openai_job(f"replay-{index}")
+        replay = asyncio.run(pipeline.run_job(f"replay-{index}"))
+        assert replay["status"] == "done" and replay["mode"] == "replay", replay
+        assert replay["image_config"] == profile
+        assert replay["cache_source_job_id"] == f"profile-{index}"
+        assert replay["metrics"] == originals[index]["metrics"]
+    assert len(FakePool.instances) == 3
+
+
+def test_openai_cache_rejects_mismatched_profile_pointer(openai_workspace):
+    create_openai_job("profile-source")
+    original = asyncio.run(pipeline.run_job("profile-source"))
+    assert original["status"] == "done", original
+    image = (settings.in_dir / "source.jpg").read_bytes()
+    mismatched = dict(original, image_config={"model": "gpt-image-2.5-sunburst", "quality": "high"})
+    request_hash = pipeline._request_key(image, mismatched, "openai")
+    index_file = settings.out_dir / ".cache/requests" / f"{request_hash}.json"
+    index_file.write_text(json.dumps({"job_id": "profile-source", "cache_key": original["cache_key"]}))
+    assert not pipeline._replay_hit("must-not-replay", request_hash, image, mismatched, "openai")
+
+
+def test_openai_baseline_preserves_saved_model_and_quality(openai_workspace, monkeypatch):
+    saved = {"model": "saved-image-model", "quality": "high"}
+    create_openai_job("frozen", saved)
+    original = asyncio.run(pipeline.run_job("frozen"))
+    assert original["status"] == "done", original
+    assert original["image_config"] == saved
+    monkeypatch.setattr(settings, "openai_image_model", "new-server-model")
+    monkeypatch.setattr(settings, "openai_image_quality", "low")
+    measured = asyncio.run(pipeline.run_baseline("frozen"))
+    assert measured["baseline_status"] == "done", measured
+    baseline = read_manifest(measured["baseline"]["job_id"])
+    assert baseline["image_config"] == saved
+    primary = FakePool.instances[-1].primary
+    assert primary.model == saved["model"] and primary.quality == saved["quality"]
+    assert FakePool.instances[-1].peak == 1

@@ -31,10 +31,14 @@ def cache_key(image: bytes, decade: str, provider: str, prompt_global: str) -> s
 def _request_key(image: bytes, manifest: dict, provider: str) -> str:
     # This index allows a replay lookup before making any scene/constraint calls.
     # Location and the 360 override affect interpretation and must not collide.
-    context = json.dumps({"decade": manifest["decade"], "provider": provider,
-                          "place": manifest.get("place", {}),
-                          "is_360": manifest["source"].get("is_360")},
-                         sort_keys=True, separators=(",", ":"))
+    context_data = {"decade": manifest["decade"], "provider": provider,
+                    "place": manifest.get("place", {}),
+                    "is_360": manifest["source"].get("is_360")}
+    # Do not add an empty profile to legacy requests: existing demo cache hashes
+    # must remain valid. OpenAI model and quality are part of image identity.
+    if "image_config" in manifest:
+        context_data["image_config"] = manifest["image_config"]
+    context = json.dumps(context_data, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(image + context.encode()).hexdigest()
 
 
@@ -59,8 +63,17 @@ def _replay_hit(job_id: str, request_key: str, original: bytes, current: dict, p
     directory = settings.out_dir / ".cache"
     try:
         index = json.loads((directory / "requests" / f"{request_key}.json").read_text())
-        cached_index = json.loads((directory / f"{index['cache_key']}.json").read_text())
-        cached = read_manifest(cached_index["job_id"])
+        cached_id = index.get("job_id")
+        if cached_id is None:
+            # Older indexes used this shared secondary pointer. New requests
+            # point to their own job so equal prompts cannot cross profiles.
+            cached_index = json.loads((directory / f"{index['cache_key']}.json").read_text())
+            cached_id = cached_index["job_id"]
+        cached = read_manifest(cached_id)
+        if cached.get("image_config") != current.get("image_config"):
+            return False
+        if cached.get("provider", provider) != provider or cached["decade"] != current["decade"]:
+            return False
         prompt = cached["constraints"]["prompt_global"]
         if cache_key(original, current["decade"], provider, prompt) != index["cache_key"]:
             return False
@@ -105,6 +118,12 @@ async def run_job(job_id: str, *, concurrency: int | None = None, use_cache: boo
     started = time.time()
     manifest = read_manifest(job_id)
     provider = manifest.get("provider") or settings.provider
+    image_config = None
+    if provider == "openai":
+        saved_config = manifest.get("image_config") or {}
+        image_config = {"model": saved_config.get("model", settings.openai_image_model),
+                        "quality": saved_config.get("quality", settings.openai_image_quality)}
+        manifest["image_config"] = image_config
     directory = job_dir(job_id)
     directory.mkdir(parents=True, exist_ok=True)
     stage = "preprocess"
@@ -112,6 +131,8 @@ async def run_job(job_id: str, *, concurrency: int | None = None, use_cache: boo
     def start(m):
         m.update(status="running", stage=stage, mode="live", provider=provider,
                  is_demo=provider == "demo", demo=provider == "demo", cache_hit=False)
+        if image_config is not None:
+            m["image_config"] = dict(image_config)
         m["metrics"] = {"started_at": started, "anchor_done_at": None, "first_tile_at": None,
                         "finished_at": None, "first_view_s": None, "total_s": None,
                         "seam_err": {"raw": None, "after_color_match": None, "originals_floor": None},
@@ -145,7 +166,11 @@ async def run_job(job_id: str, *, concurrency: int | None = None, use_cache: boo
         update_manifest(job_id, lambda m: (m.update(scene=scene, stage="anchor"),
                                            m["metrics"]["tokens"].update(vlm=tokens_vlm)))
         stage = "anchor"
-        pool = EditorPool(primary=provider, fallback=settings.provider_fallback)
+        primary = provider
+        if provider == "openai":
+            from .editors.openai import OpenAIImageEditor
+            primary = OpenAIImageEditor(model=image_config["model"], quality=image_config["quality"])
+        pool = EditorPool(primary=primary, fallback=settings.provider_fallback)
         seed = int(manifest.get("job_seed", 0))
         decade = manifest["decade"]
 
@@ -254,7 +279,7 @@ async def run_job(job_id: str, *, concurrency: int | None = None, use_cache: boo
             cache_dir = settings.out_dir / ".cache"
             await asyncio.to_thread(_atomic_json, cache_dir / f"{final['cache_key']}.json", {"job_id": job_id})
             await asyncio.to_thread(_atomic_json, cache_dir / "requests" / f"{request_hash}.json",
-                                    {"cache_key": final["cache_key"]})
+                                    {"cache_key": final["cache_key"], "job_id": job_id})
         return final
     except Exception as exc:
         error_type = type(exc).__name__

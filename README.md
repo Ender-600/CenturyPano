@@ -6,9 +6,9 @@
 
 ## 当前可运行版本
 
-已实现移动端页面、FastAPI 图像流水线、Gemini 主服务、fal 回退、IFM K2 年代约束、磁盘缓存、渐进瓦片、前后对比、陀螺仪与拖动、音频揭幕、离线回放和串行基线。
+已实现移动端页面、FastAPI 图像流水线、GPT Image 2.5 Sunburst / Gemini 图像编辑、fal 回退、Gemini 场景识别、IFM K2 年代约束、磁盘缓存、渐进瓦片、前后对比、陀螺仪与拖动、音频揭幕、离线回放和串行基线。
 
-仓库自带的是 **工程示例**：程序绘制的街景插画经过本地色调变换，没有调用 AI，不是实拍照片，不代表历史重建画质。真实模型效果、真实模型性能、iPhone 的实体传感器验收需在配置密钥后完成，不能把下方本地数值作为 Gemini 的结果。
+仓库自带的是 **工程示例**：程序绘制的街景插画经过本地色调变换，没有调用 AI，不是实拍照片，不代表历史重建画质。真实模型效果、真实模型性能、iPhone 的实体传感器验收需在配置密钥后完成，不能把下方本地数值作为真实模型的结果。
 
 ## 本地启动
 
@@ -35,31 +35,35 @@ PROVIDER=demo uv run python scripts/seed_demo.py
 把密钥写入本地 `.env`，不要写入前端或提交到 Git。变更配置后重启服务器。
 
 ```dotenv
-PROVIDER=gemini
-PROVIDER_FALLBACK=fal
-GEMINI_API_KEY=你的密钥
-FAL_KEY=你的密钥
-K2_API_KEY=你的IFM密钥
-GEMINI_IMAGE_MODEL=gemini-2.5-flash-image
-GEMINI_TEXT_MODEL=gemini-2.5-flash
-K2_BASE_URL=https://api.ifm.ai/v1
-K2_MODEL=IFM/K2-Horizon-375B-A23B
+PROVIDER=openai
+OPENAI_API_KEY=你的OpenAI密钥
+OPENAI_IMAGE_MODEL=gpt-image-2.5-sunburst
+OPENAI_IMAGE_QUALITY=medium
+OPENAI_IMAGE_TIMEOUT_S=180
+# 如需 fal 回退，设为 fal 并填写 FAL_KEY；留空表示只使用 OpenAI。
+PROVIDER_FALLBACK=
 MAX_CONCURRENCY=6
 ```
+
+GPT Image 2.5 Sunburst 负责「整幅年代锚点」及「原始瓦片 + 锚点参考」的多图编辑，使用官方 Image Edits API。瓦片输出规范化为 1024×1024 JPEG，宽幅锚点先请求合法尺寸，再还原工作尺寸。`medium` 为默认画质；可通过 `OPENAI_IMAGE_QUALITY` 调整为 `low`、`high`、`xhigh`、`max` 或 `auto`。每次调用默认最多等待 180 秒，并发数量沿用 `MAX_CONCURRENCY`。OpenAI 不接收这里的 `seed` / `strength`，因此共享种子不保证图像可复现。任务记录 OpenAI 模型与画质配置，缓存和串行基线保留这份配置；每块图片另行记录实际使用的服务，便于识别 fal 回退。
+
+场景理解仍是独立的 Gemini VLM：可选填写 `GEMINI_API_KEY`，默认 `GEMINI_TEXT_MODEL=gemini-2.5-flash`；只填写 OpenAI 密钥时使用默认场景描述。可选填写 `K2_API_KEY` 启用 IFM 年代约束；可选填写 `FAL_KEY` 并设置 `PROVIDER_FALLBACK=fal` 启用图像回退。若想继续使用 Gemini 编辑，设置 `PROVIDER=gemini`，默认图像模型为 `gemini-2.5-flash-image`。
 
 这里的 K2 是 HackCMU 赞助方 **IFM K2**。未配置 K2 或调用失败时，使用保守的内置年代约束；VLM 失败使用默认场景，锚点失败仍继续瓦片。真实图像服务失败时不会偷偷退回本地色调变换：失败瓦片使用原图并标记 `done_partial`。
 
 先验证单次调用，再准备实拍回放。下列命令会使用所配置服务并产生对应服务用量；基线会额外完整运行一次。
 
 ```bash
-uv run python scripts/probe_providers.py /absolute/path/panorama.jpg
+uv run python scripts/probe_providers.py /absolute/path/panorama.jpg --provider openai
 uv run python scripts/make_replay.py /absolute/path/panorama.jpg 1920s --place Pittsburgh
 # 省略基线：附加 --no-baseline
 # 单独补跑串行基线：
 uv run python scripts/baseline.py JOB_ID
 ```
 
-官方接口参考：[Gemini 图片编辑](https://ai.google.dev/gemini-api/docs/generate-content/image-generation)、[fal img2img](https://fal.ai/models/fal-ai/flux/dev/image-to-image/api)、[IFM 快速开始](https://docs.ifm.ai/#/quickstart)、[IFM JSON 输出](https://docs.ifm.ai/#/structured-output)。
+探针会记录模型、画质和真实返回图；没有密钥时标记 `SKIPPED` 且调用次数为 0。`--provider all` 会依次探测 OpenAI、Gemini 和 fal。探针结果保存在被 Git 忽略的 `data/probes/`。
+
+官方接口参考：[GPT Image 2.5 Sunburst](https://developers.openai.com/api/docs/models/gpt-image-2.5-sunburst)、[OpenAI 图片编辑](https://developers.openai.com/api/docs/guides/image-generation)、[Gemini 图片编辑](https://ai.google.dev/gemini-api/docs/generate-content/image-generation)、[fal img2img](https://fal.ai/models/fal-ai/flux/dev/image-to-image/api)、[IFM 快速开始](https://docs.ifm.ai/#/quickstart)、[IFM JSON 输出](https://docs.ifm.ai/#/structured-output)。
 
 ## 手机 HTTPS 演示
 
@@ -84,7 +88,7 @@ docker run --rm -p 8000:8000 --env-file .env -v "$PWD/data:/data" century-pano
 ```text
 上传原图 → EXIF/离线城市 → 预处理 → VLM 场景
                                    ├─ IFM K2 → 冻结全局提示词 ─┐
-                                   └─ Gemini 锚点 ────────────┤
+                                   └─ 图像模型锚点 ──────────┤
                                                              ↓
                          视口优先的并行瓦片 → Lab 颜色匹配 → 余弦羽化拼接
                                       ↓                          ↓
@@ -140,7 +144,7 @@ node --check web/sw.js
 | 校园街区 | 1.9765 | 3.0154 | 6.2509 | 2.073 |
 | 360 环景 | 2.1925 | 4.7950 | 9.9622 | 2.078 |
 
-本地模拟器本来就使用相同调色，城市示例 `seam_err.raw=0`、`after_color_match=0.35617`，因此**没有验证真实图像任务的接缝改善**。真实验收需要至少一份真实任务满足 `raw > after_color_match`，并记录 Gemini/fal 实际总时长与基线。
+本地模拟器本来就使用相同调色，城市示例 `seam_err.raw=0`、`after_color_match=0.35617`，因此**没有验证真实图像任务的接缝改善**。真实验收需要至少一份真实任务满足 `raw > after_color_match`，并记录实际图像服务的总时长与基线。
 
 ## 规格边界与待完成现场验收
 
@@ -149,7 +153,7 @@ node --check web/sw.js
 - 音频采用本地原创 WAV 而非 MP3，无外部素材授权和运行时下载。
 - 系统 `<input capture>` 无法保证所有手机相机选择器暴露全景模式；可在系统相机先拍全景，再从相册选择。HEIC 预览由服务器兼容处理。
 - 物理 iPhone Safari/Chrome 的滑杆、拖动、相机、传感器权限、方向符号、音频解锁仍需现场实机勾选。
-- 真实 Gemini/fal 探针、实拍全景、真实接缝改善、真实速度比以及 3–4 个真实回放尚待密钥和照片。
+- 真实 OpenAI/Gemini/fal 探针、真实接缝改善、真实速度比以及 3–4 个真实回放尚待服务密钥与现场验收。
 
 不要把未通过的原规格 H0–H4 门槛视为完成。缺少密钥时已完成其余可独立验证的开发，不会伪造真实验收结果。
 

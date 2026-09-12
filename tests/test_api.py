@@ -86,3 +86,32 @@ def test_atomic_manifest_concurrent_updates(client):
     with ThreadPoolExecutor(max_workers=8) as workers:
         list(workers.map(increment, range(80)))
     assert read_manifest('atomic-test')['count'] == 80
+
+
+def test_openai_health_and_missing_key_block_upload(client, monkeypatch):
+    monkeypatch.setattr(settings, 'provider', 'openai')
+    monkeypatch.setattr(settings, 'openai_api_key', '')
+    health = client.get('/health').json()
+    assert health['provider'] == 'openai' and health['configured'] is False
+    response = client.post('/jobs', files={'image': ('pano.jpg', panorama(), 'image/jpeg')})
+    assert response.status_code == 503
+    assert not list(settings.in_dir.iterdir())
+
+
+def test_openai_key_accepts_upload_without_exposing_credentials(client, monkeypatch):
+    from app import pipeline
+
+    monkeypatch.setattr(settings, 'provider', 'openai')
+    monkeypatch.setattr(settings, 'openai_api_key', 'test-only-private-key')
+
+    async def complete_without_network(job_id):
+        update_manifest(job_id, lambda m: m.update(status='done'))
+
+    monkeypatch.setattr(pipeline, 'run_job', complete_without_network)
+    health = client.get('/health')
+    assert health.json()['configured'] is True
+    response = client.post('/jobs', files={'image': ('pano.jpg', panorama(), 'image/jpeg')})
+    assert response.status_code == 201
+    manifest = wait_done(client, response.json()['job_id'])
+    assert manifest['provider'] == 'openai' and manifest['demo'] is False
+    assert settings.openai_api_key not in health.text + str(manifest) + repr(settings)
