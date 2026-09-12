@@ -52,6 +52,7 @@ class Settings:
     fal_model: str = field(default_factory=lambda: os.getenv('FAL_MODEL', 'fal-ai/flux/dev/image-to-image'))
     # Soft composition lock: allow historical reshape; nudge overlap margins for seams.
     structure_lock: bool = field(default_factory=lambda: os.getenv('STRUCTURE_LOCK', '1') not in {'0', 'false', 'no'})
+    lean_locked_prompt: bool = field(default_factory=lambda: os.getenv('LEAN_LOCKED_PROMPT', '1') not in {'0', 'false', 'False'})
     # Head start for the tile the viewer is facing, so viewport priority is real
     # even when every tile fits inside the concurrency budget at once.
     priority_stagger_s: float = field(default_factory=lambda: max(0.0, float(os.getenv('PRIORITY_STAGGER_S', '0.4'))))

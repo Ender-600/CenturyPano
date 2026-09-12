@@ -163,7 +163,7 @@ test('iOS asks only from a tap, exposes denial, and lets the user retry successf
   assert.equal(app.window.count('deviceorientation'), 0);
   assert.equal(app.element('motion-button').hidden, false);
   assert.equal(app.element('motion-button').disabled, false);
-  assert.match(app.element('gyro-hint').textContent, /权限/);
+  assert.match(app.element('gyro-hint').textContent, /permission/);
   app.click('motion-button'); await app.settle();
   assert.equal(app.permissionCalls(), 2);
   assert.equal(app.window.count('deviceorientation'), 1);
@@ -257,7 +257,7 @@ test('a silent sensor can be retried and manually paused without duplicate liste
   const app = viewer(); await app.settle();
   app.advance(6100);
   assert.equal(app.element('motion-button').hidden, false);
-  assert.match(app.element('motion-label').textContent, /重试/);
+  assert.match(app.element('motion-label').textContent, /retry/);
   app.click('motion-button'); await app.settle();
   assert.equal(app.window.count('deviceorientation'), 1);
   app.sensor(0); app.sensor(350); app.frames();

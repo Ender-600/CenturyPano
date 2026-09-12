@@ -23,8 +23,11 @@ COUNTRY_NAMES = {
     'PH': 'Philippines', 'PK': 'Pakistan', 'BD': 'Bangladesh',
 }
 COUNTRY_ALIASES = {name.casefold(): cc for cc, name in COUNTRY_NAMES.items()} | {
-    'united states': 'US', 'united states of america': 'US', '美国': 'US',
-    'uk': 'GB', 'britain': 'GB', '英国': 'GB', '中国': 'CN', '日本': 'JP',
+    'united states': 'US', 'united states of america': 'US',
+    'uk': 'GB', 'britain': 'GB',
+    # Input aliases, not display text: a Chinese-typed country name should still
+    # resolve even though the interface is English.
+    '美国': 'US', '英国': 'GB', '中国': 'CN', '日本': 'JP',
     '加拿大': 'CA', '法国': 'FR', '德国': 'DE', '澳大利亚': 'AU',
 }
 US_STATES = dict(zip(

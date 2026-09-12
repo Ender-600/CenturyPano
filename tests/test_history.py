@@ -119,11 +119,20 @@ def test_site_history_can_replace_present_day_buildings(live_history, monkeypatc
     assert saved["site_state"] == history["site_state"]
     assert saved["site_history"] == history["site_history"]
     assert saved["reconstruction_changes"] == history["reconstruction_changes"]
+    # What the place actually was still reaches the tile: it is where
+    # period-specific naming and signage come from.
     assert history["site_history"] in result.prompt_global
-    assert history["reconstruction_changes"][0] in result.prompt_global
     assert "Keep: building footprints and heights" not in result.prompt_global
     assert "Keep building footprints and heights" not in result.prompt_global
-    assert history["uncertainties"][0] in result.prompt_global
+    # Under the pixel lock, instructions to replace a building contradict the
+    # policy in the same prompt, and the model takes the permissive one. They are
+    # kept in the manifest for the history panel and withheld from the tile.
+    assert history["reconstruction_changes"][0] not in result.prompt_global
+    assert history["uncertainties"][0] not in result.prompt_global
+    # With the lock off, structures may legitimately change, so they belong there.
+    open_result = asyncio.run(constraints.build_constraints(
+        PLACE, year, current_scene, structure_lock=False))
+    assert history["reconstruction_changes"][0] in open_result.prompt_global
 
 
 def test_history_failure_records_uncertainty_without_leaking_provider_details(live_history, monkeypatch):
@@ -136,7 +145,11 @@ def test_history_failure_records_uncertainty_without_leaking_provider_details(li
     assert result.fallback and result._tokens == 0
     assert saved["target_year"] == 1945 and saved["site_state"] == "unknown"
     assert saved["evidence_basis"] == "fallback" and saved["uncertainties"]
-    assert all(uncertainty in result.prompt_global for uncertainty in saved["uncertainties"])
+    # The record lives in the manifest, which is what the history panel reads and
+    # what makes the failure auditable. Hedging prose has no visual meaning to an
+    # image editor, so a locked tile request does not carry it.
+    assert all(uncertainty in json.dumps(saved, ensure_ascii=False) for uncertainty in saved["uncertainties"])
+    assert result.prompt_global.count("uncertainties") <= 1
     assert "secret-provider-key" not in json.dumps(result.to_dict())
     assert "private response" not in json.dumps(result.to_dict())
 
@@ -235,3 +248,39 @@ def test_invalid_model_history_falls_back_safely(live_history, monkeypatch, chan
     assert result.fallback
     assert result.to_dict()["historical_context"]["evidence_basis"] == "fallback"
     assert "Ignore the source image" not in result.prompt_global
+
+
+def test_locked_tile_prompt_carries_no_licence_to_redraw():
+    """Under the pixel lock the editor re-skins surfaces that stay put.
+
+    site_state, site_history and reconstruction_changes all answer a different
+    question -- whether a structure was there at all -- so handing them to the
+    image editor invites it to redraw the scene. They stay in the manifest for
+    the history panel; they must not reach a locked tile request.
+    """
+    import json
+    import re
+
+    from app.constraints import REDRAW_LICENCE_KEYS, _fallback_history, _prompt
+    from app.location import location_context
+
+    history = _fallback_history(1900)
+    facts = history.pop("era_facts")
+    context = {**history, "target_year": 1900, "reference_date": "1900-07-01",
+               "location": location_context({}), "evidence_basis": "fallback",
+               "structure_lock": True, "environment": "outdoor"}
+
+    def payload(prompt):
+        found = re.search(r"HISTORICAL_CONTEXT_JSON: (\{.*?\})\nVISUAL_CONSTRAINTS", prompt, re.S)
+        return json.loads(found.group(1))
+
+    lean = payload(_prompt(1900, context, facts, structure_lock=True, lean=True))
+    full = payload(_prompt(1900, context, facts, structure_lock=True, lean=False))
+    for key in REDRAW_LICENCE_KEYS:
+        assert key not in lean, f"{key} licenses redrawing and must not reach a locked tile"
+        assert key in full, f"{key} must survive when the prompt is not lean"
+    # The era still has to be described, or the tile has nothing to render.
+    for key in ("period_summary", "local_context", "target_year", "location"):
+        assert key in lean
+    # The open policy needs the site history: there, structures may legitimately change.
+    assert "site_history" in payload(_prompt(1900, context, facts, structure_lock=False, lean=True))

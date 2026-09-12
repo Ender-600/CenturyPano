@@ -31,7 +31,7 @@ async def lifespan(app):
         try:
             old = read_manifest(path.parent.name)
             if old.get('status') == 'running':
-                update_manifest(path.parent.name, lambda m: m.update(status='error', error='服务重启中断了任务，请重新上传。'))
+                update_manifest(path.parent.name, lambda m: m.update(status='error', error='A server restart interrupted this job. Please upload again.'))
             if old.get('baseline_status') == 'running':
                 update_manifest(path.parent.name, lambda m: m.update(baseline_status='error'))
         except (OSError, ValueError):
@@ -52,7 +52,7 @@ async def security_headers(request, call_next):
     if request.url.path in ('/jobs', '/preview') and length:
         try:
             if int(length) > (MAX_UPLOAD_MB + 1) * 1024 * 1024:
-                return PlainTextResponse('图片不能超过 40 MB。', status_code=413)
+                return PlainTextResponse('Images must be 40 MB or smaller.', status_code=413)
         except ValueError:
             return PlainTextResponse('Invalid Content-Length', status_code=400)
     response = await call_next(request)
@@ -73,7 +73,7 @@ def get_manifest(job_id):
     try:
         return read_manifest(job_id)
     except (FileNotFoundError, ValueError):
-        raise HTTPException(404, '找不到这个任务。') from None
+        raise HTTPException(404, 'This job could not be found.') from None
 
 
 def initial_manifest(job_id, source, decade, place, heading=0.5, *, target_year=None):
@@ -95,11 +95,11 @@ def initial_manifest(job_id, source, decade, place, heading=0.5, *, target_year=
 
 async def read_upload(image):
     if image.content_type not in {'image/jpeg', 'image/png', 'image/heic', 'image/heif', 'image/heic-sequence', 'image/heif-sequence', 'application/octet-stream'}:
-        raise HTTPException(415, '请上传 JPEG、PNG 或 HEIC 全景图片。')
+        raise HTTPException(415, 'Please upload a JPEG, PNG or HEIC panorama image.')
     raw = await image.read(MAX_UPLOAD_MB * 1024 * 1024 + 1)
     await image.close()
     if len(raw) > MAX_UPLOAD_MB * 1024 * 1024:
-        raise HTTPException(413, '图片不能超过 40 MB。')
+        raise HTTPException(413, 'Images must be 40 MB or smaller.')
     return raw
 
 
@@ -107,12 +107,12 @@ def inspect_upload(raw, preview=False):
     try:
         with Image.open(io.BytesIO(raw)) as uploaded:
             if uploaded.format not in ('JPEG', 'PNG', 'HEIF', 'HEIC'):
-                raise HTTPException(415, '请上传 JPEG、PNG 或 HEIC 全景图片。')
+                raise HTTPException(415, 'Please upload a JPEG, PNG or HEIC panorama image.')
             fmt = uploaded.format
             gps = exif_gps(uploaded)
             w, h = uploaded.size
             if w < 32 or h < 32 or w * h > 100_000_000:
-                raise HTTPException(415, '图片尺寸无效；请使用至少 32×32、最多一亿像素的图片。')
+                raise HTTPException(415, 'Invalid image dimensions; use an image of at least 32×32 and at most 100 megapixels.')
             uploaded.load()
             oriented = ImageOps.exif_transpose(uploaded)
             w, h = oriented.size
@@ -124,7 +124,7 @@ def inspect_upload(raw, preview=False):
                 return output.getvalue()
             return fmt, gps, w, h
     except (UnidentifiedImageError, OSError, ValueError, Image.DecompressionBombError, Image.DecompressionBombWarning):
-        raise HTTPException(415, '无法读取图片，请使用有效的 JPEG、PNG 或 HEIC。') from None
+        raise HTTPException(415, 'This image could not be read. Please use a valid JPEG, PNG or HEIC.') from None
 
 
 @app.post('/preview')
@@ -143,7 +143,7 @@ async def _run(job_id):
     except Exception:
         # Provider details can contain credentials or image URLs. Expose a fixed
         # diagnostic message, and leave detailed per-tile errors to the adapter.
-        update_manifest(job_id, lambda m: m.update(status='error', error='处理失败，请检查服务器配置后重试。'))
+        update_manifest(job_id, lambda m: m.update(status='error', error='Processing failed. Check the server configuration and try again.'))
     finally:
         _tasks.pop(job_id, None)
 
@@ -167,16 +167,16 @@ async def create_job(
             raise ValueError('Expected an integer year')
         year = resolve_year(decade if target_year is None else target_year)
     except ValueError:
-        raise HTTPException(422, f'请选择 {MIN_YEAR} 至 {MAX_YEAR} 之间的整数年份。') from None
+        raise HTTPException(422, f'Choose a whole year between {MIN_YEAR} and {MAX_YEAR}.') from None
     if (lat is None) != (lon is None):
         raise HTTPException(422, 'Latitude and longitude must be supplied together.')
     if len(_tasks) >= 4:
-        raise HTTPException(429, '已有任务正在处理，请稍后再试。')
+        raise HTTPException(429, 'Another job is already processing. Please try again shortly.')
     if settings.provider != 'demo' and not {
         'gemini': settings.gemini_api_key, 'grok': settings.grok_api_key, 'fal': settings.fal_key,
         'qwen': settings.k2_api_key, 'openai': settings.openai_api_key,
     }.get(settings.provider):
-        raise HTTPException(503, '请先在服务器 .env 中配置图像服务密钥并重启服务，或使用回放示例。')
+        raise HTTPException(503, 'Set an image service API key in the server .env and restart, or use a replay example.')
     raw = await read_upload(image)
     fmt, gps, w, h = await asyncio.to_thread(inspect_upload, raw)
     job_id = str(uuid.uuid4())
@@ -186,14 +186,14 @@ async def create_job(
     # Recheck after all awaited validation; no coroutine can reserve another
     # slot between this check and registration below.
     if len(_tasks) >= 4:
-        raise HTTPException(429, '已有任务正在处理，请稍后再试。')
+        raise HTTPException(429, 'Another job is already processing. Please try again shortly.')
     input_path.parent.mkdir(parents=True, exist_ok=True)
     input_path.write_bytes(raw)
     source = {'path': f'in/{input_path.name}', 'w': w, 'h': h,
               'is_360': abs(w / h - 2.0) < 0.1 if is_360 is None else is_360}
     manifest = initial_manifest(job_id, source, decade, location, heading, target_year=year)
     if w / h < 2:
-        manifest['warnings'] = ['这张图片看起来较窄，使用手机全景模式会得到更好的效果。']
+        manifest['warnings'] = ['This image looks narrow. Your phone panorama mode will give a better result.']
     create_manifest(job_id, manifest)
     _tasks[job_id] = asyncio.create_task(_run(job_id))
     return {'job_id': job_id}
@@ -208,7 +208,7 @@ def output_file(job_id, filename, media_type='image/jpeg'):
     get_manifest(job_id)
     path = job_dir(job_id) / filename
     if not path.is_file():
-        raise HTTPException(404, '文件还未生成。')
+        raise HTTPException(404, 'This file has not been generated yet.')
     return FileResponse(path, media_type=media_type)
 
 
@@ -238,26 +238,16 @@ async def generated_asset(job_id: str, filename: str):
     return output_file(job_id, filename)
 
 
-@app.get('/jobs/{job_id}/audio')
-async def audio(job_id: str):
-    m = get_manifest(job_id)
-    year = manifest_year(m)
-    audio_era = min(DECADE_ANCHOR, key=lambda era: abs(DECADE_ANCHOR[era] - year))
-    path = ROOT / 'web/audio' / f'{audio_era}.wav'
-    if not path.is_file():
-        raise HTTPException(404, 'Audio unavailable')
-    return FileResponse(path, media_type='audio/wav')
-
 
 @app.post('/jobs/{job_id}/baseline', status_code=202)
 async def baseline(job_id: str):
     m = get_manifest(job_id)
     if m['status'] not in ('done', 'done_partial'):
-        raise HTTPException(409, '请先等待重建完成。')
+        raise HTTPException(409, 'Wait for the reconstruction to finish first.')
     if job_id in _baselines:
         return {'job_id': job_id, 'status': 'running'}
     if len(_baselines) >= 2:
-        raise HTTPException(429, '已有基线测试正在运行，请稍后再试。')
+        raise HTTPException(429, 'A baseline test is already running. Please try again shortly.')
     from .pipeline import run_baseline
     async def run():
         try:

@@ -1,7 +1,7 @@
 'use strict';
 const SHELL_CACHE = 'century-shell-v4';
 const JOURNEY_CACHE = 'century-journeys-v1';
-const SHELL = ['/', '/index.html', '/motion.js', '/app.js', '/style.css', '/window-scene.png'];
+const SHELL = ['/', '/index.html', '/capture.js', '/motion.js', '/app.js', '/style.css', '/window-scene.png'];
 
 async function cachedReplay(request) {
   const cached = await caches.match(request);
@@ -43,10 +43,10 @@ self.addEventListener('fetch', (event) => {
         return cached;
       }
       if (url.pathname === '/replays') return new Response('{"replays":[]}', { headers: { 'Content-Type': 'application/json' } });
-      return new Response('{"detail":"此旅程尚未保存在当前设备"}', { status: 503, headers: { 'Content-Type': 'application/json' } });
+      return new Response('{"detail":"This journey is not saved on this device yet"}', { status: 503, headers: { 'Content-Type': 'application/json' } });
     })); return;
   }
-  if (/^\/(jobs\/[^/]+\/(preview|result|audio|tiles\/\d+)|out\/)/.test(url.pathname)) {
+  if (/^\/(jobs\/[^/]+\/(preview|result|tiles\/\d+)|out\/)/.test(url.pathname)) {
     event.respondWith(caches.match(event.request).then((cached) => cached || fetch(event.request))); return;
   }
 });
