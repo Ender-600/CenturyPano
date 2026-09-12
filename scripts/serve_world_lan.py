@@ -96,7 +96,7 @@ def create_app(*, host: str, network: str, port: int = 8002,
         response = await call_next(request)
         response.headers['X-Content-Type-Options'] = 'nosniff'
         response.headers['Referrer-Policy'] = 'no-referrer'
-        if request.url.path.startswith(('/world-session', '/world-config', '/world-plans', '/world-jobs')):
+        if request.url.path.startswith(('/world-session', '/world-config', '/world-plans', '/world-jobs', '/world-prefetch')):
             response.headers['Cache-Control'] = 'no-store'
         return response
 
@@ -114,7 +114,7 @@ def create_app(*, host: str, network: str, port: int = 8002,
                 return JSONResponse({'detail': 'Method not allowed.'}, status_code=405)
             return JSONResponse({'access_token': app.state.lan_token})
         protected = any(route == prefix or route.startswith(prefix + '/')
-                        for prefix in ('/world-plans', '/world-jobs'))
+                        for prefix in ('/world-plans', '/world-jobs', '/world-prefetch'))
         static = route.startswith(('/world/', '/world-vendor/three/', '/world-vendor/@sparkjsdev/spark/'))
         if not protected and not (route == '/world-config' or static):
             return JSONResponse({'detail': 'Not found.'}, status_code=404)

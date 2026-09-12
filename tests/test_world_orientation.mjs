@@ -19,7 +19,7 @@ class Surface {
 
 function fixture(options = {}) {
   const win = new Surface(), doc = new Surface(), screen = new Surface();
-  let current = 10000, sequence = 0, calls = 0, viewer = facing(options.viewerHeading || 0);
+  let current = 10000, sequence = 0, calls = 0, viewer = options.viewerQuaternion?.clone() || facing(options.viewerHeading || 0);
   const timers = new Map(), updates = [];
   doc.visibilityState = 'visible'; screen.angle = 0;
   Object.assign(win, { isSecureContext: true, screen: { orientation: screen }, performance: { now: () => current },
@@ -83,16 +83,25 @@ test('null, strings, undefined, NaN and infinity cannot turn into north readings
   assert.equal(yawAlignment(cameraQuaternionFromAngles(0, 0, 0), facing(0)), null);
 });
 
-test('Safari compass corrects relative alpha and keeps accuracy and optical tilt', () => {
-  const sample = orientationSample({ alpha: 10, beta: 90, gamma: 30, webkitCompassHeading: 90, webkitCompassAccuracy: 12 });
+test('Safari compass is a separate north seed only when accurate and screen-up level', () => {
+  const sample = orientationSample({ alpha: 10, beta: 20, gamma: 15, webkitCompassHeading: 90, webkitCompassAccuracy: 12 });
   assert.equal(sample.absolute, true);
+  assert.equal(sample.source, 'relative');
   assert.equal(sample.reference, 'magnetic-north');
   assert.equal(sample.accuracy, 12);
-  near(sample.heading, 60);
+  sameRotation(sample.quaternion, cameraQuaternionFromAngles(10, 20, 15));
+  sameRotation(sample.northQuaternion, cameraQuaternionFromAngles(270, 20, 15));
   for (const accuracy of [-1, 36, null, undefined, NaN]) {
-    const invalid = orientationSample({ alpha: 10, beta: 90, gamma: 0, webkitCompassHeading: 90, webkitCompassAccuracy: accuracy });
+    const invalid = orientationSample({ alpha: 10, beta: 0, gamma: 0, webkitCompassHeading: 90, webkitCompassAccuracy: accuracy });
     assert.equal(invalid.absolute, false);
     assert.equal(invalid.heading, null);
+    assert.equal(invalid.northQuaternion, null);
+  }
+  for (const [beta, gamma] of [[90, 0], [75, 10], [0, 80], [180, 0], [30, 30]]) {
+    const upright = orientationSample({ alpha: 10, beta, gamma, webkitCompassHeading: 90, webkitCompassAccuracy: 12 });
+    assert.equal(upright.absolute, false);
+    assert.equal(upright.compassNeedsLevel, true);
+    sameRotation(upright.quaternion, cameraQuaternionFromAngles(10, beta, gamma));
   }
   assert.equal(orientationSample({ alpha: 10, beta: 90, gamma: 0 }).absolute, false);
 });
@@ -106,14 +115,112 @@ test('relative orientation anchors to the current viewer bearing and follows tur
   f.controller.dispose();
 });
 
-test('absolute events use magnetic north and ignore simultaneous relative stream', async () => {
+test('absolute events seed north, then relative attitude takes over without a jump', async () => {
   const f = fixture({ viewerHeading: 200 }); await f.controller.startFromGesture();
   f.send({ alpha: 270 }, 'deviceorientationabsolute');
   near(headingFromQuaternion(f.controller.getQuaternion()), 90);
   assert.equal(f.controller.getStatus().mode, 'absolute');
   assert.equal(f.controller.getStatus().reference, 'magnetic-north');
   f.send({ alpha: 10 }); near(headingFromQuaternion(f.controller.getQuaternion()), 90);
+  near(f.controller.getStatus().physicalHeading, 90);
+  f.send({ alpha: 0 }); near(headingFromQuaternion(f.controller.getQuaternion()), 100);
+  f.send({ alpha: 150 }, 'deviceorientationabsolute');
+  near(headingFromQuaternion(f.controller.getQuaternion()), 100);
+  near(f.controller.getStatus().physicalHeading, 100);
   f.controller.dispose();
+});
+
+test('raising and tilting the phone follows full attitude without reinjecting compass jumps', async () => {
+  const f = fixture(); await f.controller.startFromGesture();
+  f.send({ alpha: 10, beta: 0, webkitCompassHeading: 90, webkitCompassAccuracy: 12 });
+  assert.equal(f.controller.getStatus().northInitialized, true);
+  assert.equal(f.controller.getStatus().physicalHeading, null); // Optical axis points down.
+  const northOffset = facing(100);
+  for (const beta of [40, 70, 89.5, 90, 100, 120]) {
+    f.send({ alpha: 10, beta, webkitCompassHeading: (beta * 7) % 360, webkitCompassAccuracy: 5 });
+    sameRotation(f.controller.getQuaternion(), northOffset.clone().multiply(cameraQuaternionFromAngles(10, beta, 0)));
+    near(f.controller.getStatus().physicalHeading, 90);
+    assert.equal(f.controller.getStatus().accuracy, 12);
+  }
+  // At the Euler singularity, alpha and gamma can trade values for the same
+  // attitude. The old compass-as-alpha code converted this into a false turn.
+  f.send({ alpha: 10, beta: 90, gamma: 30, webkitCompassHeading: 30, webkitCompassAccuracy: 8 });
+  const before = f.controller.getQuaternion();
+  f.send({ alpha: 40, beta: 90, gamma: 0, webkitCompassHeading: 270, webkitCompassAccuracy: 8 });
+  sameRotation(f.controller.getQuaternion(), before);
+  near(f.controller.getStatus().physicalHeading, 60);
+  // Returning to level with a new magnetic measurement does not re-anchor yaw.
+  f.send({ alpha: 40, beta: 0, webkitCompassHeading: 230, webkitCompassAccuracy: 1 });
+  f.send({ alpha: 40, beta: 90, webkitCompassHeading: 230, webkitCompassAccuracy: -1 });
+  near(f.controller.getStatus().physicalHeading, 60);
+  f.controller.dispose();
+});
+
+test('upright startup remains usable and delayed north initialization preserves the view', async () => {
+  const f = fixture({ viewerHeading: 140 }); await f.controller.startFromGesture();
+  f.send({ alpha: 10, webkitCompassHeading: 250, webkitCompassAccuracy: 5 });
+  near(headingFromQuaternion(f.controller.getQuaternion()), 140);
+  assert.equal(f.controller.getStatus().physicalHeading, null);
+  assert.match(f.controller.getStatus().message, /hold the phone flat/);
+  f.send({ alpha: 0, beta: 100, webkitCompassHeading: 50, webkitCompassAccuracy: 5 });
+  near(headingFromQuaternion(f.controller.getQuaternion()), 150);
+  f.send({ alpha: 0, beta: 0, webkitCompassHeading: 90, webkitCompassAccuracy: 10 });
+  assert.equal(f.controller.getStatus().northInitialized, true);
+  f.send({ alpha: 0, beta: 90, webkitCompassHeading: 270, webkitCompassAccuracy: 5 });
+  near(headingFromQuaternion(f.controller.getQuaternion()), 150);
+  near(f.controller.getStatus().physicalHeading, 90);
+  assert.equal(f.controller.getStatus().mode, 'relative');
+  f.controller.dispose();
+});
+
+test('a concurrent absolute sample initializes north without replacing relative look', async () => {
+  const f = fixture({ viewerHeading: 160 }); await f.controller.startFromGesture();
+  f.send({ alpha: 20 });
+  f.send({ alpha: 270 }, 'deviceorientationabsolute');
+  near(headingFromQuaternion(f.controller.getQuaternion()), 160);
+  near(f.controller.getStatus().physicalHeading, 90);
+  f.send({ alpha: 10 });
+  near(headingFromQuaternion(f.controller.getQuaternion()), 170);
+  near(f.controller.getStatus().physicalHeading, 100);
+  f.send({ alpha: 90 }, 'deviceorientationabsolute');
+  near(f.controller.getStatus().physicalHeading, 100);
+  f.controller.dispose();
+});
+
+test('relative/absolute fallback and compass accuracy changes preserve independent calibrations', async () => {
+  const f = fixture(); await f.controller.startFromGesture();
+  f.send({ alpha: 270 }, 'deviceorientationabsolute');
+  f.send({ alpha: 10 });
+  assert.equal(f.controller.calibrate(facing(20)), true);
+  f.send({ alpha: 0, webkitCompassHeading: 300, webkitCompassAccuracy: 7 });
+  near(headingFromQuaternion(f.controller.getQuaternion()), 30);
+  near(f.controller.getStatus().physicalHeading, 100);
+  f.advance(1001);
+  f.send({ alpha: 200 }, 'deviceorientationabsolute');
+  near(headingFromQuaternion(f.controller.getQuaternion()), 30);
+  near(f.controller.getStatus().physicalHeading, 100);
+  f.send({ alpha: 190 }, 'deviceorientationabsolute');
+  near(headingFromQuaternion(f.controller.getQuaternion()), 40);
+  near(f.controller.getStatus().physicalHeading, 110);
+  f.send({ alpha: 340, webkitCompassHeading: 90, webkitCompassAccuracy: -1 });
+  near(headingFromQuaternion(f.controller.getQuaternion()), 40);
+  near(f.controller.getStatus().physicalHeading, 110);
+  f.send({ alpha: 330, webkitCompassHeading: 0, webkitCompassAccuracy: 7 });
+  near(headingFromQuaternion(f.controller.getQuaternion()), 50);
+  near(f.controller.getStatus().physicalHeading, 120);
+  f.controller.dispose();
+});
+
+test('a level relative startup follows pitch when the phone is raised', async () => {
+  for (const pitch of [-30, 0, 30]) {
+    const viewerQuaternion = facing(160).multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), pitch * RAD));
+    const f = fixture({ viewerQuaternion }); await f.controller.startFromGesture();
+    f.send({ alpha: 20, beta: 0 });
+    assert.ok(f.controller.getQuaternion());
+    f.send({ alpha: 20, beta: 90 });
+    near(headingFromQuaternion(f.controller.getQuaternion()), 160);
+    f.controller.dispose();
+  }
 });
 
 test('relativeOnly preserves arbitrary model axes even with a compass', async () => {

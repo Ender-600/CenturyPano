@@ -9,11 +9,12 @@ import { createYearWheel } from './year-wheel.js';
 import { createMotionController } from './motion.js';
 import { createGPSWalkingController } from './gps-walking.js';
 import { createScaleCalibration } from './scale.js';
+import { createPanoramaPrefetch } from './prefetch.js';
 
 const $ = (id) => document.getElementById(id);
 const TOKEN_KEY = 'century.world.access';
 const RESUME_KEY = 'century.world.resume';
-const TERMINAL = new Set(['ready', 'error', 'submission_unknown', 'insufficient_credits']);
+const TERMINAL = new Set(['ready', 'error', 'submission_unknown', 'insufficient_credits', 'cancelled', 'expired']);
 const STAGES = {
   queued: 'World queued', rendering_depth: 'Rendering historical depth',
   submitting_depth: 'Submitting depth panorama', generating_depth: 'Generating historical panorama',
@@ -23,6 +24,7 @@ const STAGES = {
   fetching_assets: 'Downloading and checking world assets', ready: 'World assets ready',
   paused: 'Service paused; waiting to resume', error: 'Generation stopped',
   submission_unknown: 'Submission not yet confirmed', insufficient_credits: 'Insufficient server credits',
+  cancelled: 'Preparation cancelled', expired: 'Prediction expired',
 };
 const STANDARD_REASONS = new Map([
   ['No bound archival date or target-year footprint. Retained only as an unverified modern massing placeholder.',
@@ -38,7 +40,7 @@ const state = {
   token: '', config: null, plan: null, job: null, planBusy: false, generateBusy: false,
   model: 'marble-1.1',
   restoring: false, resumeBusy: false, submissionUnknown: false, planEpoch: 0, jobEpoch: 0, viewEpoch: 0,
-  pollTimer: null, view: 'source', viewAbort: null, userViewLocked: false,
+  pollTimer: null, view: 'source', viewAbort: null, viewBusy: false, userViewLocked: false,
   imageURL: null, engine: null, keys: new Set(), touchMoves: new Set(),
   locationMode: 'device', locationFix: null, locationEpoch: 0, locationBusy: false, locationError: '',
   viewingSavedPlan: false, streetViewBusy: false,
@@ -50,6 +52,7 @@ const state = {
   walking: null, orientation: null, calibrating: false, panoramaPose: null, travelWatch: null, travel: null, travelEpoch: 0,
   motionFrameAt: 0, autoPrepareAttempted: false, bootReady: false,
   liveLocation: null, liveAnchor: null, liveAttemptAt: 0, liveFailed: false, liveTimer: null, yearWheel: null,
+  prefetch: null, prefetchEnabled: false, prefetchStatus: null, prefetchApplying: false, prefetchStartEpoch: 0,
 };
 
 function storageGet(key) { try { return sessionStorage.getItem(key); } catch { return null; } }
@@ -82,14 +85,17 @@ function configureModels() {
 }
 function renderGenerationQuality() {
   const profile = modelProfile();
-  $('world-model').value = state.job ? text(state.job.model) : state.model;
+  $('world-model').value = state.job && state.job.kind !== 'panorama' ? text(state.job.model) : state.model;
   const displayed = state.job ? (typeof state.job.model === 'string' ? modelProfile(state.job.model) : null) : profile;
-  $('generation-quality').textContent = state.job
+  $('generation-quality').textContent = state.job?.kind === 'panorama'
+    ? 'This job prepares a historical panorama. You can optionally build a 3D world from the same image using the quality selected above.'
+    : state.job
     ? `Current job: ${displayed?.label || text(state.job.model, 'Model not recorded')}. Prepare Street View again to generate a new version at your chosen quality. Saved versions retain their original quality.`
     : profile ? `World generation: ${profile.world_credits.toLocaleString('en-US')} credits (about $${(profile.world_credits / 1250).toFixed(2)}). Panorama editing is billed separately. Full resolution is preferred and may take longer to load.`
       : 'No generation models are available on this service.';
 }
 function worldQualityLabel(job = state.job, asset = assetFor('world')) {
+  if (job?.kind === 'panorama') return 'Historical 360° panorama · Image generation only';
   const model = typeof job?.model === 'string' ? modelProfile(job.model)?.label || job.model : 'Model not recorded';
   if (!asset) return `${model} · 3D assets pending`;
   const lod = asset.lod === 'full_res' ? 'Full resolution' : asset.lod ? `Reduced resolution ${text(asset.lod)}` : 'Asset resolution not recorded';
@@ -142,7 +148,7 @@ class RequestError extends Error {
 
 async function api(path, { method = 'GET', body, auth = true, signal, format = 'json' } = {}) {
   // Never attach the access token to external URLs, redirects, images, or query strings.
-  if (typeof path !== 'string' || !/^\/world-(?:config|session|plans|jobs)(?:\/[^?#]*)?$/.test(path)) {
+  if (typeof path !== 'string' || !/^\/world-(?:config|session|plans|jobs|prefetch)(?:\/[^?#]*)?$/.test(path)) {
     throw new RequestError(0, 'Invalid service URL.');
   }
   if (auth && !state.token) throw new RequestError(401, 'Enter an access code and connect to the generation service first.');
@@ -230,9 +236,9 @@ function syncUI() {
   const changedYear = state.plan && Number($('year').value) !== state.plan.target_year;
   $('generate').hidden = !state.plan || state.config?.viewer_only === true;
   $('generate').disabled = !state.token || !state.plan || !state.config?.configured || !!busy
-    || !!state.job && !changedYear || state.submissionUnknown || !modelProfile()
+    || !!state.job && !changedYear && state.job.kind !== 'panorama' || state.submissionUnknown || !modelProfile()
     || state.plan?.input_kind === 'streetview_panorama' && state.config?.panorama_editor_configured === false;
-  $('world-model').disabled = !!busy || !!state.job || state.submissionUnknown;
+  $('world-model').disabled = !!busy || !!state.job && state.job.kind !== 'panorama' || state.submissionUnknown;
   renderGenerationQuality();
   const streetview = state.config?.streetview;
   $('streetview-status').textContent = !state.config ? 'Checking Street View service…'
@@ -240,7 +246,8 @@ function syncUI() {
       : !streetview?.ai_authorized ? 'Authorization to use Google panoramas for generation is not configured. You can open the official Street View preview.'
         : 'Generation uses the 360° Street View photo of this location.';
   $('generate').textContent = state.generateBusy ? 'Creating world job…'
-    : !changedYear && state.job?.stage === 'ready' ? (failedHistoricalReview() ? 'Appearance needs review' : 'World generated')
+    : !changedYear && state.job?.kind === 'panorama' && state.job.stage === 'ready' ? 'Build a 3D world here →'
+      : !changedYear && state.job?.stage === 'ready' ? (failedHistoricalReview() ? 'Appearance needs review' : 'World generated')
       : !changedYear && state.job ? STAGES[state.job.stage] || 'Generating world'
         : state.submissionUnknown ? 'Submission pending confirmation' : `Step into ${$('year').value} →`;
   const profile = modelProfile();
@@ -261,6 +268,7 @@ function syncUI() {
     button.hidden = (!state.plan || state.plan.input_kind === 'streetview_panorama') && ['historical', 'modern', 'depth'].includes(view);
   }
   updateMotionUI();
+  syncPrefetch();
 }
 
 function assetFor(view) {
@@ -278,6 +286,160 @@ function assetFor(view) {
 function availableView(view) { return !!assetFor(view); }
 
 function isPanorama(view = state.view) { return view === 'source' || view === 'pano'; }
+
+function prefetchAvailable() {
+  return state.config?.prefetch?.available === true && state.config?.viewer_only !== true
+    && !!state.token && state.locationMode === 'device' && state.plan?.input_kind === 'streetview_panorama';
+}
+
+function renderPrefetchUI() {
+  const available = prefetchAvailable(), status = state.prefetchStatus;
+  const running = state.job && !TERMINAL.has(state.job.stage || state.job.status);
+  $('prefetch-toggle').disabled = !state.prefetchEnabled && (!available || state.planBusy || state.generateBusy || running || state.submissionUnknown);
+  $('prefetch-toggle').textContent = state.prefetchEnabled ? 'Stop preparing ahead'
+    : state.view === 'world' ? 'Prepare panoramas ahead' : 'Start panorama walk';
+  $('prefetch-toggle').setAttribute('aria-pressed', String(state.prefetchEnabled));
+  const descriptions = { off: 'Preparation is off.', waiting: 'Walk steadily to establish your direction.',
+    preparing: 'Preparing the next historical panorama…', ready: 'The next panorama is loaded. It will switch as you arrive.',
+    paused: 'Preparation is paused.', exhausted: 'This session is complete. Stop and start again to prepare more panoramas.',
+    error: 'Preparation stopped. Stop and start again to try another session.',
+    submission_unknown: 'Submission unconfirmed. Stop preparation and check the saved job before starting again.' };
+  const detail = !available ? state.config?.viewer_only ? 'Advance preparation is unavailable in this saved viewer.'
+    : 'Load Street View at your current location and connect to the image generation service.'
+    : !state.prefetchEnabled ? 'Ready to prepare historical panoramas along your walking direction.'
+      : running ? 'Preparing your current scene first…'
+        : typeof status?.detail === 'string' ? status.detail : descriptions[status?.state] || descriptions.waiting;
+  $('prefetch-status').textContent = detail;
+  $('prefetch-readout').hidden = !state.prefetchEnabled;
+  $('prefetch-readout').textContent = detail;
+  $('prefetch-open').hidden = !available || state.prefetchEnabled;
+  $('prefetch-view').hidden = !state.prefetchEnabled || !assetFor('pano') || state.view === 'pano';
+  $('prefetch-next').hidden = !state.prefetchEnabled || !status?.prepared || state.view === 'pano';
+  $('prefetch-next').disabled = state.prefetchApplying || !!running;
+}
+
+function syncPrefetch() {
+  if (state.prefetchApplying) return;
+  const active = state.prefetchEnabled && prefetchAvailable() && document.visibilityState !== 'hidden'
+    && !state.planBusy && !state.generateBusy && !state.restoring && !state.resumeBusy && !state.submissionUnknown
+    && !state.locationError && !!assetFor('pano') && !state.scaleCalibration?.isActive()
+    && (!state.job || state.job.stage === 'ready');
+  state.prefetch?.setContext({ enabled: state.prefetchEnabled, plan: state.plan, year: Number($('year').value), active,
+    allowSwitch: state.view === 'pano' && !state.viewBusy && !walkingLocked() && !state.calibrating });
+  renderPrefetchUI();
+}
+
+function getPrefetch() {
+  if (!state.prefetch) state.prefetch = createPanoramaPrefetch({ request: api,
+    preload: preloadPanorama, activate: activatePreparedPanorama,
+    setTimer: setTimeout, clearTimer: clearTimeout,
+    onStatus: (status) => { state.prefetchStatus = status; renderPrefetchUI(); } });
+  return state.prefetch;
+}
+
+async function togglePrefetch() {
+  if (state.prefetchEnabled) { ++state.prefetchStartEpoch; state.prefetchEnabled = false; syncPrefetch(); return; }
+  if (!prefetchAvailable() || state.planBusy || state.generateBusy || state.submissionUnknown
+      || state.job && !TERMINAL.has(state.job.stage || state.job.status)) return;
+  const startEpoch = ++state.prefetchStartEpoch;
+  state.prefetchEnabled = true; getPrefetch();
+  state.userViewLocked = state.view === 'world';
+  syncPrefetch(); startLiveLocation();
+  if (state.plan.target_year !== Number($('year').value)) {
+    const prepared = await preparePlan('google_streetview');
+    if (!state.prefetchEnabled || startEpoch !== state.prefetchStartEpoch) return;
+    if (!prepared) { state.prefetchEnabled = false; syncPrefetch(); return; }
+  }
+  if (!assetFor('pano')) {
+    if (!state.prefetchEnabled || startEpoch !== state.prefetchStartEpoch || !prefetchAvailable()
+        || document.visibilityState === 'hidden' || state.plan.target_year !== Number($('year').value)) return;
+    state.generateBusy = true; syncUI();
+    try {
+      const job = await api('/world-jobs', { method: 'POST', body: { plan_id: state.plan.plan_id, kind: 'panorama' } });
+      applyJob(job); schedulePoll(++state.jobEpoch);
+    } catch (error) {
+      if (error.status === 0) { state.submissionUnknown = true; saveResume(); }
+      state.prefetchEnabled = false; message(error.message, true);
+    } finally { state.generateBusy = false; syncUI(); }
+  } else if (state.view !== 'world') {
+    state.userViewLocked = true; await showView('pano', { automatic: true });
+  }
+  closeSettings();
+}
+
+async function preloadPanorama(plan, job) {
+  const asset = job.assets?.find((item) => item.kind === 'historical_pano' || item.kind === 'pano');
+  if (!asset) throw new Error('The historical panorama is not available yet.');
+  const blob = await api(safeAssetURL(asset.url), { format: 'blob' });
+  const imageURL = URL.createObjectURL(blob);
+  let mesh;
+  try {
+    const photograph = document.createElement('img'); photograph.src = imageURL; await photograph.decode();
+    mesh = createPanoramaMesh(photograph, plan.source_panorama?.metadata || {});
+    // Upload the decoded image before the user reaches this point.
+    state.engine?.renderer.initTexture?.(mesh.material.map);
+    const resource = { mesh, imageURL, transferred: false, disposed: false,
+      dispose() {
+        if (resource.transferred || resource.disposed) return;
+        resource.disposed = true; disposeObject(mesh); URL.revokeObjectURL(imageURL);
+      } };
+    return resource;
+  } catch (error) { disposeObject(mesh); URL.revokeObjectURL(imageURL); throw error; }
+}
+
+function finishPanoramaTransition() {
+  const transition = state.engine?.panoramaTransition;
+  if (!transition) return;
+  transition.previous?.removeFromParent(); disposeObject(transition.previous);
+  if (transition.imageURL) URL.revokeObjectURL(transition.imageURL);
+  transition.next.material.opacity = 1; transition.next.material.transparent = false;
+  transition.next.material.depthTest = true; transition.next.renderOrder = 0;
+  state.engine.panoramaTransition = null;
+}
+
+function advancePanoramaTransition(dt) {
+  const transition = state.engine?.panoramaTransition;
+  if (!transition) return;
+  transition.elapsed += dt;
+  transition.next.material.opacity = Math.min(1, transition.elapsed / 0.35);
+  if (transition.elapsed >= 0.35) finishPanoramaTransition();
+}
+
+async function activatePreparedPanorama({ plan, job, resource }) {
+  if (!state.prefetchEnabled || !prefetchAvailable() || document.visibilityState === 'hidden'
+      || state.view !== 'pano' || state.viewBusy || walkingLocked() || state.calibrating || state.planBusy || state.generateBusy
+      || state.restoring || state.resumeBusy || state.submissionUnknown || state.scaleCalibration?.isActive()
+      || Number($('year').value) !== plan.target_year || !resource?.mesh || resource.disposed || resource.transferred) return false;
+  const engine = state.engine;
+  if (!engine?.current) return false;
+  state.prefetchApplying = true;
+  try {
+    finishPanoramaTransition();
+    const previous = engine.current, imageURL = state.imageURL;
+    ++state.viewEpoch; state.viewAbort?.abort(); clearTimeout(state.pollTimer); ++state.jobEpoch;
+    state.userViewLocked = true; state.viewingSavedPlan = false; state.submissionUnknown = false;
+    renderPlan(plan, { preserveDirection: true });
+    engine.current = resource.mesh; state.imageURL = resource.imageURL; resource.transferred = true;
+    const next = engine.current;
+    next.material.transparent = true; next.material.opacity = 0; next.material.depthTest = false; next.renderOrder = 1;
+    engine.scene.add(next);
+    engine.panoramaTransition = { previous, imageURL, next, elapsed: 0 };
+    // All spherical meshes use the same geographic heading frame. Keep the full
+    // camera pose (including pitch and roll) and the existing motion calibration.
+    state.panoramaPose = { planId: plan.plan_id, quaternion: engine.camera.quaternion.clone() };
+    engine.home = { position: engine.camera.position.clone(), quaternion: engine.camera.quaternion.clone(),
+      target: new THREE.Vector3(0, 0, -1).applyQuaternion(engine.camera.quaternion) };
+    applyJob(job);
+    $('view-caption').textContent = `${plan.target_year} · Reimagined panorama`;
+    $('viewer-note').textContent = 'Prepared ahead · Historical panoramas follow your walk';
+    $('view-details').textContent = 'Prepared along the connected Street View route. Camera heading is preserved between panoramas; historical landmarks and spatial alignment remain unverified. Panoramas do not produce walking parallax.';
+    $('scene-attribution').textContent = `Reimagined history · ${text(plan.source_panorama?.metadata?.copyright, 'Source: Street View photo')}`;
+    state.liveAnchor = { ...plan.camera_location };
+    applyReviewNotice(); message();
+    if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) finishPanoramaTransition();
+    return true;
+  } finally { state.prefetchApplying = false; renderPrefetchUI(); }
+}
 function canFollowView() { return (isPanorama() || state.view === 'world') && !!state.engine?.current; }
 function updateMotionUI() {
   const status = state.orientation?.getStatus();
@@ -322,10 +484,14 @@ function updateWalkingUI() {
   const status = gps ? state.gpsWalking?.getStatus() || { message: 'GPS walking is ready. Calibrate scale and heading first.' } : walking.getStatus();
   const available = gps ? window.isSecureContext && !!navigator.geolocation?.watchPosition && state.locationMode === 'device' : walking.available();
   const locked = walkingLocked();
-  const detail = gps && status.phase === 'tracking'
-    ? `${status.message} Accuracy ~±${Math.round(status.accuracyMeters)} m · About ${status.displacementMeters.toFixed(1)} m from the start.`
-    : status.message;
   const ready = walkingWorldReady(), metric = ready && state.engine.metric === true;
+  let detail = status.message;
+  if (gps && status.phase === 'tracking') {
+    detail = `GPS walking on · Accuracy ~±${Math.round(status.accuracyMeters)} m · About ${status.displacementMeters.toFixed(1)} m from the start.`;
+    if (Number.isFinite(status.deadbandMeters)) {
+      detail += ` Movement filter: ${status.pendingMovementMeters.toFixed(1)} / ${status.deadbandMeters.toFixed(1)} m since the last update.`;
+    }
+  }
   $('walk-start').textContent = gps ? 'Enable GPS walking' : 'Enable walking';
   $('walk-start').disabled = !available || !ready || locked;
   $('walk-reanchor').disabled = !available || !ready || !locked;
@@ -344,8 +510,12 @@ function updateWalkingUI() {
     ? gps ? 'GPS walking requires HTTPS, browser location support, and “Current location” mode.' : 'AR tracking requires the CenturyPano native app (ARKit / ARCore). GPS walking is also available.'
     : !ready ? 'Switch to a loaded generated world to enable walking.' : detail);
   $('walk-status').classList.toggle('warning', !!state.walkNotice || status.needsReanchor || ['denied', 'error', 'scale'].includes(status.phase));
-  $('walking-readout').hidden = !gpsWalkingLocked();
-  $('walking-readout').textContent = gpsWalkingLocked() ? detail : '';
+  $('walk-open').hidden = !ready;
+  $('walk-open').textContent = status.needsReanchor ? 'Reset walking start'
+    : locked ? 'Walking settings' : gps ? 'Set up GPS walking' : 'Set up walking';
+  $('walking-readout').hidden = !ready;
+  $('walking-readout').textContent = !ready ? '' : state.walkNotice || (locked ? detail
+    : gps ? 'Walking is off · Set up GPS walking to follow outdoor movement.' : 'Walking is off · Enable camera tracking to follow your steps.');
   $('reset-view').disabled = locked;
   if (locked) $('move-pad').hidden = true;
   if (nativeWalkingLocked()) {
@@ -383,7 +553,8 @@ function startWalking() {
   engine.controls.enableDamping = false; engine.controls.update();
   engine.camera.position.copy(position); engine.camera.quaternion.copy(quaternion); engine.controls.target.copy(target);
   engine.controls.enableDamping = damping;
-  walking.start(walkingParameters()); updateMotionUI();
+  if (walking.start(walkingParameters())) closeSettings();
+  updateMotionUI();
 }
 function stopWalking(phase = 'idle') {
   if (gpsWalkingLocked() && state.engine) {
@@ -415,9 +586,15 @@ function startGPSWalking() {
   }
   const typed = $('walk-heading').value.trim(), orientation = state.orientation?.getStatus();
   const heading = typed ? Number(typed) : orientation?.enabled && orientation.phase === 'tracking' ? orientation.physicalHeading : null;
-  const worldHeading = headingFromQuaternion(state.engine.camera.quaternion);
+  // Pair physical and virtual bearings from the same sensor sample. The rendered
+  // camera lags during slerp; freezing that lag into the GPS anchor misdirects walks.
+  const sensorView = !typed && !state.calibrating ? state.orientation?.getQuaternion() : null;
+  const worldHeading = headingFromQuaternion(typed ? state.engine.camera.quaternion : sensorView);
+  if (!typed && state.calibrating) {
+    state.walkNotice = 'Finish heading alignment before starting GPS walking.'; updateWalkingUI(); return;
+  }
   if (!Number.isFinite(heading) || heading < 0 || heading >= 360 || worldHeading === null) {
-    state.walkNotice = 'Point your phone forward and enable motion to read the compass, or enter the actual heading of the current view.'; updateWalkingUI(); return;
+    state.walkNotice = 'Enable motion and briefly hold the phone flat to establish north, then point it forward; or enter the actual heading of the current view.'; updateWalkingUI(); return;
   }
   cancelScaleCalibration(); state.walking?.stop();
   const engine = state.engine, position = engine.camera.position.clone(), quaternion = engine.camera.quaternion.clone();
@@ -429,6 +606,7 @@ function startGPSWalking() {
   if (started) {
     // Start a fresh watch so queued/cached fixes cannot become a new session's origin.
     stopLiveLocation(); state.locationErrorCode = 0; state.locationError = ''; startLiveLocation();
+    closeSettings();
   }
   updateMotionUI();
 }
@@ -534,13 +712,23 @@ function calibrateView() {
   if (!state.orientation?.getStatus().enabled || !canFollowView()) return;
   if (state.calibrating) {
     if (state.orientation.calibrate(state.engine.camera.quaternion)) state.calibrating = false;
-  } else state.calibrating = true;
+  } else beginViewAlignment();
   updateMotionUI();
+}
+
+function beginViewAlignment() {
+  // Manual remapping changes the world yaw. A GPS anchor from before that change
+  // must not keep moving the camera along the old world axes.
+  if (gpsWalkingLocked()) {
+    stopWalking();
+    state.walkNotice = 'Walking stopped for heading alignment. Finish alignment, then enable walking again.';
+  }
+  state.calibrating = true;
 }
 
 function manualLook() {
   if (nativeWalkingLocked()) return;
-  if (state.orientation?.getStatus().enabled) state.calibrating = true;
+  if (state.orientation?.getStatus().enabled) beginViewAlignment();
   updateMotionUI();
 }
 
@@ -597,8 +785,11 @@ function renderPlan(plan, { preserveDirection = false } = {}) {
   const provenance = planLocation.location_source || plan.location_source;
   $('plan-location').textContent = `${state.viewingSavedPlan ? 'Viewing saved result' : 'Current preview area'}: ${coordinates} · ${plan.target_year}.`
     + (provenance === 'test' ? ' This result uses a test location.' : '')
+    + (provenance === 'prediction' ? ' This Street View point was selected ahead of your GPS position.' : '')
     + (state.viewingSavedPlan ? ' This is separate from your live phone location above. Preparing a new area refreshes your location.' : '');
-  if (photograph && Number.isFinite(plan.source_panorama?.metadata?.distance_m)) {
+  if (photograph && provenance === 'prediction' && Number.isFinite(plan.prediction?.distance_m)) {
+    $('plan-location').textContent += ` It was prepared about ${Math.round(plan.prediction.distance_m)} m ahead of the GPS position recorded for that prediction.`;
+  } else if (photograph && Number.isFinite(plan.source_panorama?.metadata?.distance_m)) {
     $('plan-location').textContent += ` The Street View camera is about ${Math.round(plan.source_panorama.metadata.distance_m)} m from the input location.`;
   }
   saveResume(); syncUI();
@@ -734,6 +925,7 @@ function acceptLiveFix(fix) {
   state.locationFix = fix; state.locationError = ''; state.locationErrorCode = 0; state.locationBusy = false;
   $('lat').value = fix.lat.toFixed(6); $('lon').value = fix.lon.toFixed(6);
   syncUI();
+  state.prefetch?.receiveFix(fix);
 }
 
 function startLiveLocation() {
@@ -827,7 +1019,7 @@ async function openStreetView() {
 
 async function maybePrepareCurrent() {
   const fix = state.locationFix;
-  if (!state.bootReady || state.planBusy || state.generateBusy || state.restoring || state.resumeBusy
+  if (state.prefetchEnabled || !state.bootReady || state.planBusy || state.generateBusy || state.restoring || state.resumeBusy
       || state.submissionUnknown || walkingLocked() || state.scaleCalibration?.isActive() || !state.token || state.locationMode !== 'device'
       || document.visibilityState === 'hidden' || state.view !== 'source' || state.locationError
       || state.job && (state.job.stage || state.job.status) !== 'ready'
@@ -969,7 +1161,8 @@ function applyJob(job) {
   state.job = job; saveResume(); setJobURL(job.job_id || job.id);
   const stage = job.stage || job.status;
   $('job-panel').hidden = false;
-  $('job-stage').textContent = failedHistoricalReview(job) ? 'Historical appearance failed review · Assets available' : STAGES[stage] || 'Waiting for service status';
+  $('job-stage').textContent = failedHistoricalReview(job) ? 'Historical appearance failed review · Assets available'
+    : job.kind === 'panorama' && stage === 'ready' ? 'Historical panorama ready' : STAGES[stage] || 'Waiting for service status';
   const elapsed = job.timing_s?.total_to_assets;
   $('job-detail').textContent = jobDetails(job)
     + (Number.isFinite(elapsed) ? ` Assets ready ${elapsed.toFixed(1)} s after job creation.` : '');
@@ -977,7 +1170,8 @@ function applyJob(job) {
   const costs = job.cost_credits || {};
   const credit = (value) => Number.isFinite(value) ? `${value} credits` : 'Not reported';
   const photoInput = state.plan?.input_kind === 'streetview_panorama' || !!job.generation_calls?.image_edit;
-  $('cost').textContent = photoInput
+  $('cost').textContent = job.kind === 'panorama' ? 'Image generation billed separately · No 3D world generated'
+    : photoInput
     ? `OpenAI image editing billed separately · World Labs world: ${credit(costs.world)} · World Labs total: ${credit(costs.total)}`
     : `Panorama: ${credit(costs.depth)} · World: ${credit(costs.world)} · Total: ${credit(costs.total)}`;
   $('job-assets').replaceChildren();
@@ -1004,7 +1198,8 @@ function applyJob(job) {
 }
 
 async function startGeneration() {
-  if (!state.plan || state.generateBusy || state.job || state.submissionUnknown || !state.config?.configured || !modelProfile()) return;
+  if (!state.plan || state.generateBusy || state.job && !(state.job.kind === 'panorama' && state.job.stage === 'ready')
+      || state.submissionUnknown || !state.config?.configured || !modelProfile()) return;
   state.generateBusy = true; syncUI(); message(`Creating a historical panorama and ${modelProfile().label} world…`);
   try {
     const job = await api('/world-jobs', { method: 'POST', body: { plan_id: state.plan.plan_id, model: state.model } });
@@ -1112,6 +1307,7 @@ function ensureEngine() {
       } else if (!panorama && !gps) controls.update();
     }
     if (now - state.motionFrameAt > 250) { state.motionFrameAt = now; updateMotionUI(); }
+    advancePanoramaTransition(dt);
     try { renderer.render(scene, camera); }
     catch { message('This device cannot render the current 3D asset. Panoramas and downloads are still available.', true); renderer.setAnimationLoop(null); }
   });
@@ -1174,14 +1370,15 @@ function fitCoarse(engine, object, view) {
 function semanticsTransform(asset) {
   const metadata = asset?.semantics_metadata;
   const scale = metadata?.metric_scale_factor, offset = metadata?.ground_plane_offset;
-  const verified = typeof scale === 'number' && Number.isFinite(scale) && scale > 0
-    && typeof offset === 'number' && Number.isFinite(offset);
-  return verified ? { scale, offset, metric: true } : { scale: 1, offset: 0, metric: false };
+  const metric = typeof scale === 'number' && Number.isFinite(scale) && scale > 0;
+  const groundAligned = metric && typeof offset === 'number' && Number.isFinite(offset);
+  return { scale: metric ? scale : 1, offset: groundAligned ? offset : 0, metric, groundAligned };
 }
 
 async function showView(view, { automatic = false } = {}) {
   const asset = assetFor(view);
   if (!asset) return;
+  finishPanoramaTransition();
   cancelScaleCalibration();
   if (walkingLocked()) stopWalking('changed');
   if (view === 'world' && state.walkScaleWorldKey !== asset.url) {
@@ -1195,7 +1392,7 @@ async function showView(view, { automatic = false } = {}) {
   }
   if (!automatic) state.userViewLocked = true;
   const epoch = ++state.viewEpoch; state.viewAbort?.abort();
-  const controller = new AbortController(); state.viewAbort = controller; state.view = view;
+  const controller = new AbortController(); state.viewAbort = controller; state.view = view; state.viewBusy = true;
   state.keys.clear(); state.touchMoves.clear(); syncUI(); message('Loading preview…');
   $('empty').hidden = true; $('flat-preview').hidden = true; $('move-pad').hidden = true;
   if (state.imageURL) { URL.revokeObjectURL(state.imageURL); state.imageURL = null; $('flat-preview').removeAttribute('src'); }
@@ -1228,7 +1425,9 @@ async function showView(view, { automatic = false } = {}) {
       state.imageURL = pendingURL; pendingURL = null;
       $('view-caption').textContent = view === 'source' ? 'Street View' : `${state.plan?.target_year || ''} · Reimagined panorama`;
       const distance = sourceMetadata.distance_m;
-      const offset = Number.isFinite(distance) ? `The Street View camera is about ${Math.round(distance)} m from your location when the scene was prepared. ` : '';
+      const offset = state.plan?.location?.location_source === 'prediction'
+        ? 'This camera point was selected ahead of the GPS position recorded in the prediction. '
+        : Number.isFinite(distance) ? `The Street View camera is about ${Math.round(distance)} m from your location when the scene was prepared. ` : '';
       $('viewer-note').textContent = view === 'source' ? 'Drag to look around · Enable motion to follow your phone' : 'Reimagined history · Turn your phone to look around';
       $('view-details').textContent = view === 'source'
         ? `Google Street View · ${text(sourceMetadata.copyright)} · Captured: ${text(sourceMetadata.date, 'Not provided')}. This is a panoramic photograph. ${offset}Heading is estimated from Street View metadata; sensors and landmarks can help align it.`
@@ -1270,7 +1469,9 @@ async function showView(view, { automatic = false } = {}) {
         engine.controls.minDistance = 0.05; engine.controls.maxDistance = 500;
         engine.home = { position: engine.camera.position.clone(), target: engine.controls.target.clone() };
         $('view-caption').textContent = `${state.plan?.target_year || ''} · Generated world`;
-        $('view-details').textContent = transform.metric ? 'Generated world · Provider metric scale and ground offset applied'
+        $('view-details').textContent = transform.metric ? transform.groundAligned
+          ? 'Generated world · Provider metric scale and ground offset applied'
+          : 'Generated world · Provider metric scale applied; ground height unverified'
           : 'Generated world · Model units; scale and ground unverified';
         $('view-details').textContent += ` · ${worldQualityLabel(state.job, asset)}\nReal SPZ asset. Drag to look around or use arrow buttons to move virtually. ${getWalkingController().available()
           ? 'Calibrate scale and enable AR tracking in settings. ' : 'Calibrate scale and heading in settings to enable approximate GPS walking. '}Source camera position, geographic heading, and phone alignment remain unverified and need calibration on site. The scene has no collision protection.`;
@@ -1286,7 +1487,7 @@ async function showView(view, { automatic = false } = {}) {
       engine.scene.add(engine.current); engine.renderer.domElement.hidden = false; engine.controls.update();
       $('move-pad').hidden = false;
     }
-    if (epoch === state.viewEpoch) { applyReviewNotice(); updateMotionUI(); message(); }
+    if (epoch === state.viewEpoch) { applyReviewNotice(); updateMotionUI(); syncPrefetch(); message(); }
   } catch (error) {
     disposeObject(pendingObject);
     if (epoch !== state.viewEpoch || error.name === 'AbortError') return;
@@ -1296,6 +1497,7 @@ async function showView(view, { automatic = false } = {}) {
     updateMotionUI();
   } finally {
     if (pendingURL) URL.revokeObjectURL(pendingURL);
+    if (epoch === state.viewEpoch) { state.viewBusy = false; syncPrefetch(); }
   }
 }
 
@@ -1383,6 +1585,21 @@ function bindEvents() {
     if (event.target === $('settings-dialog')) closeSettings();
   });
   $('motion-toggle').addEventListener('click', toggleMotion);
+  $('prefetch-open').addEventListener('click', () => {
+    openSettings(); $('prefetch-settings').scrollIntoView({ block: 'start' });
+  });
+  $('prefetch-toggle').addEventListener('click', () => { void togglePrefetch(); });
+  $('prefetch-view').addEventListener('click', () => { closeSettings(); void showView('pano'); });
+  $('prefetch-next').addEventListener('click', async () => {
+    // Entering panorama mode is an explicit action when coming from a 3D world.
+    // It ends that world's walking calibration through the existing view path.
+    if (state.view !== 'pano') await showView('pano');
+    syncPrefetch(); await state.prefetch?.activateReady();
+  });
+  $('walk-open').addEventListener('click', () => {
+    cancelScaleCalibration(); openSettings();
+    $('walking-settings').scrollIntoView({ block: 'start' });
+  });
   $('walk-start').addEventListener('click', startWalking);
   $('walk-reanchor').addEventListener('click', startWalking);
   $('walk-stop').addEventListener('click', () => stopWalking());
@@ -1400,7 +1617,7 @@ function bindEvents() {
   $('edits-file')?.addEventListener('change', (event) => { void importEdits(event.target.files?.[0]); });
   $('generate').addEventListener('click', () => { void generateForYear(); });
   $('world-model').addEventListener('change', (event) => {
-    if (state.job || state.generateBusy || state.submissionUnknown || !modelProfile(event.target.value)) return;
+    if (state.job && state.job.kind !== 'panorama' || state.generateBusy || state.submissionUnknown || !modelProfile(event.target.value)) return;
     state.model = event.target.value; syncUI();
   });
   $('connect').addEventListener('click', async () => {
@@ -1416,13 +1633,13 @@ function bindEvents() {
   $('retry-location').addEventListener('click', retryLocation);
   $('copy-location-link').addEventListener('click', copyLocationLink);
   const revisitLocationPermission = () => {
-    if (document.visibilityState !== 'visible') { stopLiveLocation(); return; }
+    if (document.visibilityState !== 'visible') { stopLiveLocation(); syncPrefetch(); return; }
     // Re-read the live PermissionStatus when Safari resumes from Settings;
     // the browser may defer its change event while the page is backgrounded.
     if (state.locationPermissionStatus) applyLocationPermission(state.locationPermissionStatus);
     else void observeLocationPermission();
     resumeLocationRecovery();
-    startLiveLocation(); void maybePrepareCurrent();
+    startLiveLocation(); syncPrefetch(); void maybePrepareCurrent();
   };
   window.addEventListener('focus', revisitLocationPermission);
   document.addEventListener('visibilitychange', revisitLocationPermission);
@@ -1464,18 +1681,21 @@ function bindEvents() {
     clearTimeout(state.pollTimer); state.pollTimer = null; ++state.jobEpoch;
     state.viewAbort?.abort(); releaseMoves();
     stopLiveLocation();
+    state.prefetch?.setContext({ enabled: state.prefetchEnabled, plan: state.plan, year: Number($('year').value), active: false, allowSwitch: false });
+    finishPanoramaTransition();
     cancelScaleCalibration();
     state.orientation?.stop('paused'); stopTravelTracking();
     // A back/forward-cache entry retains this JS state and its live canvas.
     // Keep rendering resources and controls so browser Back can resume them.
     if (event.persisted) return;
+    state.prefetch?.dispose();
     state.orientation?.dispose(); state.walking?.dispose(); state.gpsWalking?.dispose(); state.yearWheel?.dispose();
     if (state.imageURL) URL.revokeObjectURL(state.imageURL);
     if (state.engine) { state.engine.renderer.setAnimationLoop(null); state.engine.observer.disconnect(); state.engine.look?.dispose(); }
   });
   window.addEventListener('pageshow', (event) => {
     if (!event.persisted) return;
-    startLiveLocation(); void maybePrepareCurrent();
+    startLiveLocation(); syncPrefetch(); void maybePrepareCurrent();
     if (state.engine) state.engine.previousTime = 0;
     schedulePoll(state.jobEpoch);
     // An asset fetch may have been interrupted during navigation.

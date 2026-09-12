@@ -30,30 +30,33 @@ export function cameraQuaternionFromAngles(alpha, beta, gamma, screenAngle = 0) 
     .multiply(new THREE.Quaternion().setFromAxisAngle(SCREEN_Z, -screenAngle * RAD)).normalize();
 }
 
-/** Only trustworthy north references are promoted to absolute orientation. */
+/**
+ * Keep the fused attitude intact: replacing alpha with a compass bearing breaks
+ * the coupled Euler angles near upright and can flip the view when pitching.
+ * A compass is only a candidate for a one-time north alignment, never look data.
+ */
 export function orientationSample(event, screenAngle = 0, maxCompassAccuracy = 35) {
-  if (!event || ![event.beta, event.gamma].every(finite)) return null;
-  let alpha = event.alpha;
-  let reference = 'relative';
+  if (!event) return null;
+  const quaternion = cameraQuaternionFromAngles(event.alpha, event.beta, event.gamma, screenAngle);
+  if (!quaternion) return null;
+  const source = event.absolute === true || event.type === 'deviceorientationabsolute' ? 'absolute' : 'relative';
+  let northQuaternion = source === 'absolute' ? quaternion.clone() : null;
   let accuracy = null;
-  // Apple's alpha is arbitrary. Its compass property supplies the Z rotation,
-  // not directly the optical bearing (which also depends on beta and gamma).
-  // https://developer.apple.com/documentation/webkitjs/deviceorientationevent
-  // https://lists.w3.org/Archives/Public/public-geolocation/2014Mar/0002.html
   const compass = finite(event.webkitCompassHeading) && event.webkitCompassHeading >= 0 && event.webkitCompassHeading <= 360;
   const measuredAccuracy = finite(event.webkitCompassAccuracy) ? event.webkitCompassAccuracy : null;
-  if (compass && measuredAccuracy !== null && measuredAccuracy >= 0 && measuredAccuracy <= maxCompassAccuracy) {
-    alpha = 360 - event.webkitCompassHeading;
+  const compassAccurate = compass && measuredAccuracy !== null && measuredAccuracy >= 0 && measuredAccuracy <= maxCompassAccuracy;
+  // Safari's heading is for the top of the phone. Seed it with the screen facing
+  // up, within 35 degrees of horizontal; its top-axis projection is singular
+  // upright. The full attitude then carries that north reference as it is raised.
+  const level = Math.cos(event.beta * RAD) * Math.cos(event.gamma * RAD) >= Math.cos(35 * RAD);
+  if (source === 'relative' && compassAccurate && level) {
+    northQuaternion = cameraQuaternionFromAngles(360 - event.webkitCompassHeading, event.beta, event.gamma, screenAngle);
     accuracy = measuredAccuracy;
-    reference = 'magnetic-north';
-  } else if (event.absolute === true || event.type === 'deviceorientationabsolute') {
-    reference = 'magnetic-north';
   }
-  const quaternion = cameraQuaternionFromAngles(alpha, event.beta, event.gamma, screenAngle);
-  if (!quaternion) return null;
-  return { quaternion, reference, absolute: reference !== 'relative', accuracy,
-    heading: reference !== 'relative' ? headingFromQuaternion(quaternion) : null,
-    compassUnreliable: compass && reference === 'relative' };
+  return { quaternion, source, northQuaternion, reference: northQuaternion ? 'magnetic-north' : 'relative',
+    absolute: !!northQuaternion, accuracy, heading: northQuaternion ? headingFromQuaternion(northQuaternion) : null,
+    compassNeedsLevel: source === 'relative' && compassAccurate && !level,
+    compassUnreliable: source === 'relative' && compass && !compassAccurate };
 }
 
 /** Return a world-up rotation aligning two horizontal optical bearings. */
@@ -61,6 +64,23 @@ export function yawAlignment(source, target) {
   const from = headingFromQuaternion(source), to = headingFromQuaternion(target);
   if (from === null || to === null) return null;
   return new THREE.Quaternion().setFromAxisAngle(UP, (from - to) * RAD);
+}
+
+function topHeading(quaternion) {
+  const top = new THREE.Vector3(0, 1, 0).applyQuaternion(quaternion);
+  return Math.hypot(top.x, top.z) < 0.08 ? null : wrapDegrees(Math.atan2(top.x, -top.z) / RAD);
+}
+
+// A level phone points its optical axis down. Its top edge still defines yaw.
+// Compare the same axes when transferring sensor frames; for the initial view,
+// align that edge with the viewer's optical bearing so raising it faces forward.
+function attitudeYawAlignment(source, target, initialView = false) {
+  const optical = yawAlignment(source, target);
+  if (optical) return optical;
+  const from = topHeading(source) ?? headingFromQuaternion(source);
+  const to = initialView ? headingFromQuaternion(target) ?? topHeading(target)
+    : topHeading(target) ?? headingFromQuaternion(target);
+  return from === null || to === null ? null : new THREE.Quaternion().setFromAxisAngle(UP, (from - to) * RAD);
 }
 
 /**
@@ -79,10 +99,10 @@ export function createOrientationController({
   staleMs = 15000,
   maxCompassAccuracy = 35,
 } = {}) {
-  let status = { enabled: false, phase: 'idle', mode: null, reference: null, heading: null, physicalHeading: null, accuracy: null, relativeOnly: false, message: 'Drag to look around · Enable motion to follow your phone' };
+  let status = { enabled: false, phase: 'idle', mode: null, reference: null, heading: null, physicalHeading: null, accuracy: null, northInitialized: false, relativeOnly: false, message: 'Drag to look around · Enable motion to follow your phone' };
   let epoch = 0, pending = null, timer = null, latest = null, target = null, disposed = false;
-  let yawOffset = new THREE.Quaternion(), calibrated = false, hasAnchor = false;
-  let startedAt = 0, receivedAt = 0, lastEventTime = -Infinity, absoluteAt = -Infinity;
+  let yawOffset = new THREE.Quaternion(), northOffset = null, northAccuracy = null, calibrated = false, hasAnchor = false, viewUsesNorth = false;
+  let startedAt = 0, receivedAt = 0, lastEventTime = -Infinity, relativeAt = -Infinity;
   let lastEvent = null, sensorListener = null, listening = false, lifecycleListening = false;
   const publish = (patch) => {
     status = { ...status, ...patch };
@@ -104,33 +124,63 @@ export function createOrientationController({
     return stamp;
   };
   const applySample = (sample) => {
-    const referenceChanged = latest && latest.reference !== sample.reference;
-    if (!hasAnchor || referenceChanged) {
-      if (calibrated || status.relativeOnly || !sample.absolute) {
-        const alignment = yawAlignment(sample.quaternion, target || getCameraQuaternion());
+    const sourceChanged = latest && latest.source !== sample.source;
+    if (sourceChanged) {
+      // Both streams use gravity for pitch/roll, but their yaw origins differ.
+      // Transfer each offset independently so a visual calibration never leaks
+      // into the physical heading used for world/GPS alignment.
+      const frameChange = attitudeYawAlignment(sample.quaternion, latest.quaternion);
+      if (!frameChange) return;
+      yawOffset.multiply(frameChange).normalize();
+      if (northOffset) northOffset.multiply(frameChange).normalize();
+    }
+    if (!northOffset && sample.northQuaternion) {
+      northOffset = attitudeYawAlignment(sample.quaternion, sample.northQuaternion);
+      if (northOffset) northAccuracy = sample.accuracy;
+    }
+    if (!hasAnchor) {
+      if (status.relativeOnly || !northOffset) {
+        const alignment = attitudeYawAlignment(sample.quaternion, getCameraQuaternion(), true);
         if (!alignment) {
           publish({ phase: 'waiting', message: 'Hold your phone upright and point it forward, then tap “Align heading” to align the view.' });
           return;
         }
         yawOffset.copy(alignment);
-      } else yawOffset.identity();
+      } else {
+        yawOffset.copy(northOffset);
+        viewUsesNorth = true;
+      }
       hasAnchor = true;
     }
     latest = sample;
     target = yawOffset.clone().multiply(sample.quaternion).normalize();
-    publish({ phase: 'tracking', mode: calibrated ? 'calibrated' : sample.absolute && !status.relativeOnly ? 'absolute' : 'relative',
-      reference: sample.reference, heading: sample.heading, physicalHeading: sample.heading, accuracy: sample.accuracy,
+    const physicalHeading = northOffset ? headingFromQuaternion(northOffset.clone().multiply(sample.quaternion)) : null;
+    publish({ phase: 'tracking', mode: calibrated ? 'calibrated' : viewUsesNorth ? 'absolute' : 'relative',
+      reference: northOffset ? 'magnetic-north' : 'relative', heading: physicalHeading, physicalHeading, accuracy: northAccuracy, northInitialized: !!northOffset,
       message: calibrated ? 'Manually aligned · Turn your phone to look around'
-        : sample.absolute && !status.relativeOnly ? `Compass follow (approximate)${sample.accuracy === null ? '' : ` · ±${Math.round(sample.accuracy)}°`}`
-          : sample.compassUnreliable ? 'Compass is unstable · Relative follow; tap “Align heading” to align manually' : 'Relative follow · Tap “Align heading” to align with your real direction' });
+        : northOffset ? `North initialized${northAccuracy === null ? '' : ` (approx. ±${Math.round(northAccuracy)}°)`} · Turn or tilt your phone to look around${viewUsesNorth ? '' : ' · Align heading to match the view'}`
+          : sample.compassNeedsLevel ? 'Relative follow · Briefly hold the phone flat, screen up, to initialize the compass'
+            : sample.compassUnreliable ? 'Compass is unstable · Relative follow; tap “Align heading” to align manually'
+              : 'Relative follow · Tap “Align heading” to align with your real direction' });
   };
   function handleOrientation(event) {
     if (!status.enabled || doc?.visibilityState === 'hidden') return;
     const current = now(), stamp = eventClock(event.timeStamp, current);
     if (stamp !== null && (stamp < startedAt - 250 || stamp < lastEventTime || current - stamp > staleMs || stamp > current + 1000)) return;
     const sample = orientationSample(event, screenAngle(), maxCompassAccuracy);
-    if (!sample || !sample.absolute && current - absoluteAt < 1000) return;
-    if (sample.absolute) absoluteAt = current;
+    if (!sample) return;
+    // The relative stream is the browser's accelerometer/gyro fusion and avoids
+    // ongoing magnetic corrections. Absolute attitude is a north seed and a
+    // fallback for browsers that do not deliver relative orientation.
+    // https://www.w3.org/TR/orientation-event/#choice-of-reference-coordinate-system
+    if (sample.source === 'absolute' && current - relativeAt < 1000) {
+      if (!northOffset && latest && sample.northQuaternion && current - receivedAt < 100) {
+        northOffset = attitudeYawAlignment(latest.quaternion, sample.northQuaternion);
+        if (northOffset) { northAccuracy = sample.accuracy; applySample(latest); }
+      }
+      return;
+    }
+    if (sample.source === 'relative') relativeAt = current;
     if (stamp !== null) lastEventTime = stamp;
     receivedAt = current;
     // Keep only inert scalar values; do not retain a browser event or target.
@@ -172,9 +222,10 @@ export function createOrientationController({
     epoch++;
     pending = null;
     detach();
-    latest = null; target = null; lastEvent = null; calibrated = false; hasAnchor = false;
-    absoluteAt = -Infinity; lastEventTime = -Infinity;
-    publish({ enabled: false, phase, mode: null, reference: null, heading: null, physicalHeading: null, accuracy: null,
+    latest = null; target = null; lastEvent = null; calibrated = false; hasAnchor = false; viewUsesNorth = false;
+    northOffset = null; northAccuracy = null; yawOffset.identity();
+    relativeAt = -Infinity; lastEventTime = -Infinity;
+    publish({ enabled: false, phase, mode: null, reference: null, heading: null, physicalHeading: null, accuracy: null, northInitialized: false,
       message: phase === 'paused' ? 'Motion paused. Tap “Enable motion” to resume.' : 'Drag to look around · Enable motion to follow your phone' });
   }
   function startFromGesture({ relativeOnly = false } = {}) {

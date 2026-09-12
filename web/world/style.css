@@ -207,6 +207,10 @@ details > label, details > nav { margin-top: 18px; }
 .walking-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}.walking-actions button{flex:1;min-width:90px}
 #walk-scale,#walk-heading{margin-top:6px}#walk-status.warning{color:#a14f27}
 #walking-readout { margin: 6px auto 0; max-width: 340px; font-size: 10px; line-height: 1.6; color: #ffe4a5; text-shadow: 0 1px 12px #0008; }
+.walk-shortcut { pointer-events: auto; min-height: 44px; margin-top: 6px; padding: 0 16px; border: 1px solid #ffffff40; border-radius: 24px; background: #20352dcc; color: #f5f4ed; font-size: 11px; }
+#prefetch-readout { margin: 6px auto 0; max-width: 340px; font-size: 10px; line-height: 1.6; color: #e3edd8; text-shadow: 0 1px 12px #0008; }
+#prefetch-next { background: #e3edd8; color: #25392b; }
+#prefetch-view { display: block; margin-top: 10px; }
 
 /* Measure against the rendered scene while leaving drag gestures on the canvas. */
 .scale-calibration { position: absolute; inset: 0; z-index: 8; pointer-events: none; cursor: default; }

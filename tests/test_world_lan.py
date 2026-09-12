@@ -144,3 +144,17 @@ def test_disallowed_paths_and_redirects_cannot_escape_world_routes(gateway):
         assert client.post('/world-session').status_code == 405
         assert client.post('/world/config.js').status_code == 405
     assert len(calls) == 2
+
+
+def test_prediction_requests_require_lan_auth_and_forward_to_the_private_backend(gateway):
+    app, calls, _, _ = gateway
+    with connect(app) as client:
+        assert client.post('/world-prefetch', json={}).status_code == 401
+        token = client.get('/world-session').json()['access_token']
+        response = client.post('/world-prefetch', json={'plan_id': 'fixture'},
+                               headers={'authorization': 'Bearer ' + token})
+        assert response.status_code == 200
+        assert response.headers['cache-control'] == 'no-store'
+        assert calls[-1].url.path == '/world-prefetch'
+        assert calls[-1].headers['authorization'] == 'Bearer ' + BACKEND_TOKEN
+        assert client.post('/world-prefetch-evil', json={}).status_code == 404

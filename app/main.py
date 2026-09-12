@@ -55,7 +55,7 @@ app = FastAPI(title='Century Pano', version='0.1.0', lifespan=lifespan)
 @app.middleware('http')
 async def security_headers(request, call_next):
     length = request.headers.get('content-length')
-    if request.url.path.startswith(('/world-plans', '/world-jobs')) and request.method in ('POST', 'PATCH'):
+    if request.url.path.startswith(('/world-plans', '/world-jobs', '/world-prefetch')) and request.method in ('POST', 'PATCH'):
         body = bytearray()
         async for chunk in request.stream():
             body.extend(chunk)
@@ -73,7 +73,7 @@ async def security_headers(request, call_next):
     response.headers['Referrer-Policy'] = 'same-origin'
     response.headers['Permissions-Policy'] = 'geolocation=(self), accelerometer=(self), gyroscope=(self), magnetometer=(self)'
     if (request.url.path in ('/sw.js', '/health', '/replays') or request.url.path.endswith('/manifest')
-            or request.url.path.startswith(('/world-session', '/world-plans', '/world-jobs', '/world-config'))):
+            or request.url.path.startswith(('/world-session', '/world-plans', '/world-jobs', '/world-config', '/world-prefetch'))):
         response.headers['Cache-Control'] = 'no-store'
     return response
 

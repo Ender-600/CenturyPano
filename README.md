@@ -10,6 +10,8 @@
 
 **单街区历史世界工作台**现在默认使用手机实时 GPS：获取附近 Google Street View 的 RGB 360° 全景照片 → GPT Image 历史改图 → Marble 1.1 标准质量 → Spark 完整精度三维查看（提供方未返回完整精度时使用最高可用点数并标明）。生成前可显式选择快速 Draft；标准世界生成 1,500 credits，图片处理另计。升级说明与画面验收标准见 [世界质量说明](docs/WORLD_QUALITY.md)。这里的输入是街景照片，详见 [Street View 接入说明](docs/STREETVIEW_INPUT.md)。旧 OSM 粗模型／深度链路仅保留在显式测试模式与旧任务回放中，其实验记录见 [几何路线说明](docs/MARBLE_IMPLEMENTATION.md)。
 
+查看器新增 **Prepare ahead as you walk**：按 GPS 行进方向提前生成相邻街景的历史全景，到点后在全景模式保留朝向切换。可只生成图片，无需 World Labs；用法与费用上限见 [预测步行说明](docs/PREDICTIVE_WALKING.md)。
+
 仓库自带的是 **工程示例**：程序绘制的街景插画经过本地色调变换，没有调用 AI，不是实拍照片，不代表历史重建画质。真实模型效果、真实模型性能、iPhone 的实体传感器验收需在配置密钥后完成，不能把下方本地数值作为真实模型的结果。
 
 ## 历史街区工作台启动

@@ -9,12 +9,12 @@ const MESSAGES = {
   idle: 'GPS walking stopped.',
   waiting: 'Waiting for an accurate location. Stand still until the location is ready, then start walking.',
   tracking: 'Approximate GPS follow is on · Turn your phone to control the view independently.',
-  accuracy: 'Location accuracy is low. Movement paused. Move to an open outdoor area, then tap “Reset start”.',
+  accuracy: 'Location accuracy is low. Holding your position while waiting for a more accurate fix.',
   timeout: 'Location updates timed out. Movement paused. Stand still, then tap “Reset start”.',
   jump: 'A location jump was detected. Movement paused. Stand still, then tap “Reset start”.',
   background: 'Movement paused while the page was in the background. Tap “Reset start” when you return.',
   denied: 'Location permission is off. Allow location access in your browser, then try again.',
-  error: 'Location is unavailable. Movement paused. Tap “Reset start” when location access returns.',
+  error: 'Location is temporarily unavailable. Holding your position while waiting for a fresh fix.',
   scale: 'First set the number of model units per real meter.',
   anchor: 'Align your real direction with the world view, then tap “Enable GPS walking”.',
   changed: 'The world changed. GPS walking stopped. Tap “Enable GPS walking” to set a new start.',
@@ -44,14 +44,15 @@ export function createGPSWalkingController({
   onChange = () => {},
   maxAccuracyMeters = 20,
   maxFixAgeMs = 5000,
-  staleMs = 10000,
+  staleMs = 20000,
   startupMs = 20000,
   minDeadbandMeters = 1.5,
   maxSpeedMetersPerSecond = 4,
   smoothingSeconds = 0.35,
 } = {}) {
   let status = { enabled: false, locked: false, phase: 'idle', needsReanchor: false,
-    accuracyMeters: null, displacementMeters: 0, message: MESSAGES.idle };
+    accuracyMeters: null, displacementMeters: 0, observedDisplacementMeters: 0,
+    pendingMovementMeters: 0, deadbandMeters: null, message: MESSAGES.idle };
   let disposed = false, timer = null, epoch = 0, receivedAt = null, startedAt = null;
   let origin = null, previousFix = null, targetFix = null, worldOrigin = null;
   let target = null, output = null, scale = 1, alignment = new THREE.Quaternion();
@@ -85,7 +86,8 @@ export function createGPSWalkingController({
     origin = null; previousFix = null; targetFix = null; worldOrigin = null; target = null; output = null;
     receivedAt = null; startedAt = null;
     publish({ enabled: false, locked: false, phase, needsReanchor: false, accuracyMeters: null,
-      displacementMeters: 0, message: MESSAGES[phase] || MESSAGES.idle });
+      displacementMeters: 0, observedDisplacementMeters: 0, pendingMovementMeters: 0,
+      deadbandMeters: null, message: MESSAGES[phase] || MESSAGES.idle });
   }
   function start({ worldUnitsPerMeter, anchorPosition, headingDegrees, worldYaw } = {}) {
     if (disposed || doc?.visibilityState === 'hidden') return false;
@@ -101,7 +103,8 @@ export function createGPSWalkingController({
     alignment = new THREE.Quaternion().setFromAxisAngle(UP, headingDegrees * RAD + worldYaw);
     origin = null; previousFix = null; targetFix = null; receivedAt = null; startedAt = now();
     publish({ enabled: true, locked: true, phase: 'waiting', needsReanchor: false,
-      accuracyMeters: null, displacementMeters: 0, message: MESSAGES.waiting });
+      accuracyMeters: null, displacementMeters: 0, observedDisplacementMeters: 0,
+      pendingMovementMeters: 0, deadbandMeters: null, message: MESSAGES.waiting });
     armTimer(startupMs); return true;
   }
   function receiveFix(fix) {
@@ -113,9 +116,11 @@ export function createGPSWalkingController({
         || fix.timestamp_ms < startedAt
         || previousFix && fix.timestamp_ms <= previousFix.timestamp_ms) return false;
     if (fix.accuracy_m > maxAccuracyMeters) {
-      if (origin) freeze('accuracy');
-      else publish({ phase: 'accuracy', accuracyMeters: fix.accuracy_m,
-        message: 'Location accuracy is low. Waiting for a more accurate fix. Move to an open outdoor area.' });
+      // A single noisy update is not tracking loss. Hold the displayed position,
+      // but do not extend the deadline measured from the last reliable fix.
+      publish({ phase: 'accuracy', accuracyMeters: fix.accuracy_m,
+        message: origin ? MESSAGES.accuracy
+          : 'Location accuracy is low. Waiting for a more accurate fix. Move to an open outdoor area.' });
       return false;
     }
     if (previousFix) {
@@ -131,30 +136,40 @@ export function createGPSWalkingController({
     // Compare with the last target, rather than each noisy consecutive fix, so
     // a series of sub-threshold steps can eventually accumulate into movement.
     const deadband = Math.max(minDeadbandMeters, (targetFix.accuracy_m + accepted.accuracy_m) * 0.35);
-    if (locationDistance(targetFix, accepted) > deadband) {
+    let pendingMovement = locationDistance(targetFix, accepted);
+    if (pendingMovement > deadband) {
       target.copy(meters).applyQuaternion(alignment).multiplyScalar(scale).add(worldOrigin);
       targetFix = accepted;
+      pendingMovement = 0;
     }
     previousFix = accepted; receivedAt = now(); armTimer(staleMs);
     publish({ enabled: true, locked: true, phase: 'tracking', needsReanchor: false,
       accuracyMeters: accepted.accuracy_m, displacementMeters: target.distanceTo(worldOrigin) / scale,
+      observedDisplacementMeters: meters.length(), pendingMovementMeters: pendingMovement,
+      deadbandMeters: deadband,
       message: MESSAGES.tracking });
     return true;
   }
   function getPosition(deltaSeconds = 0) {
     checkFreshness();
     if (!status.locked || !output) return null;
-    if (status.enabled && origin && finite(deltaSeconds) && deltaSeconds > 0) {
+    if (status.enabled && status.phase === 'tracking' && origin && finite(deltaSeconds) && deltaSeconds > 0) {
       const alpha = smoothingSeconds > 0 ? -Math.expm1(-Math.min(deltaSeconds, 0.25) / smoothingSeconds) : 1;
       output.lerp(target, alpha);
     }
     return output.clone();
   }
   function fail(error) {
+    checkFreshness();
     if (!status.enabled) return;
-    const phase = error?.code === 1 ? 'denied' : 'error';
-    if (phase === 'denied' && !origin) stop(phase);
-    else freeze(phase);
+    if (error?.code === 1) {
+      if (!origin) stop('denied');
+      else freeze('denied');
+    } else {
+      // Browser watches can report temporary failures and still deliver the next
+      // fix. Preserve the anchor within the same bounded freshness window.
+      publish({ phase: 'error', message: MESSAGES.error });
+    }
   }
   const pageHide = () => { if (status.enabled) freeze('background'); };
   const visibility = () => { if (doc?.visibilityState === 'hidden') pageHide(); };

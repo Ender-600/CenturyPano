@@ -10,6 +10,7 @@ import { createYearWheel } from '../web/world/year-wheel.js';
 import { createMotionController } from '../web/world/motion.js';
 import { createGPSWalkingController } from '../web/world/gps-walking.js';
 import { createScaleCalibration } from '../web/world/scale.js';
+import { createPanoramaPrefetch } from '../web/world/prefetch.js';
 
 const source = readFileSync(new URL('../web/world/app.js', import.meta.url), 'utf8');
 const html = readFileSync(new URL('../web/world/index.html', import.meta.url), 'utf8');
@@ -88,7 +89,7 @@ function app(options = {}) {
   const context = vm.createContext({
     THREE, createPanoramaMesh, PanoramaLookControls, panoramaHeading, setCameraBearing, cameraBearing,
     createOrientationController, headingFromQuaternion, createGPSWalkingController, createLiveLocation, positionFix, locationDistance, createYearWheel,
-    createMotionController, createScaleCalibration, SplatMesh: SplatStub, SparkRenderer: class {},
+    createMotionController, createScaleCalibration, createPanoramaPrefetch, SplatMesh: SplatStub, SparkRenderer: class {},
     GLTFLoader: class { async parseAsync() { return { scene: options.gltf || new THREE.Group() }; } },
     document, window: { DeviceOrientationEvent: options.orientation, CenturyMotion: options.nativeBridge,
       crypto: { randomUUID: () => `native-session-${++objectId}-00000000` },
@@ -128,7 +129,7 @@ function app(options = {}) {
   });
   document.defaultView = context.window;
   for (const element of elements.values()) element.ownerDocument = document;
-  const hooks = '{state,api,safeAssetURL,safeSourceURL,initialiseAccess,boot,bindEvents,preparePlan,renderPlan,startGeneration,pollJob,applyJob,restoreSaved,showView,semanticsTransform,importEdits,resumeJob,changeReason,refreshLocation,setLocationMode,resolveLocation,openStreetView,toggleMotion,calibrateView,manualLook,generateForYear,moveCamera,startWalking,stopWalking,applyNativeWalking,applyGPSWalking,nativeWalkingLocked,gpsWalkingLocked,walkingLocked,updateWalkingUI,startLiveLocation,stopLiveLocation,maybePrepareCurrent}';
+  const hooks = '{state,api,safeAssetURL,safeSourceURL,initialiseAccess,boot,bindEvents,preparePlan,renderPlan,startGeneration,pollJob,applyJob,restoreSaved,showView,semanticsTransform,importEdits,resumeJob,changeReason,refreshLocation,setLocationMode,resolveLocation,openStreetView,toggleMotion,calibrateView,manualLook,generateForYear,moveCamera,startWalking,stopWalking,applyNativeWalking,applyGPSWalking,nativeWalkingLocked,gpsWalkingLocked,walkingLocked,updateWalkingUI,startLiveLocation,stopLiveLocation,maybePrepareCurrent,syncPrefetch,togglePrefetch,preloadPanorama,activatePreparedPanorama,advancePanoramaTransition,finishPanoramaTransition}';
   vm.runInContext(source.replace(/^import .*;\n/gm, '').replace('void boot();', `globalThis.hooks = ${hooks};`), context);
   return { ...context.hooks, elements, tabs, moves, requests, timers, storage, rewrites, objects, revoked,
     window: context.window,
@@ -329,6 +330,136 @@ function fakeEngine() {
     helpers: new THREE.Group(), current: null, home: null };
 }
 
+test('prepared panorama is decoded and uploaded before an atomic switch that preserves orientation', async () => {
+  const view = app({ visibility: 'visible', fetch: () => response('panorama') });
+  authorised(view); view.state.config.prefetch = { available: true };
+  view.state.engine = fakeEngine(); view.state.prefetchEnabled = true;
+  const original = plan({ input_kind: 'streetview_panorama', source_panorama: { metadata: { pano_id: 'a', heading: 10 } } });
+  view.state.plan = original; view.state.view = 'pano';
+  const old = createPanoramaMesh({ width: 2048, height: 1024 }, original.source_panorama.metadata);
+  view.state.engine.current = old; view.state.engine.scene.add(old);
+  view.state.imageURL = 'blob:previous';
+  setCameraBearing(view.state.engine.camera, 345, 25);
+  const orientation = view.state.engine.camera.quaternion.clone();
+  let uploaded = 0, disposed = 0;
+  view.state.engine.renderer.initTexture = () => uploaded++;
+  old.geometry.addEventListener('dispose', () => disposed++);
+  const next = plan({ plan_id: '33333333-3333-3333-3333-333333333333', input_kind: 'streetview_panorama',
+    source_panorama: { metadata: { pano_id: 'b', heading: 140, copyright: 'Test source' } } });
+  const job = { id: JOB, plan_id: next.plan_id, kind: 'panorama', stage: 'ready', assets: [
+    { kind: 'historical_pano', filename: 'historical_panorama.jpg', url: `/world-jobs/${JOB}/assets/historical_panorama.jpg` }] };
+  const resource = await view.preloadPanorama(next, job);
+  assert.equal(uploaded, 1); assert.equal(view.state.engine.current, old);
+  assert.equal(view.requests.length, 1);
+  assert.equal(await view.activatePreparedPanorama({ plan: next, job, resource }), true);
+  assert.equal(view.requests.length, 1, 'Switching an already decoded panorama does not fetch again');
+  assert.equal(view.state.engine.current, resource.mesh);
+  assert.deepEqual(view.state.engine.camera.quaternion.toArray(), orientation.toArray());
+  assert.equal(view.state.plan.plan_id, next.plan_id); assert.equal(view.state.job.id, JOB);
+  assert.equal(resource.transferred, true); assert.equal(resource.mesh.material.opacity, 0);
+  assert.equal(disposed, 0, 'Previous scene stays visible during the fade');
+  view.advancePanoramaTransition(0.175); assert.equal(resource.mesh.material.opacity, 0.5);
+  view.advancePanoramaTransition(0.175); assert.equal(resource.mesh.material.opacity, 1);
+  assert.equal(disposed, 1); assert.ok(view.revoked.includes('blob:previous'));
+  resource.dispose(); assert.equal(resource.disposed, false, 'The viewer owns the transferred resource');
+});
+
+test('prepared panoramas never automatically replace 3D walking, a changed year, or a hidden view', async () => {
+  const view = app({ visibility: 'visible', fetch: () => response('panorama') });
+  authorised(view); view.state.config.prefetch = { available: true };
+  view.state.prefetchEnabled = true; view.state.engine = fakeEngine();
+  view.state.engine.current = new THREE.Group();
+  const next = plan({ input_kind: 'streetview_panorama', source_panorama: { metadata: { heading: 0 } } });
+  view.state.plan = next;
+  const job = { id: JOB, kind: 'panorama', stage: 'ready', assets: [
+    { kind: 'historical_pano', url: `/world-jobs/${JOB}/assets/historical_panorama.jpg` }] };
+  const resource = await view.preloadPanorama(next, job), previous = view.state.engine.current;
+  view.state.view = 'world';
+  assert.equal(await view.activatePreparedPanorama({ plan: next, job, resource }), false);
+  view.state.view = 'pano'; view.elements.get('year').value = '1955';
+  assert.equal(await view.activatePreparedPanorama({ plan: next, job, resource }), false);
+  view.elements.get('year').value = '1925'; view.document.visibilityState = 'hidden';
+  assert.equal(await view.activatePreparedPanorama({ plan: next, job, resource }), false);
+  view.document.visibilityState = 'visible'; view.state.gpsWalking = { getStatus: () => ({ locked: true }) };
+  assert.equal(await view.activatePreparedPanorama({ plan: next, job, resource }), false);
+  assert.equal(view.state.engine.current, previous); assert.equal(resource.transferred, false);
+  resource.dispose(); assert.equal(resource.disposed, true); assert.ok(view.revoked.includes(resource.imageURL));
+});
+
+test('panorama walking can generate the current panorama without a configured 3D provider', async () => {
+  const view = app({ visibility: 'visible', fetch: (url) => url === '/world-jobs'
+    ? response({ id: JOB, plan_id: PLAN, kind: 'panorama', stage: 'queued', assets: [] }) : undefined });
+  authorised(view); view.state.config = { configured: false, prefetch: { available: true } };
+  view.state.plan = plan({ input_kind: 'streetview_panorama' });
+  await view.togglePrefetch();
+  const submitted = view.requests.filter((item) => item.method === 'POST');
+  assert.equal(submitted.length, 1);
+  assert.deepEqual(JSON.parse(submitted[0].body), { plan_id: PLAN, kind: 'panorama' });
+  assert.equal(view.state.prefetchEnabled, true); assert.equal(view.state.job.id, JOB);
+  assert.equal(view.elements.get('prefetch-toggle').textContent, 'Stop preparing ahead');
+  view.state.prefetch.dispose();
+});
+
+test('foreground preparation and source auto-refresh cannot run alongside a panorama walk', async () => {
+  const view = app({ visibility: 'visible' }); authorised(view);
+  view.state.bootReady = true; view.state.prefetchEnabled = true;
+  view.state.config.prefetch = { available: true }; view.state.config.streetview = { available: true };
+  view.state.plan = plan({ input_kind: 'streetview_panorama' });
+  view.state.locationFix = { lat: 1, lon: 2, accuracy_m: 5, timestamp_ms: Date.now() };
+  await view.maybePrepareCurrent(); assert.equal(view.requests.length, 0);
+  const contexts = [];
+  view.state.prefetch = { setContext: (context) => contexts.push(context) };
+  view.state.job = { id: JOB, stage: 'generating_world', assets: [{ kind: 'historical_pano', url: `/world-jobs/${JOB}/assets/historical_panorama.jpg` }] };
+  view.syncPrefetch(); assert.equal(contexts.at(-1).active, false);
+  view.state.job.stage = 'ready'; view.state.view = 'world';
+  view.syncPrefetch(); assert.equal(contexts.at(-1).active, true); assert.equal(contexts.at(-1).allowSwitch, false);
+  view.state.view = 'pano'; view.syncPrefetch(); assert.equal(contexts.at(-1).allowSwitch, true);
+});
+
+test('entering panorama mode finishes its old load before activating the prepared next scene', async () => {
+  let releaseOld;
+  const nextId = '33333333333333333333333333333333';
+  const view = app({ visibility: 'visible', fetch: (url) => url.includes(nextId) ? response('next panorama')
+    : new Promise((resolve) => { releaseOld = () => resolve(response('old panorama')); }) });
+  authorised(view); view.state.config.prefetch = { available: true };
+  view.state.engine = fakeEngine(); view.state.engine.current = new THREE.Group();
+  view.state.prefetchEnabled = true; view.state.view = 'world';
+  view.state.plan = plan({ input_kind: 'streetview_panorama' });
+  view.state.job = { id: JOB, stage: 'ready', assets: [{ kind: 'historical_pano', url: `/world-jobs/${JOB}/assets/historical_panorama.jpg` }] };
+  const next = plan({ plan_id: '33333333-3333-3333-3333-333333333333', input_kind: 'streetview_panorama' });
+  const job = { id: nextId, kind: 'panorama', stage: 'ready', assets: [
+    { kind: 'historical_pano', url: `/world-jobs/${nextId}/assets/historical_panorama.jpg` }] };
+  const resource = await view.preloadPanorama(next, job);
+  view.state.prefetch = { setContext: (context) => {
+    if (context.allowSwitch && !resource.transferred) void view.activatePreparedPanorama({ plan: next, job, resource });
+  } };
+  const loading = view.showView('pano');
+  assert.equal(view.state.viewBusy, true); assert.equal(resource.transferred, false);
+  assert.equal(view.state.plan.plan_id, PLAN);
+  releaseOld(); await loading;
+  assert.equal(view.state.viewBusy, false); assert.equal(resource.transferred, true);
+  assert.equal(view.state.plan.plan_id, next.plan_id); assert.equal(view.state.engine.current, resource.mesh);
+  assert.equal(view.state.imageURL, resource.imageURL);
+  view.finishPanoramaTransition();
+});
+
+test('stopping during preparation of a changed year prevents the not-yet-submitted image job', async () => {
+  let releasePlan;
+  const next = plan({ target_year: 1955, input_kind: 'streetview_panorama',
+    assets: { 'source_panorama.jpg': `/world-plans/${PLAN}/assets/source_panorama.jpg` } });
+  const view = app({ visibility: 'visible', fetch: (url) => url === '/world-plans'
+    ? new Promise((resolve) => { releasePlan = () => resolve(response(next)); }) : response('source') });
+  authorised(view); view.state.config.prefetch = { available: true }; view.state.engine = fakeEngine();
+  view.state.plan = plan({ input_kind: 'streetview_panorama' }); view.elements.get('year').value = '1955';
+  const starting = view.togglePrefetch();
+  for (let i = 0; i < 15 && !releasePlan; i++) await Promise.resolve();
+  assert.ok(releasePlan); assert.equal(view.state.prefetchEnabled, true);
+  await view.togglePrefetch(); assert.equal(view.state.prefetchEnabled, false);
+  releasePlan(); await starting;
+  assert.equal(view.requests.filter((item) => item.url === '/world-jobs' && item.method === 'POST').length, 0);
+  view.state.prefetch.dispose();
+});
+
 test('SPZ receives real bytes and metric transform precedes the X180 axis conversion', async () => {
   const bytes = new Uint8Array([31, 139, 7, 8]).buffer;
   const view = app({ fetch: () => response(bytes) });
@@ -347,15 +478,25 @@ test('SPZ receives real bytes and metric transform precedes the X180 axis conver
   assert.match(view.elements.get('view-details').textContent, /unverified/i);
 });
 
-test('missing or partial scale metadata keeps model units and does not guess ground', async () => {
+test('valid metric scale enables meter walking even without ground height metadata', async () => {
   const view = app({ fetch: () => response() }); authorised(view); view.state.engine = fakeEngine();
   view.state.job = { assets: [{ kind: 'spz', url: `/world-jobs/${JOB}/assets/scene.spz`,
     semantics_metadata: { metric_scale_factor: 2 } }] };
   await view.showView('world');
   const splat = view.state.engine.current.children[0];
-  assert.equal(splat.scale.x, 1); assert.equal(Math.abs(splat.position.y), 0);
-  assert.equal(view.state.engine.metric, false);
-  assert.match(view.elements.get('view-details').textContent, /Model units/);
+  assert.equal(splat.scale.x, 2); assert.equal(Math.abs(splat.position.y), 0);
+  assert.equal(view.state.engine.metric, true);
+  assert.match(view.elements.get('view-details').textContent, /ground height unverified/);
+  assert.equal(view.elements.get('walk-scale').disabled, true);
+});
+
+test('missing or invalid metric scale keeps model units without applying a ground offset', () => {
+  const view = app();
+  for (const scale of [undefined, null, '2', 0, -1, Infinity, NaN]) {
+    const transform = view.semanticsTransform({ semantics_metadata: { metric_scale_factor: scale, ground_plane_offset: 1.7 } });
+    assert.equal(transform.scale, 1); assert.equal(transform.offset, 0);
+    assert.equal(transform.metric, false); assert.equal(transform.groundAligned, false);
+  }
 });
 
 test('failed historical review stays explicit while genuine SPZ assets remain viewable', async () => {
@@ -1127,7 +1268,7 @@ function gpsWalkingApp(options = {}) {
   view.updateWalkingUI();
   const feed = (northMeters, { elapsed = 0, accuracy = 2 } = {}) => {
     time += elapsed;
-    [...view.watches.values()][0].success({ coords: {
+    [...view.watches.values()].find((watch) => watch.settings.maximumAge === 0).success({ coords: {
       latitude: 1 + northMeters / 6371000 * 180 / Math.PI, longitude: 2, accuracy,
     }, timestamp: time });
   };
@@ -1190,6 +1331,78 @@ test('GPS can use the live compass while retaining active orientation tracking',
   view.stopWalking();
 });
 
+test('starting GPS during a phone turn uses matching sensor bearings despite render smoothing', async () => {
+  const view = gpsWalkingApp({ orientation: { requestPermission: async () => 'granted' } });
+  view.elements.get('walk-heading').value = '';
+  view.toggleMotion(); await Promise.resolve(); await Promise.resolve();
+  await view.emitWindow('deviceorientation', { alpha: 0, beta: 90, gamma: 0, absolute: true });
+  await view.emitWindow('deviceorientation', { alpha: 270, beta: 90, gamma: 0, absolute: true });
+  assert.equal(Math.round(view.state.orientation.getStatus().physicalHeading), 90);
+  assert.equal(headingFromQuaternion(view.state.engine.camera.quaternion), 0);
+  view.startWalking(); view.feed(0); view.feed(4, { elapsed: 2000 });
+  for (let frame = 0; frame < 80; frame++) view.applyGPSWalking(view.state.engine, .05);
+  assert.ok(Math.abs(view.state.engine.camera.position.z - 16) < .001);
+  assert.ok(Math.abs(view.state.engine.camera.position.x - 10) < .001);
+  view.stopWalking(); view.state.orientation.dispose();
+});
+
+test('GPS waits for manual view alignment to finish before using the sensor heading', async () => {
+  const view = gpsWalkingApp({ orientation: { requestPermission: async () => 'granted' } });
+  view.elements.get('walk-heading').value = '';
+  view.toggleMotion(); await Promise.resolve(); await Promise.resolve();
+  await view.emitWindow('deviceorientation', { alpha: 0, beta: 90, gamma: 0, absolute: true });
+  view.calibrateView(); view.startWalking();
+  assert.equal(view.gpsWalkingLocked(), false);
+  assert.match(view.elements.get('walking-readout').textContent, /Finish heading alignment/);
+  view.calibrateView(); view.startWalking();
+  assert.equal(view.gpsWalkingLocked(), true);
+  view.stopWalking(); view.state.orientation.dispose();
+});
+
+test('GPS rejects a stale sensor heading even if the status timer has not fired', () => {
+  const view = gpsWalkingApp(); view.elements.get('walk-heading').value = '';
+  view.state.orientation = { getStatus: () => ({ enabled: true, phase: 'tracking', physicalHeading: 90 }),
+    getQuaternion: () => null };
+  view.startWalking();
+  assert.equal(view.gpsWalkingLocked(), false); assert.equal(view.watches.size, 0);
+  assert.match(view.elements.get('walking-readout').textContent, /actual heading/);
+});
+
+test('manual heading alignment stops GPS so its old world mapping cannot keep driving position', async () => {
+  for (const action of ['calibrateView', 'manualLook']) {
+    const view = gpsWalkingApp({ orientation: { requestPermission: async () => 'granted' } });
+    view.elements.get('walk-heading').value = '';
+    view.toggleMotion(); await Promise.resolve(); await Promise.resolve();
+    await view.emitWindow('deviceorientation', { alpha: 0, beta: 90, gamma: 0, absolute: true });
+    view.startWalking(); view.feed(0);
+    assert.equal(view.gpsWalkingLocked(), true);
+    view[action]();
+    assert.equal(view.gpsWalkingLocked(), false); assert.equal(view.state.calibrating, true);
+    assert.match(view.elements.get('walking-readout').textContent, /Walking stopped for heading alignment/);
+    view.state.engine.camera.rotation.y = -Math.PI / 2;
+    view.calibrateView(); view.startWalking();
+    assert.equal(view.gpsWalkingLocked(), true);
+    view.stopWalking(); view.state.orientation.dispose();
+  }
+});
+
+test('world walking setup is visible and diagnostics explain movement below the GPS threshold', async () => {
+  const view = gpsWalkingApp();
+  assert.equal(view.elements.get('walk-open').hidden, false);
+  assert.match(view.elements.get('walking-readout').textContent, /Walking is off/);
+  await view.elements.get('walk-open').emit('click');
+  assert.equal(view.elements.get('settings-dialog').attributes.open, '');
+  assert.equal(view.elements.get('walking-settings').scrolls.at(-1).block, 'start');
+  assert.equal(view.watches.size, 0);
+  view.startWalking();
+  assert.equal(view.elements.get('settings-dialog').attributes.open, undefined);
+  view.feed(0, { accuracy: 10 }); view.feed(2, { elapsed: 2000, accuracy: 10 });
+  view.applyGPSWalking(view.state.engine, .05);
+  assert.equal(view.state.engine.camera.position.z, 20);
+  assert.match(view.elements.get('walking-readout').textContent, /Movement filter: 2.0 \/ 7.0 m/);
+  view.stopWalking();
+});
+
 test('GPS background return freezes, rejects old callbacks and only reanchors on explicit start', async () => {
   const view = gpsWalkingApp(); view.startWalking(); view.feed(0);
   const watch = [...view.watches.values()][0], before = view.state.engine.camera.position.clone();
@@ -1206,12 +1419,17 @@ test('GPS background return freezes, rejects old callbacks and only reanchors on
   view.stopWalking();
 });
 
-test('GPS ignores poor fixes and stops when leaving the world or choosing test coordinates', async () => {
+test('GPS holds through a poor fix and stops when leaving the world or choosing test coordinates', async () => {
   const view = gpsWalkingApp(); view.startWalking(); view.feed(0);
   view.feed(5, { elapsed: 2000, accuracy: 100 });
-  assert.equal(view.state.gpsWalking.getStatus().needsReanchor, true);
+  assert.equal(view.state.gpsWalking.getStatus().needsReanchor, false);
+  assert.equal(view.state.gpsWalking.getStatus().enabled, true);
   assert.equal(view.elements.get('walk-reanchor').disabled, false);
-  assert.equal(view.elements.get('walk-heading').disabled, false);
+  assert.equal(view.elements.get('walk-heading').disabled, true);
+  view.feed(5, { elapsed: 1000, accuracy: 2 });
+  assert.equal(view.state.gpsWalking.getStatus().phase, 'tracking');
+  for (let frame = 0; frame < 80; frame++) view.applyGPSWalking(view.state.engine, .05);
+  assert.ok(Math.abs(view.state.engine.camera.position.z - 15) < .001);
   await view.setLocationMode('test'); assert.equal(view.gpsWalkingLocked(), false);
   view.startWalking(); assert.equal(view.gpsWalkingLocked(), false);
   view.state.locationMode = 'device'; view.startWalking();

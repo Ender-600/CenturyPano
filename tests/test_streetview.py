@@ -329,3 +329,112 @@ def test_unknown_metadata_fields_cannot_supply_urls_or_crash_projection_check():
     ), LAT, LON, 50)
     assert "imagery_type" not in result and "evil.example" not in json.dumps(result)
     assert SESSION not in json.dumps(result)
+
+
+def test_adjacency_metadata_only_keeps_valid_official_ids_and_headings():
+    result = streetview._metadata(metadata(links=[
+        {'panoId': 'north', 'heading': 360, 'url': 'https://evil.example', 'text': KEY},
+        {'panoId': 'north', 'heading': 20}, {'panoId': 'pano-cmu', 'heading': 0},
+        {'panoId': 'https://evil.example', 'heading': 0}, {'panoId': 'bad', 'heading': float('nan')},
+        None, {'panoId': 'bool', 'heading': True},
+    ]), LAT, LON, 50)
+    assert result['links'] == [{'pano_id': 'north', 'heading': 0}]
+    assert 'evil.example' not in json.dumps(result) and KEY not in json.dumps(result)
+
+
+def route_responder(requests, *, ambiguous=False, diverges=False, no_coverage=False,
+                    spacing=.00018, junction_at=None):
+    def handle(request):
+        requests.append(request)
+        if request.url.path.endswith('createSession'):
+            return httpx.Response(200, json={'session': SESSION})
+        if request.url.path.endswith('metadata'):
+            if no_coverage:
+                return httpx.Response(404)
+            pano = request.url.params.get('panoId', 'pano-0')
+            n = int(pano.split('-')[-1])
+            links = [{'panoId': f'pano-{n + 1}', 'heading': 0}]
+            if n:
+                links.append({'panoId': f'pano-{n - 1}', 'heading': 180})
+            if ambiguous and n == 0 or n == junction_at:
+                links.append({'panoId': 'branch', 'heading': 10})
+            return httpx.Response(200, json=metadata(panoId=pano, lat=LAT + n * spacing,
+                lng=LON + (.001 if diverges and n else 0), links=links))
+        return httpx.Response(200, content=image_bytes(), headers={'content-type': 'image/png'})
+    return handle
+
+
+@pytest.mark.asyncio
+async def test_prediction_follows_reachable_north_links_then_downloads_exact_pano_id():
+    requests = []
+    async with GoogleStreetViewClient(KEY, ai_authorized=True,
+            transport=httpx.MockTransport(route_responder(requests))) as client:
+        selected = await client.select_forward_panorama(LAT, LON, heading_deg=0, lookahead_m=55,
+                                                        current_pano_id='pano-0')
+        assert selected['path'] == ['pano-0', 'pano-1', 'pano-2', 'pano-3']
+        assert selected['metadata']['pano_id'] == 'pano-3'
+        assert 59 < selected['distance_m'] < 61
+        assert all('/tiles/' not in request.url.path for request in requests)
+        result = await client.fetch_panorama_by_id('pano-3', lat=LAT + 3 * .00018, lon=LON)
+    metadata_calls = [request for request in requests if request.url.path.endswith('metadata')]
+    assert len(metadata_calls) <= 6
+    assert 'lat' in metadata_calls[0].url.params
+    assert all('lat' not in request.url.params and request.url.params['panoId'].startswith('pano-')
+               for request in metadata_calls[1:])
+    assert all(request.url.params['panoId'] == 'pano-3' for request in requests if '/tiles/' in request.url.path)
+    assert result['metadata']['pano_id'] == 'pano-3'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('flags,reason', [({'ambiguous': True}, 'ambiguous_junction'),
+                                        ({'diverges': True}, 'route_diverges')])
+async def test_prediction_skips_uncertain_or_geographically_inconsistent_links(flags, reason):
+    requests = []
+    async with GoogleStreetViewClient(KEY, ai_authorized=True,
+            transport=httpx.MockTransport(route_responder(requests, **flags))) as client:
+        result = await client.select_forward_panorama(LAT, LON, heading_deg=0, lookahead_m=55)
+    assert result == {'status': 'skipped', 'reason': reason}
+    assert all('/tiles/' not in request.url.path for request in requests)
+
+
+@pytest.mark.asyncio
+async def test_prediction_never_traverses_backwards_and_metadata_budget_is_bounded():
+    requests = []
+    async with GoogleStreetViewClient(KEY, ai_authorized=True,
+            transport=httpx.MockTransport(route_responder(requests, spacing=.000045))) as client:
+        result = await client.select_forward_panorama(LAT, LON, heading_deg=180, lookahead_m=55)
+        assert result == {'status': 'skipped', 'reason': 'no_forward_link'}
+        result = await client.select_forward_panorama(LAT, LON, heading_deg=0, lookahead_m=150)
+        assert result == {'status': 'skipped', 'reason': 'insufficient_route'}
+    assert len([request for request in requests if request.url.path.endswith('metadata')]) == 10
+
+
+@pytest.mark.asyncio
+async def test_dense_ten_metre_nodes_reach_default_walking_lookahead():
+    requests = []
+    async with GoogleStreetViewClient(KEY, ai_authorized=True,
+            transport=httpx.MockTransport(route_responder(requests, spacing=.00009))) as client:
+        result = await client.select_forward_panorama(LAT, LON, heading_deg=0, lookahead_m=77)
+    assert result['metadata']['pano_id'] == 'pano-8'
+    assert 79 < result['distance_m'] < 81
+    assert len([request for request in requests if request.url.path.endswith('metadata')]) == 9
+
+
+@pytest.mark.asyncio
+async def test_usable_target_before_ambiguous_next_link_is_retained():
+    requests = []
+    async with GoogleStreetViewClient(KEY, ai_authorized=True,
+            transport=httpx.MockTransport(route_responder(requests, junction_at=2))) as client:
+        result = await client.select_forward_panorama(LAT, LON, heading_deg=0, lookahead_m=55)
+    assert result['metadata']['pano_id'] == 'pano-2'
+    assert len([request for request in requests if request.url.path.endswith('metadata')]) == 3
+
+
+@pytest.mark.asyncio
+async def test_by_id_rejects_a_different_camera_without_downloading_tiles():
+    requests = []
+    async with GoogleStreetViewClient(KEY, ai_authorized=True,
+            transport=httpx.MockTransport(responder(requests))) as client:
+        with pytest.raises(StreetViewError) as caught:
+            await client.fetch_panorama_by_id('another-pano', lat=LAT + .0001, lon=LON)
+    assert caught.value.code == 'invalid_response' and len(requests) == 2

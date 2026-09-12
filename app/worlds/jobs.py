@@ -28,7 +28,8 @@ from PIL import Image
 from .assets import AssetError, _download, _validate_url, download_assets, inspect_image
 from .marble import MarbleClient, MarbleError, SubmissionUnknown, _finite_number, _valid_id
 from .panorama import (HistoricalPanoramaEditor, PanoramaEditError, PanoramaSubmissionUnknown,
-                       _image_size, _safe_usage, panorama_prompt)
+                       _image_size, _safe_usage, panorama_prompt, _PROJECTION_INSTRUCTIONS)
+from .paid_queue import paid_queue
 from .profiles import DEFAULT_WORLD_MODEL, world_credits
 
 
@@ -36,7 +37,9 @@ _JOB_ID = re.compile(r"[0-9a-f]{32}\Z")
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _EDITOR_MODEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}\Z")
 _FILENAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,100}\Z")
-_TERMINAL = {"ready", "error", "submission_unknown", "insufficient_credits"}
+_TERMINAL = {"ready", "error", "submission_unknown", "insufficient_credits", "cancelled", "expired"}
+PANORAMA_PREFETCH_TTL_S = 180
+PANORAMA_PREFETCH_MAX_TTL_S = 300
 GENERATION_PROFILE = 'depth-history-v2'
 _GENERATION_FIELDS = (
     "target_year", "location", "history_context", "changes", "modern_buildings", "historical_buildings",
@@ -85,9 +88,50 @@ def _generation_hash(plan: dict) -> str:
         ) if key in plan}
         content["source_panorama"] = {"sha256": source.get("sha256"), "capture": {
             key: metadata[key] for key in ("pano_id", "lat", "lon", "heading", "date") if key in metadata}}
+        content["image_request_hash"] = _panorama_hash(plan)
     else:
         content = {key: plan[key] for key in _GENERATION_FIELDS if key in plan}
     return hashlib.sha256(json.dumps(content, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+
+
+def _panorama_hash(plan: dict) -> str:
+    """Only immutable input and the complete effective image request identify a cache entry."""
+    source = plan["source_panorama"]
+    metadata = source["metadata"]
+    content = {"sha256": source["sha256"], "capture": {
+        key: metadata[key] for key in ("pano_id", "lat", "lon", "heading", "date") if key in metadata},
+        "year": plan["target_year"], "editor": plan["panorama_editor"],
+        "prompt": panorama_prompt(plan), "projection": _PROJECTION_INSTRUCTIONS}
+    return hashlib.sha256(json.dumps(content, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+
+
+def _freeze_plan(plan: dict, *, panorama_only: bool = False) -> dict:
+    try:
+        frozen = json.loads(json.dumps(plan, sort_keys=True, separators=(",", ":"), allow_nan=False))
+        if (not isinstance(frozen, dict) or type(frozen.get("target_year")) is not int
+                or not 1 <= frozen["target_year"] <= 2100
+                or not isinstance(frozen.get("historical_buildings"), list)
+                or not isinstance(frozen.get("camera_position"), (list, dict))
+                or panorama_only and frozen.get("input_kind") != "streetview_panorama"):
+            raise ValueError
+        if frozen.get("input_kind") == "streetview_panorama":
+            source, profile = frozen.get("source_panorama"), frozen.get("panorama_editor")
+            if (str(uuid.UUID(frozen.get("plan_id", ""))) != frozen["plan_id"]
+                    or not isinstance(source, dict) or source.get("filename") != "source_panorama.jpg"
+                    or not isinstance(source.get("sha256"), str) or not _SHA256.fullmatch(source["sha256"])
+                    or not isinstance(source.get("metadata"), dict)
+                    or not isinstance(profile, dict) or not isinstance(profile.get("model"), str)
+                    or not _EDITOR_MODEL.fullmatch(profile["model"])
+                    or profile.get("quality") not in {"low", "medium", "high", "xhigh", "max", "auto"}):
+                raise ValueError
+        return frozen
+    except (ValueError, TypeError, AttributeError, UnicodeError):
+        raise ValueError("Invalid frozen historical world plan") from None
+
+
+class _PanoramaDiscarded(Exception):
+    def __init__(self, stage):
+        self.stage = stage
 
 
 @asynccontextmanager
@@ -225,8 +269,18 @@ class WorldJobManager:
         return self.root_dir / job_id
 
     def _save(self, record: dict) -> None:
+        path = self._directory(record["id"]) / "record.json"
+        if record.get("kind") == "panorama" and path.is_file():
+            stored = _read_json(path)
+            if stored.get("updated_at", 0) > record.get("updated_at", 0):
+                record.update(speculative=stored.get("speculative"), expires_at=stored.get("expires_at"))
+            if stored.get("speculative") is False and stored.get("stage") not in {"cancelled", "expired"}:
+                record.update(speculative=False, expires_at=None)
+            discard = path.parent / "discard.json"
+            if discard.is_file() and not self._image_attempted(record):
+                record["stage"] = _read_json(discard)["stage"]
         record["updated_at"] = time.time()
-        _write_json(self._directory(record["id"]) / "record.json", record)
+        _write_json(path, record)
 
     def _stage(self, record: dict, stage: str) -> None:
         record["stage"] = stage
@@ -242,7 +296,11 @@ class WorldJobManager:
             task = asyncio.create_task(self._run(job_id), name=f"world-{job_id}")
             self._tasks[job_id] = task
             # _run handles provider and local failures without exposing response bodies.
-            task.add_done_callback(lambda completed: completed.exception() if not completed.cancelled() else None)
+            def completed(task):
+                paid_queue(self.root_dir).release((id(self), job_id))
+                if not task.cancelled():
+                    task.exception()
+            task.add_done_callback(completed)
 
     async def start(self, plan: dict, model: str = DEFAULT_WORLD_MODEL) -> dict:
         if self._closed:
@@ -250,27 +308,7 @@ class WorldJobManager:
         if not isinstance(self._api_key, str) or not self._api_key.strip():
             raise MarbleError("WORLDLAB_API_KEY is not configured", code="missing_key")
         world_credits(model)
-        try:
-            encoded = json.dumps(plan, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
-            frozen = json.loads(encoded)
-            if (not isinstance(frozen, dict) or type(frozen.get("target_year")) is not int
-                    or not 1 <= frozen["target_year"] <= 2100
-                    or not isinstance(frozen.get("historical_buildings"), list)
-                    or not isinstance(frozen.get("camera_position"), (list, dict))):
-                raise ValueError
-            if frozen.get("input_kind") == "streetview_panorama":
-                source = frozen.get("source_panorama")
-                profile = frozen.get("panorama_editor")
-                if (str(uuid.UUID(frozen.get("plan_id", ""))) != frozen["plan_id"]
-                        or not isinstance(source, dict) or source.get("filename") != "source_panorama.jpg"
-                        or not isinstance(source.get("sha256"), str) or not _SHA256.fullmatch(source["sha256"])
-                        or not isinstance(source.get("metadata"), dict)
-                        or not isinstance(profile, dict) or not isinstance(profile.get("model"), str)
-                        or not _EDITOR_MODEL.fullmatch(profile["model"])
-                        or profile.get("quality") not in {"low", "medium", "high", "xhigh", "max", "auto"}):
-                    raise ValueError
-        except (ValueError, TypeError, AttributeError, UnicodeError):
-            raise ValueError("Invalid frozen historical world plan") from None
+        frozen = _freeze_plan(plan)
         # A UI record ID does not make otherwise identical paid generation new.
         # Cache timestamps, parent/UI IDs and rendered asset URLs do not affect
         # generated appearance or geometry. Bound evidence remains part of it.
@@ -312,8 +350,114 @@ class WorldJobManager:
                 })
         record = _read_json(directory / "record.json")
         if record["stage"] not in _TERMINAL:
+            if frozen.get("input_kind") == "streetview_panorama":
+                paid_queue(self.root_dir).promote((id(self), job_id), _panorama_hash(frozen))
             self._schedule(job_id)
         return self.get(job_id)
+
+    async def start_panorama(self, plan: dict, *, speculative: bool = True, expires_at=None) -> dict:
+        """Prepare only the historical JPEG. No Marble client, key or credits are needed."""
+        if self._closed:
+            raise ValueError("World job manager is closed")
+        if type(speculative) is not bool:
+            raise ValueError("Invalid panorama priority")
+        now = time.time()
+        if expires_at is not None and (not _finite_number(expires_at) or expires_at <= 0):
+            raise ValueError("Invalid panorama expiry")
+        deadline = min(expires_at or now + PANORAMA_PREFETCH_TTL_S,
+                       now + PANORAMA_PREFETCH_MAX_TTL_S) if speculative else None
+        frozen = _freeze_plan(plan, panorama_only=True)
+        image_key = _panorama_hash(frozen)
+        job_id = hashlib.sha256((image_key + ":panorama").encode()).hexdigest()[:32]
+        directory = self._directory(job_id)
+        async with _file_lock(self.root_dir / ".creation.lock"):
+            if not (directory / "record.json").exists():
+                directory.mkdir(exist_ok=True, mode=0o700)
+                _write_json(directory / "plan.json", frozen)
+                self._save({"schema_version": 1, "id": job_id, "plan_id": frozen["plan_id"],
+                    "kind": "panorama", "plan_hash": _generation_hash(frozen), "image_key": image_key,
+                    "input_kind": "streetview_panorama", "model": frozen["panorama_editor"]["model"],
+                    "year": frozen["target_year"], "speculative": speculative, "expires_at": deadline,
+                    "stage": "queued", "created_at": now, "stage_times": {}, "timing_s": {},
+                    "generation_calls": {"image_edit": 0, "world": 0}, "cost_credits": {}, "assets": []})
+            record = _read_json(directory / "record.json")
+            if record["stage"] in {"cancelled", "expired"} and not self._image_attempted(record):
+                # A new visit renews an unsubmitted prediction. An old worker
+                # reads this renewed lease before spending, even if it is still
+                # unwinding the previously discarded queue ticket.
+                (directory / "discard.json").unlink(missing_ok=True)
+                record.update(speculative=speculative, expires_at=deadline)
+                self._stage(record, "queued")
+            if not speculative:
+                record.update(speculative=False, expires_at=None)
+                self._save(record)
+            elif record["stage"] not in _TERMINAL and record.get("speculative"):
+                record["expires_at"] = deadline
+                self._save(record)
+            # Predictions have one provider execution plus at most one pending
+            # location across managers sharing this directory. Replace stale
+            # queued guesses, never interrupt an accepted image request.
+            if speculative and record["stage"] not in _TERMINAL:
+                for path in self.root_dir.glob("*/record.json"):
+                    try:
+                        previous = _read_json(path)
+                    except (OSError, ValueError):
+                        continue
+                    if (previous.get("id") != job_id and previous.get("kind") == "panorama"
+                            and previous.get("speculative") and previous.get("stage") not in _TERMINAL
+                            and not self._image_attempted(previous)
+                            and previous.get("image_key") not in paid_queue(self.root_dir).foreground_images):
+                        self._discard_panorama(previous, "cancelled")
+        if record["stage"] not in _TERMINAL:
+            if not speculative:
+                paid_queue(self.root_dir).promote((id(self), job_id), image_key)
+            self._schedule(job_id)
+        return self.get(job_id)
+
+    @staticmethod
+    def _image_attempted(record: dict) -> bool:
+        return bool(record.get("image_edit_attempted") or record.get("generation_calls", {}).get("image_edit"))
+
+    def _discard_panorama(self, record: dict, stage: str) -> None:
+        _write_json(self._directory(record["id"]) / "discard.json", {"stage": stage})
+        self._stage(record, stage)
+
+    async def cancel_panorama(self, job_id: str) -> dict:
+        directory = self._directory(job_id)
+        async with _file_lock(self.root_dir / ".creation.lock"):
+            if not (directory / "record.json").is_file():
+                raise MarbleError("World job was not found", code="job_not_found")
+            record = _read_json(directory / "record.json")
+            if record.get("kind") != "panorama":
+                raise MarbleError("Only panorama jobs can be cancelled", code="cancel_not_allowed")
+            if record["stage"] not in _TERMINAL and not self._image_attempted(record):
+                self._discard_panorama(record, "cancelled")
+        return self.get(job_id)
+
+    def _check_panorama_interest(self, record: dict) -> None:
+        if record.get("kind") != "panorama" or self._image_attempted(record) or record.get("pano_ready"):
+            return
+        directory = self._directory(record["id"])
+        if (directory / "discard.json").is_file():
+            raise _PanoramaDiscarded(_read_json(directory / "discard.json")["stage"])
+        current = _read_json(directory / "record.json")
+        if (current.get("speculative") and current.get("image_key") not in paid_queue(self.root_dir).foreground_images
+                and current.get("expires_at", float("inf")) <= time.time()):
+            raise _PanoramaDiscarded("expired")
+
+    @asynccontextmanager
+    async def _paid_slot(self, record: dict):
+        queue = paid_queue(self.root_dir)
+        def priority():
+            return int(bool(record.get("speculative")) and record.get("image_key") not in queue.foreground_images)
+        while True:
+            async with queue.slot(priority, lambda: self._check_panorama_interest(record)):
+                async with _file_lock(self.root_dir / ".paid.lock", wait=False) as acquired:
+                    if acquired:
+                        self._check_panorama_interest(record)
+                        yield
+                        return
+            await asyncio.sleep(.05)
 
     def get(self, job_id: str) -> dict | None:
         path = self._directory(job_id) / "record.json"
@@ -324,12 +468,17 @@ class WorldJobManager:
             "id", "plan_id", "model", "year", "stage", "created_at", "updated_at", "timing_s",
             "generation_calls", "error_code", "http_status", "credits_before_depth",
             "credits_before_world", "credits_after", "input_kind", "credits_before_image_edit", "image_edit_model",
+            "kind", "speculative", "expires_at", "image_edit_reused_from",
         ) if key in record}
         result.update(job_id=record["id"], status=record["stage"], can_resume=self._can_resume(record))
+        if record.get("kind") == "panorama":
+            result["can_cancel"] = record["stage"] not in _TERMINAL and not self._image_attempted(record)
         costs = {name: record.get("cost_credits", {}).get(name) for name in ("depth", "world")}
         known = [value for value in costs.values() if _finite_number(value) and value >= 0]
         costs["known_total"] = sum(known)
         costs["total"] = sum(known) if len(known) == (1 if record.get("input_kind") == "streetview_panorama" else 2) else None
+        if record.get("kind") == "panorama":
+            costs["total"] = 0
         if record.get("input_kind") == "streetview_panorama":
             result["image_edit_usage"] = _safe_usage(record.get("image_edit_usage"))
             result["image_edit_billing"] = {"provider": "openai", "included_in_worldlabs_credits": False,
@@ -360,7 +509,8 @@ class WorldJobManager:
         }:
             return False
         image_receipt = False
-        if record.get("generation_calls", {}).get("image_edit", 0) or record.get("image_edit_attempted"):
+        if (self._image_attempted(record) or record.get("image_edit_complete")
+                or record.get("image_edit_reused_from")):
             try:
                 self._read_image_receipt(self._directory(record["id"]), record)
                 image_receipt = True
@@ -383,8 +533,6 @@ class WorldJobManager:
         """Continue safe work; never reset operation IDs, costs, or paid counters."""
         if self._closed:
             raise ValueError("World job manager is closed")
-        if not isinstance(self._api_key, str) or not self._api_key.strip():
-            raise MarbleError("WORLDLAB_API_KEY is not configured", code="missing_key")
         directory = self._directory(job_id)
         if not (directory / "record.json").is_file():
             raise MarbleError("World job was not found", code="job_not_found")
@@ -392,6 +540,8 @@ class WorldJobManager:
             if not acquired:
                 return self.get(job_id)
             record = _read_json(directory / "record.json")
+            if record.get("kind") != "panorama" and (not isinstance(self._api_key, str) or not self._api_key.strip()):
+                raise MarbleError("WORLDLAB_API_KEY is not configured", code="missing_key")
             if record.get("stage") not in _TERMINAL and record.get("stage") != "paused":
                 # A duplicate resume request sees the already-running state.
                 return self.get(job_id)
@@ -435,6 +585,10 @@ class WorldJobManager:
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        queue = paid_queue(self.root_dir)
+        for owner in list(queue.promotions):
+            if owner[0] == id(self):
+                queue.release(owner)
 
     def _asset(self, record: dict, path: Path, kind: str, media_type: str, **extra) -> None:
         directory = self._directory(record["id"])
@@ -493,52 +647,60 @@ class WorldJobManager:
             self._save(record)
         return data
 
+    def _cached_photo(self, record: dict, image_key: str):
+        matches = []
+        for path in self.root_dir.glob("*/record.json"):
+            try:
+                other = _read_json(path)
+                if (other.get("id") == record["id"] or other.get("input_kind") != "streetview_panorama"
+                        or not _JOB_ID.fullmatch(other.get("id", ""))):
+                    continue
+                key = other.get("image_key") or _panorama_hash(_read_json(path.parent / "plan.json"))
+                if key == image_key and (self._image_attempted(other) or (path.parent / "image_edit_receipt.json").is_file()):
+                    matches.append((other, path.parent))
+            except (OSError, ValueError, TypeError, KeyError):
+                continue
+        # Prefer an existing complete receipt when migrating legacy jobs which
+        # could have repeated the same image for different Marble models.
+        matches.sort(key=lambda item: not (item[1] / "image_edit_receipt.json").is_file())
+        for other, directory in matches:
+            if (directory / "image_edit_receipt.json").is_file():
+                return other, directory, self._read_image_receipt(directory, other)
+            if other.get("stage") == "error" and other.get("error_code") not in {"job_failed", "submission_unknown"}:
+                raise PanoramaEditError(other["error_code"], other.get("http_status"))
+            # The shared image lock is no longer held by this old job. A paid
+            # marker without a receipt is ambiguous, even after process death.
+            raise SubmissionUnknown()
+        return None
+
+    def _adopt_photo(self, record: dict, directory: Path, cached) -> dict:
+        other, cached_directory, receipt = cached
+        _atomic_bytes(directory / "historical_panorama.jpg", (cached_directory / receipt["filename"]).read_bytes())
+        _write_json(directory / "image_edit_receipt.json", receipt)
+        record["image_edit_reused_from"] = other["id"]
+        record["timing_s"]["image_edit"] = other.get("timing_s", {}).get("image_edit", max(0,
+            receipt["completed_at"] - other["stage_times"].get("submitting_image_edit", other["created_at"])))
+        return receipt
+
     async def _ensure_photo_panorama(self, record: dict, plan: dict, client, directory: Path) -> None:
-        async with _file_lock(self.root_dir / ".paid.lock"):
-            attempted = record.get("generation_calls", {}).get("image_edit", 0) or record.get("image_edit_attempted")
-            if attempted or (directory / "image_edit_receipt.json").exists():
-                # A receipt survives a crash between the synchronous image edit
-                # response and the next record write. Absence never permits retry.
+        image_key = _panorama_hash(plan)
+        record["image_key"] = image_key
+        async with self._image_slot(record, image_key):
+            self._check_panorama_interest(record)
+            if self._image_attempted(record) or (directory / "image_edit_receipt.json").exists():
                 receipt = self._read_image_receipt(directory, record)
+            elif cached := self._cached_photo(record, image_key):
+                await self._photo_source(record, plan, directory)
+                receipt = self._adopt_photo(record, directory, cached)
             else:
                 source = await self._photo_source(record, plan, directory)
-                profile = plan.get("panorama_editor", {})
-                editor = (self._panorama_editor_factory() if self._panorama_editor_factory
-                          else HistoricalPanoramaEditor(model=profile.get("model"), quality=profile.get("quality")))
-                api_key = getattr(editor, "api_key", None)
-                if not api_key:
-                    raise PanoramaEditError("not_configured")
-                if not isinstance(api_key, str) or len(api_key) > 4096 or not re.fullmatch(r"[\x21-\x7e]+", api_key):
-                    raise PanoramaEditError("invalid_configuration")
-                prompt = panorama_prompt(plan)
-                balance = (await client.credits())["remaining_credits"]
-                record["credits_before_image_edit"] = balance
-                if balance < world_credits(record["model"]):
-                    raise MarbleError("Insufficient Marble credits", code="insufficient_credits")
-                record["generation_calls"]["image_edit"] = 1
-                record["image_edit_attempted"] = True
-                self._stage(record, "submitting_image_edit")
-                result = await editor.edit(source, prompt)
-                try:
-                    image = result["image_bytes"]
-                    await asyncio.to_thread(_image_size, image, output=True)
-                    # Saving JPEG preserves angular projection; never resize,
-                    # crop, rotate, stretch or tile the returned panorama.
-                    with Image.open(io.BytesIO(image)) as decoded:
-                        output = io.BytesIO()
-                        decoded.convert("RGB").save(output, "JPEG", quality=95, subsampling=0)
-                    prepared = output.getvalue()
-                    if len(prepared) > 10 * 1024 * 1024:
-                        raise ValueError
-                    model = result.get("model")
-                    if not isinstance(model, str) or not _EDITOR_MODEL.fullmatch(model) or model != profile.get("model"):
-                        raise ValueError
-                    receipt = {"filename": "historical_panorama.jpg", "sha256": hashlib.sha256(prepared).hexdigest(),
-                               "model": model, "usage": _safe_usage(result.get("usage")), "completed_at": time.time()}
-                    _atomic_bytes(directory / "historical_panorama.jpg", prepared)
-                    _write_json(directory / "image_edit_receipt.json", receipt)
-                except (ValueError, TypeError, KeyError, OSError, PanoramaEditError):
-                    raise PanoramaSubmissionUnknown() from None
+                async with self._paid_slot(record):
+                    # A worker from before the image-key lock was introduced
+                    # may have completed while we waited on the paid file lock.
+                    if cached := self._cached_photo(record, image_key):
+                        receipt = self._adopt_photo(record, directory, cached)
+                    else:
+                        receipt = await self._edit_photo(record, plan, client, directory, source)
             record.update(image_edit_complete=True, image_edit_model=receipt["model"],
                           image_edit_usage=_safe_usage(receipt.get("usage")), pano_ready=True)
             record["timing_s"].setdefault("image_edit", max(0, receipt.get("completed_at", time.time())
@@ -547,6 +709,61 @@ class WorldJobManager:
             self._asset(record, directory / "historical_panorama.jpg", "historical_pano", "image/jpeg", validation=checked)
             self._stage(record, "pano_ready")
             await asyncio.sleep(0)
+
+    @asynccontextmanager
+    async def _image_slot(self, record, image_key):
+        while True:
+            self._check_panorama_interest(record)
+            async with _file_lock(self.root_dir / f".image-{image_key}.lock", wait=False) as acquired:
+                if acquired:
+                    yield
+                    return
+            await asyncio.sleep(.05)
+
+    async def _edit_photo(self, record, plan, client, directory, source):
+        profile = plan.get("panorama_editor", {})
+        editor = (self._panorama_editor_factory() if self._panorama_editor_factory
+                  else HistoricalPanoramaEditor(model=profile.get("model"), quality=profile.get("quality")))
+        api_key = getattr(editor, "api_key", None)
+        if not api_key:
+            raise PanoramaEditError("not_configured")
+        if not isinstance(api_key, str) or len(api_key) > 4096 or not re.fullmatch(r"[\x21-\x7e]+", api_key):
+            raise PanoramaEditError("invalid_configuration")
+        prompt = panorama_prompt(plan)
+        if client is not None:
+            balance = (await client.credits())["remaining_credits"]
+            record["credits_before_image_edit"] = balance
+            if balance < world_credits(record["model"]):
+                raise MarbleError("Insufficient Marble credits", code="insufficient_credits")
+        # Serialize the last cancellation/expiry check with the durable paid
+        # marker, including other server processes sharing this worktree.
+        async with _file_lock(self.root_dir / ".creation.lock"):
+            self._check_panorama_interest(record)
+            record["generation_calls"]["image_edit"] = 1
+            record["image_edit_attempted"] = True
+            self._stage(record, "submitting_image_edit")
+        result = await editor.edit(source, prompt)
+        try:
+            image = result["image_bytes"]
+            await asyncio.to_thread(_image_size, image, output=True)
+            # Saving JPEG preserves angular projection; never resize,
+            # crop, rotate, stretch or tile the returned panorama.
+            with Image.open(io.BytesIO(image)) as decoded:
+                output = io.BytesIO()
+                decoded.convert("RGB").save(output, "JPEG", quality=95, subsampling=0)
+            prepared = output.getvalue()
+            if len(prepared) > 10 * 1024 * 1024:
+                raise ValueError
+            model = result.get("model")
+            if not isinstance(model, str) or not _EDITOR_MODEL.fullmatch(model) or model != profile.get("model"):
+                raise ValueError
+            receipt = {"filename": "historical_panorama.jpg", "sha256": hashlib.sha256(prepared).hexdigest(),
+                       "model": model, "usage": _safe_usage(result.get("usage")), "completed_at": time.time()}
+            _atomic_bytes(directory / "historical_panorama.jpg", prepared)
+            _write_json(directory / "image_edit_receipt.json", receipt)
+        except (ValueError, TypeError, KeyError, OSError, PanoramaEditError):
+            raise PanoramaSubmissionUnknown() from None
+        return receipt
 
     async def _render(self, record: dict, plan: dict, directory: Path) -> None:
         if record.get("geometry_ready"):
@@ -610,7 +827,7 @@ class WorldJobManager:
     async def _ensure_operation(self, record: dict, stage: str, client, directory: Path) -> dict:
         # Keep the lock through completion so separate jobs cannot overlap paid
         # stages or preflight against a balance before an earlier stage settles.
-        async with _file_lock(self.root_dir / ".paid.lock"):
+        async with self._paid_slot(record):
             if not record.get(f"{stage}_operation_id"):
                 if record.get("generation_calls", {}).get(stage, 0):
                     raise SubmissionUnknown()
@@ -664,9 +881,17 @@ class WorldJobManager:
                             raise SubmissionUnknown()
                         self._accept(record, stage, _read_json(receipt))
                 plan = _read_json(directory / "plan.json")
-                client = self._client_factory()
+                if plan.get("input_kind") == "streetview_panorama" and not record.get("speculative"):
+                    paid_queue(self.root_dir).promote((id(self), job_id), _panorama_hash(plan))
+                self._check_panorama_interest(record)
+                if record.get("kind") != "panorama":
+                    client = self._client_factory()
                 if plan.get("input_kind") == "streetview_panorama":
                     await self._ensure_photo_panorama(record, plan, client, directory)
+                    if record.get("kind") == "panorama":
+                        record["timing_s"]["total_to_assets"] = time.time() - record["created_at"]
+                        self._stage(record, "ready")
+                        return
                 else:
                     await self._render(record, plan, directory)
                     depth_operation = await self._ensure_operation(record, "depth", client, directory)
@@ -724,6 +949,8 @@ class WorldJobManager:
             except asyncio.CancelledError:
                 self._failure(record, None)
                 raise
+            except _PanoramaDiscarded as exc:
+                self._discard_panorama(record, exc.stage)
             except Exception as exc:
                 self._failure(record, exc)
             finally:

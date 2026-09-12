@@ -92,7 +92,7 @@ test('smooths new GPS targets continuously without overshoot and freezes the dis
     const current = r.controller.getPosition(1 / 60);
     assert.ok(current.z <= previous && current.z >= 17); previous = current.z;
   }
-  const frozen = r.controller.getPosition(); r.controller.fail({ code: 2 });
+  const frozen = r.controller.getPosition(); r.controller.fail({ code: 1 });
   close(r.controller.getPosition(10), frozen);
   assert.equal(r.controller.getStatus().needsReanchor, true);
   r.controller.dispose();
@@ -112,18 +112,85 @@ test('rejects malformed, cached, duplicate, future, and out-of-order fixes witho
   close(r.controller.getPosition(1), vector(10, 2, 18)); r.controller.dispose();
 });
 
-test('waits for useful startup accuracy, then pauses if established tracking degrades', () => {
+test('waits for useful startup accuracy and resumes after a temporary accuracy drop without reanchoring', () => {
   const r = rig({ smoothingSeconds: 0 }); r.start();
   assert.equal(r.fix(0, 0, { accuracy_m: 80 }), false);
   assert.equal(r.controller.getStatus().enabled, true);
   assert.equal(r.controller.getStatus().phase, 'accuracy');
   r.advance(1000); assert.equal(r.fix(), true);
   r.advance(1000); assert.equal(r.fix(3, 0, { accuracy_m: 21 }), false);
-  assert.equal(r.controller.getStatus().enabled, false);
+  assert.equal(r.controller.getStatus().enabled, true);
   assert.equal(r.controller.getStatus().locked, true);
+  assert.equal(r.controller.getStatus().needsReanchor, false);
+  close(r.controller.getPosition(1), vector(10, 2, 20));
+  r.advance(1000); assert.equal(r.fix(3), true);
+  close(r.controller.getPosition(1), vector(13, 2, 20));
+  assert.equal(r.controller.getStatus().phase, 'tracking'); r.controller.dispose();
+});
+
+test('accuracy holds freeze interpolation and retain its pending target for a fresh good fix', () => {
+  const r = rig(); r.start(); r.fix(); r.advance(2000); r.fix(0, 3);
+  const partiallyMoved = r.controller.getPosition(1 / 60);
+  assert.ok(partiallyMoved.z > 17 && partiallyMoved.z < 20);
+  r.advance(1000); r.fix(100, 0, { accuracy_m: 80 });
+  for (let i = 0; i < 10; i++) close(r.controller.getPosition(1), partiallyMoved);
+  r.advance(1000); assert.equal(r.fix(0, 3), true);
+  for (let i = 0; i < 30; i++) r.controller.getPosition(1);
+  close(r.controller.getPosition(), vector(10, 2, 17)); r.controller.dispose();
+});
+
+test('poor accuracy cannot extend the last good fix deadline indefinitely', () => {
+  const r = rig({ smoothingSeconds: 0 }); r.start(); r.fix();
+  const timer = [...r.timers.values()][0];
+  assert.equal(timer.delay, 20000);
+  for (let i = 0; i < 3; i++) {
+    r.advance(5000); assert.equal(r.fix(0, 10, { accuracy_m: 80 }), false);
+    assert.equal(r.controller.getStatus().enabled, true);
+    assert.equal([...r.timers.values()][0], timer);
+  }
+  r.advance(5001); assert.equal(r.fix(0, 10), false);
+  assert.equal(r.controller.getStatus().phase, 'timeout');
   assert.equal(r.controller.getStatus().needsReanchor, true);
-  r.advance(1000); assert.equal(r.fix(3), false);
   close(r.controller.getPosition(1), vector(10, 2, 20)); r.controller.dispose();
+});
+
+test('temporary location errors hold and recover within the same bounded freshness window', () => {
+  const r = rig({ smoothingSeconds: 0 }); r.start(); r.fix();
+  const timer = [...r.timers.values()][0];
+  for (const code of [2, 3]) {
+    r.advance(5000); r.controller.fail({ code });
+    assert.equal(r.controller.getStatus().enabled, true);
+    assert.equal(r.controller.getStatus().phase, 'error');
+    assert.equal(r.controller.getStatus().needsReanchor, false);
+    assert.equal([...r.timers.values()][0], timer);
+    close(r.controller.getPosition(1), vector(10, 2, 20));
+  }
+  r.advance(2000); assert.equal(r.fix(0, 3), true);
+  close(r.controller.getPosition(1), vector(10, 2, 17));
+  r.advance(20001); r.controller.fail({ code: 2 });
+  assert.equal(r.controller.getStatus().phase, 'timeout');
+  assert.equal(r.controller.getStatus().enabled, false); r.controller.dispose();
+});
+
+test('diagnostics distinguish sub-deadband displacement from no sensor movement', () => {
+  const r = rig({ smoothingSeconds: 0 }); r.start(); r.fix(0, 0, { accuracy_m: 10 });
+  assert.equal(r.controller.getStatus().deadbandMeters, 7);
+  assert.equal(r.controller.getStatus().observedDisplacementMeters, 0);
+  assert.equal(r.controller.getStatus().pendingMovementMeters, 0);
+  r.advance(3000); r.fix(0, 3, { accuracy_m: 10 });
+  let status = r.controller.getStatus();
+  assert.equal(status.displacementMeters, 0);
+  assert.ok(Math.abs(status.observedDisplacementMeters - 3) < 1e-6);
+  assert.ok(Math.abs(status.pendingMovementMeters - 3) < 1e-6);
+  close(r.controller.getPosition(1), vector(10, 2, 20));
+  r.advance(5000); r.fix(0, 8, { accuracy_m: 10 });
+  status = r.controller.getStatus();
+  assert.ok(Math.abs(status.observedDisplacementMeters - 8) < 1e-6);
+  assert.equal(status.pendingMovementMeters, 0);
+  close(r.controller.getPosition(1), vector(10, 2, 12));
+  r.controller.stop(); status = r.controller.getStatus();
+  assert.equal(status.deadbandMeters, null); assert.equal(status.observedDisplacementMeters, 0);
+  assert.equal(status.pendingMovementMeters, 0); r.controller.dispose();
 });
 
 test('implausible GPS jumps freeze without moving or automatically recovering', () => {
@@ -140,7 +207,7 @@ test('implausible GPS jumps freeze without moving or automatically recovering', 
 
 test('stale data freezes even if browser timers are delayed and a fresh callback then arrives', () => {
   const r = rig({ smoothingSeconds: 0 }); r.start(); r.fix();
-  r.advance(10001); assert.equal(r.fix(2), false);
+  r.advance(20001); assert.equal(r.fix(2), false);
   assert.equal(r.controller.getStatus().phase, 'timeout');
   close(r.controller.getPosition(1), vector(10, 2, 20));
   r.start(); r.advance(20001);

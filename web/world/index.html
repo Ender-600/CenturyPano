@@ -42,7 +42,11 @@
     <section class="direction-controls" aria-label="Phone orientation and view alignment">
       <div class="direction-row"><button id="motion-toggle" type="button" aria-pressed="false" disabled>Enable motion</button><span class="direction-divider" aria-hidden="true"></span><button id="align-view" type="button" disabled>Align heading</button><output id="heading-readout" aria-label="Current heading">Heading —</output></div>
       <p id="motion-status" role="status">Swipe to look around</p>
+      <button id="walk-open" class="walk-shortcut" type="button" aria-haspopup="dialog" aria-controls="settings-dialog" hidden>Set up walking</button>
       <p id="walking-readout" role="status" hidden></p>
+      <button id="prefetch-open" class="walk-shortcut" type="button" aria-haspopup="dialog" aria-controls="settings-dialog" hidden>Prepare the next panorama</button>
+      <p id="prefetch-readout" role="status" hidden></p>
+      <button id="prefetch-next" class="walk-shortcut" type="button" hidden>Use the prepared panorama</button>
     </section>
     <section class="journey-controls" aria-label="Choose a year and start your journey">
       <p id="view-caption" class="view-caption">Same place. Another time.</p>
@@ -78,18 +82,26 @@
       <p class="small" id="generation-quality">Standard world generation costs 1,500 credits (about $1.20). Panorama editing is billed separately. Full resolution assets are preferred.</p>
       <p class="small" id="generation-description">The Street View panorama is edited for the selected year, then World Labs generates a 3D world. Visual detail, spatial completeness, and historical appearance need review after generation.</p>
     </section>
+    <section id="prefetch-settings" class="sheet-section" aria-label="Prepare panoramas as you walk">
+      <h2>Prepare ahead as you walk</h2>
+      <p class="small">Use your walking direction to prepare historical panoramas along the street ahead. They load in advance and switch as you arrive in Historical panorama view.</p>
+      <p class="small" id="prefetch-budget">Each session prepares up to 6 upcoming panoramas. New images use paid image generation; the current panorama is generated separately if needed.</p>
+      <button id="prefetch-toggle" class="secondary" type="button" aria-pressed="false" aria-describedby="prefetch-budget">Start panorama walk</button>
+      <button id="prefetch-view" class="text-button" type="button" hidden>Use panorama walking</button>
+      <p id="prefetch-status" class="small" role="status" aria-live="polite">Load Street View at your current location to begin.</p>
+    </section>
     <section class="sheet-section" aria-label="View and alignment guide">
       <h2>View and alignment</h2>
       <p class="small" id="view-details">Once Street View loads, drag to look around or enable motion to follow your phone.</p>
       <button id="reset-view" class="text-button" type="button">Reset view ↺</button>
     </section>
-    <section class="sheet-section walking-section" aria-label="Walking and motion">
+    <section id="walking-settings" class="sheet-section walking-section" aria-label="Walking and motion">
       <h2>Walking and motion</h2>
       <label for="walk-mode">Walking mode<select id="walk-mode"><option value="auto">Auto · Prefer native tracking</option><option value="gps">GPS walking · Outdoors</option><option value="native">AR tracking · Native app</option></select></label>
       <p id="walk-status" class="small" role="status" aria-live="polite">Load a generated world to follow your movement with approximate GPS walking.</p>
       <div id="walk-gps-options">
-        <label for="walk-heading">Actual view heading (°, optional)<input id="walk-heading" type="number" inputmode="decimal" min="0" max="359.9" step="any" placeholder="Leave blank to use the compass"></label>
-        <p class="small">Point your phone and the view at the same landmark. Enable motion to read the compass, or enter the heading: north 0°, east 90°, south 180°, west 270°. Check it again each time you reset the start.</p>
+        <label for="walk-heading">Actual view heading (°, optional)<input id="walk-heading" type="number" inputmode="decimal" min="0" max="359.9" step="any" placeholder="Use the initial compass alignment"></label>
+        <p class="small">Enable motion, briefly hold the phone flat to establish north, then hold it upright. Point your phone and the view at the same landmark. You can also enter the actual heading: north 0°, east 90°, south 180°, west 270°. Check the alignment each time you reset the start.</p>
         <p class="small">GPS movement is smoothed as new fixes arrive, at a rate set by your phone. Location error may hide small steps. Use native spatial tracking to follow individual steps.</p>
       </div>
       <label for="walk-scale">World units per real meter<input id="walk-scale" type="number" inputmode="decimal" min="0.000001" max="10000" step="any" placeholder="Enter a positive calibrated scale"></label>

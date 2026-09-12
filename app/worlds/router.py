@@ -23,6 +23,8 @@ from app.worlds.profiles import DEFAULT_WORLD_MODEL, WORLD_MODELS, WorldModel
 router = APIRouter()
 _manager = None
 _plan_lock = asyncio.Lock()
+_prefetch_requests: dict[str, asyncio.Task] = {}
+_prefetch_preparations: dict[str, asyncio.Task] = {}
 _ID = re.compile(r'[a-f0-9-]{36}\Z')
 _PLAN_FILES = {'modern.glb', 'historical.glb', 'depth.png', 'depth_preview.png', 'source_panorama.jpg'}
 
@@ -36,6 +38,12 @@ async def startup():
 
 async def shutdown():
     global _manager
+    pending = set(_prefetch_requests.values()) | set(_prefetch_preparations.values())
+    for task in pending:
+        task.cancel()
+    await asyncio.gather(*pending, return_exceptions=True)
+    _prefetch_requests.clear()
+    _prefetch_preparations.clear()
     if _manager is not None:
         await _manager.aclose()
     _manager = None
@@ -68,6 +76,10 @@ async def configuration():
                            'ai_authorized': settings.google_streetview_ai_authorized,
                            'available': bool(settings.google_maps_api_key) and settings.google_streetview_ai_authorized},
             'panorama_editor_configured': bool(settings.openai_api_key),
+            'prefetch': {'available': bool(settings.google_maps_api_key and settings.openai_api_key)
+                                     and settings.google_streetview_ai_authorized,
+                         'max_accuracy_m': 35, 'min_speed_mps': .4, 'max_speed_mps': 3.5,
+                         'min_lookahead_m': 30, 'max_lookahead_m': 150},
             'historical_accuracy': 'unverified', 'phone_ar': False}
 
 
@@ -99,6 +111,19 @@ class GenerateRequest(BaseModel):
     model_config = ConfigDict(extra='forbid')
     plan_id: str
     model: WorldModel = DEFAULT_WORLD_MODEL
+    kind: Literal['world', 'panorama'] = 'world'
+
+
+class PrefetchRequest(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    plan_id: str
+    lat: float = Field(ge=-85, le=85, allow_inf_nan=False)
+    lon: float = Field(ge=-180, le=180, allow_inf_nan=False)
+    location_accuracy_m: float = Field(ge=0, le=35, allow_inf_nan=False)
+    location_timestamp_ms: float = Field(ge=0, allow_inf_nan=False)
+    heading_deg: float = Field(ge=0, lt=360, allow_inf_nan=False)
+    speed_mps: float = Field(ge=.4, le=3.5, allow_inf_nan=False)
+    lookahead_m: float = Field(default=55, ge=30, le=150, allow_inf_nan=False)
 
 
 class EditsRequest(BaseModel):
@@ -160,12 +185,14 @@ def _location_provenance(payload: PlanRequest) -> dict:
             'timestamp_ms': payload.location_timestamp_ms, 'verification': 'client_reported_not_attested'}
 
 
-async def _prepare_streetview(payload: PlanRequest, plan_id: str) -> dict:
+async def _prepare_streetview(payload: PlanRequest, plan_id: str, *, source: dict | None = None,
+                              prediction: dict | None = None) -> dict:
     from app.worlds.streetview import GoogleStreetViewClient
     from app.worlds.photo_history import photo_history
-    async with GoogleStreetViewClient(settings.google_maps_api_key,
-                                    ai_authorized=settings.google_streetview_ai_authorized) as client:
-        source = await client.fetch_panorama(payload.lat, payload.lon, radius_m=payload.radius_m)
+    if source is None:
+        async with GoogleStreetViewClient(settings.google_maps_api_key,
+                                        ai_authorized=settings.google_streetview_ai_authorized) as client:
+            source = await client.fetch_panorama(payload.lat, payload.lon, radius_m=payload.radius_m)
     metadata = source['metadata']
     history = await photo_history(metadata['lat'], metadata['lon'], payload.year)
     plan = {**history, 'plan_id': plan_id, 'input_kind': 'streetview_panorama', 'source': 'google_streetview',
@@ -179,12 +206,106 @@ async def _prepare_streetview(payload: PlanRequest, plan_id: str) -> dict:
                                 'metadata': metadata},
             'attribution': metadata.get('copyright', 'Google Street View'),
             'status': 'needs_review', 'historical_geometry_verified': False}
+    if prediction is not None:
+        plan['prediction'] = prediction
+        plan['parent_plan_id'] = prediction['from_plan_id']
+        plan['location'] = {'lat': metadata['lat'], 'lon': metadata['lon'], 'radius_m': payload.radius_m,
+                            'coordinate_provenance': 'predicted_streetview_link',
+                            'location_source': 'prediction', 'verification': 'prediction_not_device_fix'}
     directory = plan_dir(plan_id)
     directory.mkdir(parents=True, exist_ok=False)
     (directory / 'source_panorama.jpg').write_bytes(source['image_bytes'])
     plan['assets'] = {'source_panorama.jpg': f'/world-plans/{plan_id}/assets/source_panorama.jpg'}
     _atomic_json(directory / 'plan.json', plan)
     return plan
+
+
+async def _shared_prefetch(tasks: dict, key: str, factory):
+    """Coalesce identical preparation without ever taking the foreground plan lock."""
+    task = tasks.get(key)
+    if task is None:
+        task = asyncio.create_task(factory())
+        tasks[key] = task
+        def finished(done):
+            if tasks.get(key) is done:
+                tasks.pop(key, None)
+            if not done.cancelled():
+                done.exception()  # Retrieve errors even if the requesting browser disconnected.
+        task.add_done_callback(finished)
+    return await asyncio.shield(task)
+
+
+async def _prepare_prefetch(payload: PrefetchRequest, current: dict) -> dict:
+    from app.worlds.streetview import GoogleStreetViewClient, StreetViewError
+    async with GoogleStreetViewClient(settings.google_maps_api_key,
+                                    ai_authorized=settings.google_streetview_ai_authorized) as client:
+        try:
+            selection = await client.select_forward_panorama(payload.lat, payload.lon,
+                heading_deg=payload.heading_deg, lookahead_m=payload.lookahead_m,
+                current_pano_id=current.get('source_panorama', {}).get('metadata', {}).get('pano_id'))
+        except StreetViewError as exc:
+            if exc.code == 'no_coverage':
+                return {'status': 'skipped', 'reason': 'no_coverage'}
+            raise
+        if selection.get('status') == 'skipped':
+            return selection
+        metadata = selection['metadata']
+        prediction = {'from_plan_id': current['plan_id'], 'method': 'streetview_links_heading_v1',
+            'origin': {'lat': payload.lat, 'lon': payload.lon, 'accuracy_m': payload.location_accuracy_m,
+                       'timestamp_ms': payload.location_timestamp_ms, 'coordinate_provenance': 'browser_geolocation',
+                       'verification': 'client_reported_not_attested'},
+            'heading_deg': payload.heading_deg, 'speed_mps': payload.speed_mps,
+            'lookahead_m': payload.lookahead_m, 'distance_m': selection['distance_m'],
+            'path': selection['path'], 'created_at': time.time()}
+        # Reuse a complete frozen plan. GPS jitter/timestamps are deliberately
+        # absent; source version, year, and editor configuration are not.
+        identity = {'source': 'google_streetview', 'target_year': current['target_year'],
+                    'source_version': {key: metadata.get(key) for key in
+                        ('pano_id', 'date', 'lat', 'lon', 'source_image_width', 'source_image_height',
+                         'heading', 'tilt', 'roll')},
+                    'profile': 'streetview-rgb-history-v1', 'history_prompt_version': PROMPT_VERSION,
+                    'editor': {'model': settings.openai_image_model, 'quality': settings.openai_image_quality}}
+        key = sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+        index = settings.world_dir / 'prefetch-index' / f'{key}.json'
+        async def prepare():
+            try:
+                cached = json.loads(index.read_text())
+                if time.time() - cached['created_at'] < 3600:
+                    return _read_plan(cached['plan_id'])
+            except (OSError, ValueError, KeyError, HTTPException):
+                pass
+            source = await client.fetch_panorama_by_id(metadata['pano_id'], lat=metadata['lat'], lon=metadata['lon'])
+            origin = PlanRequest(lat=payload.lat, lon=payload.lon, year=current['target_year'],
+                location_accuracy_m=payload.location_accuracy_m, location_timestamp_ms=payload.location_timestamp_ms)
+            plan = await _prepare_streetview(origin, str(uuid.uuid4()), source=source, prediction=prediction)
+            _atomic_json(index, {'plan_id': plan['plan_id'], 'created_at': time.time()})
+            return plan
+        plan = await _shared_prefetch(_prefetch_preparations, key, prepare)
+    job = await manager().start_panorama(plan, speculative=True, expires_at=time.time() + 180)
+    return {'plan': plan, 'job': job, 'prediction': prediction}
+
+
+@router.post('/world-prefetch', dependencies=[Depends(require_access)])
+async def prefetch_panorama(payload: PrefetchRequest):
+    if not -5000 <= time.time() * 1000 - payload.location_timestamp_ms <= 30000:
+        raise HTTPException(422, 'Walking prediction requires a location fix from the last 30 seconds.')
+    current = _read_plan(payload.plan_id)
+    if current.get('input_kind') != 'streetview_panorama' or current.get('source') != 'google_streetview':
+        raise HTTPException(422, 'Walking prediction requires a Street View panorama plan.')
+    if not (settings.google_maps_api_key and settings.google_streetview_ai_authorized and settings.openai_api_key):
+        raise HTTPException(503, 'Street View panorama generation is not configured.')
+    # Concurrent identical fixes share even the metadata walk. Completed requests
+    # may recheck live adjacency, but reuse the target plan and its generated job.
+    values = payload.model_dump(exclude={'location_timestamp_ms', 'location_accuracy_m'})
+    key = sha256(json.dumps(values, sort_keys=True).encode()).hexdigest()
+    try:
+        result = await _shared_prefetch(_prefetch_requests, key, lambda: _prepare_prefetch(payload, current))
+        return JSONResponse(result, headers={'Cache-Control': 'no-store'})
+    except HTTPException:
+        raise
+    except Exception as exc:
+        code = getattr(exc, 'code', 'prefetch_unavailable')
+        raise HTTPException(502, f'Unable to prepare the next panorama ({code}).') from None
 
 
 @router.post('/world-plans', dependencies=[Depends(require_access)])
@@ -266,12 +387,16 @@ async def plan_asset(plan_id: str, filename: str):
 
 @router.post('/world-jobs', dependencies=[Depends(require_access)])
 async def generate(payload: GenerateRequest):
-    if not settings.worldlab_api_key:
-        raise HTTPException(503, 'The World Labs API key is not configured on the server.')
     plan = _read_plan(payload.plan_id)
+    if payload.kind == 'panorama' and plan.get('input_kind') != 'streetview_panorama':
+        raise HTTPException(422, 'Panorama walking requires a Street View panorama plan.')
+    if payload.kind == 'world' and not settings.worldlab_api_key:
+        raise HTTPException(503, 'The World Labs API key is not configured on the server.')
     if plan.get('input_kind') == 'streetview_panorama' and not settings.openai_api_key:
         raise HTTPException(503, 'The historical panorama image editing service is not configured.')
     try:
+        if payload.kind == 'panorama':
+            return await manager().start_panorama(plan, speculative=False)
         return await manager().start(plan, model=payload.model)
     except Exception as exc:
         code = getattr(exc, 'code', 'generation_unavailable')
@@ -287,6 +412,18 @@ async def get_job(job_id: str):
     if job is None:
         raise HTTPException(404, 'World job not found.')
     return job
+
+
+@router.post('/world-jobs/{job_id}/cancel', dependencies=[Depends(require_access)])
+async def cancel_panorama(job_id: str):
+    try:
+        return await manager().cancel_panorama(job_id)
+    except (ValueError, FileNotFoundError):
+        raise HTTPException(404, 'World job not found.') from None
+    except Exception as exc:
+        code = getattr(exc, 'code', 'cancellation_unavailable')
+        status = 404 if code == 'job_not_found' else 409
+        raise HTTPException(status, f'This panorama job cannot be cancelled ({code}).') from None
 
 
 @router.post('/world-jobs/{job_id}/resume', dependencies=[Depends(require_access)])

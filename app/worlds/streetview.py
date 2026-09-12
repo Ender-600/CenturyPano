@@ -82,6 +82,16 @@ def _distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     return 6371008.8 * 2 * math.asin(math.sqrt(min(1, max(0, chord))))
 
 
+def _bearing(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    a1, a2, delta = math.radians(lat1), math.radians(lat2), math.radians(lon2 - lon1)
+    return math.degrees(math.atan2(math.sin(delta) * math.cos(a2),
+        math.cos(a1) * math.sin(a2) - math.sin(a1) * math.cos(a2) * math.cos(delta))) % 360
+
+
+def _angle(a: float, b: float) -> float:
+    return abs((a - b + 180) % 360 - 180)
+
+
 def _text(value: Any, limit: int) -> bool:
     return isinstance(value, str) and bool(value.strip()) and len(value) <= limit and not any(
         ord(char) < 32 or 0xD800 <= ord(char) <= 0xDFFF for char in value
@@ -162,6 +172,20 @@ def _metadata(data: dict, lat: float, lon: float, radius: float) -> dict:
         result["report_problem_link"] = link
     if isinstance(data.get("imageryType"), str) and data["imageryType"] in {"indoor", "outdoor"}:
         result["imagery_type"] = data["imageryType"]
+    # Only official adjacency identifiers and headings survive this boundary.
+    # Never retain link text, URLs, session tokens, or arbitrary provider fields.
+    links = data.get("links", [])
+    result["links"] = []
+    if isinstance(links, list) and len(links) <= 32:
+        seen = {pano}
+        for adjacent in links:
+            if not isinstance(adjacent, dict):
+                continue
+            target, heading = adjacent.get("panoId"), adjacent.get("heading")
+            if (isinstance(target, str) and _ID.fullmatch(target) and target not in seen
+                    and _number(heading) and 0 <= heading <= 360):
+                seen.add(target)
+                result["links"].append({"pano_id": target, "heading": heading % 360})
     return result
 
 
@@ -250,19 +274,89 @@ class GoogleStreetViewClient:
 
     async def _fetch(self, lat, lon, radius):
         budget = {"requests": 0, "bytes": 0}
+        session = await self._session(budget)
+        metadata = await self._get_metadata(session, budget, lat, lon, radius)
+        return await self._tiles(metadata, session, budget)
+
+    async def _session(self, budget):
         session_data = await self._download("POST", "/v1/createSession", budget, payload={
             "mapType": "streetview", "language": "en-US", "region": "US",
         })
         session = session_data.get("session")
         if not isinstance(session, str) or _ID.fullmatch(session) is None:
             raise _error("invalid_response")
+        return session
+
+    async def _get_metadata(self, session, budget, lat, lon, radius, pano_id=None):
         raw = await self._download("GET", "/v1/streetview/metadata", budget, params={
-            "session": session, "lat": lat, "lng": lon, "radius": radius,
+            "session": session, **({"panoId": pano_id} if pano_id else
+                                    {"lat": lat, "lng": lon, "radius": radius}),
         })
         metadata = _metadata(raw, lat, lon, radius)
+        if pano_id is not None and metadata["pano_id"] != pano_id:
+            raise _error("invalid_response")
         public_json = json.dumps(metadata)
         if self._key in public_json or session in public_json:
             raise _error("invalid_response")
+        return metadata
+
+    async def select_forward_panorama(self, lat: float, lon: float, *, heading_deg: float,
+                                      lookahead_m: float, current_pano_id: str | None = None) -> dict:
+        """Follow official road links; at most nine metadata calls and no tiles.
+
+        A nearby GPS panorama is the anchor, so an old displayed camera cannot
+        pull a walker back to a street they have already left. Forks with two
+        similarly plausible forward links are deliberately left unpredicted.
+        """
+        if (not _location(lat, lon) or not _number(heading_deg) or not 0 <= heading_deg < 360
+                or not _number(lookahead_m) or not 30 <= lookahead_m <= 150):
+            raise _error("invalid_location")
+        async with self._fetch_lock:
+            budget = {"requests": 0, "bytes": 0}
+            session = await self._session(budget)
+            current = await self._get_metadata(session, budget, lat, lon, 35)
+            path = [current["pano_id"]]
+            minimum = max(25, lookahead_m * .65)
+            best = None
+            for _ in range(8):
+                if current.get("imagery_type") == "indoor":
+                    return {"status": "skipped", "reason": "indoor_coverage"}
+                choices = sorted(((_angle(link["heading"], heading_deg), link)
+                    for link in current["links"] if link["pano_id"] not in path), key=lambda item: item[0])
+                choices = [item for item in choices if item[0] <= 45]
+                if not choices:
+                    return best or {"status": "skipped", "reason": "no_forward_link"}
+                if len(choices) > 1 and choices[1][0] - choices[0][0] < 20:
+                    return best or {"status": "skipped", "reason": "ambiguous_junction"}
+                next_pano = await self._get_metadata(session, budget, lat, lon,
+                                                    lookahead_m + 60, choices[0][1]["pano_id"])
+                segment = _distance(current["lat"], current["lon"], next_pano["lat"], next_pano["lon"])
+                bearing = _bearing(current["lat"], current["lon"], next_pano["lat"], next_pano["lon"])
+                distance = _distance(lat, lon, next_pano["lat"], next_pano["lon"])
+                if (not 2 <= segment <= 100 or _angle(bearing, heading_deg) > 60
+                        or _angle(_bearing(lat, lon, next_pano["lat"], next_pano["lon"]), heading_deg) > 45
+                        or next_pano.get("imagery_type") == "indoor"):
+                    return {"status": "skipped", "reason": "route_diverges"}
+                path.append(next_pano["pano_id"])
+                if next_pano["pano_id"] != current_pano_id and minimum <= distance <= lookahead_m + 35:
+                    best = {"metadata": next_pano, "path": list(path), "distance_m": round(distance, 2),
+                            "metadata_requests": budget["requests"] - 1}
+                if distance >= lookahead_m:
+                    return best or {"status": "skipped", "reason": "target_too_far"}
+                current = next_pano
+            return best or {"status": "skipped", "reason": "insufficient_route"}
+
+    async def fetch_panorama_by_id(self, pano_id: str, *, lat: float, lon: float) -> dict:
+        """Download the selected camera, never a second nearest-coordinate match."""
+        if not isinstance(pano_id, str) or not _ID.fullmatch(pano_id) or not _location(lat, lon):
+            raise _error("invalid_location")
+        async with self._fetch_lock:
+            budget = {"requests": 0, "bytes": 0}
+            session = await self._session(budget)
+            metadata = await self._get_metadata(session, budget, lat, lon, 1, pano_id)
+            return await self._tiles(metadata, session, budget)
+
+    async def _tiles(self, metadata, session, budget):
         width, height = metadata["image_width"], metadata["image_height"]
         tw, th = metadata["tile_width"], metadata["tile_height"]
         canvas = Image.new("RGB", (width, height))
