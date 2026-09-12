@@ -28,14 +28,18 @@ DEFAULT_DECADE = '1920s'
 class Settings:
     in_dir: Path = field(default_factory=lambda: Path(os.getenv('IN_DIR', str(ROOT / 'data/in'))).resolve())
     out_dir: Path = field(default_factory=lambda: Path(os.getenv('OUT_DIR', str(ROOT / 'data/out'))).resolve())
-    provider: str = field(default_factory=lambda: os.getenv('PROVIDER', 'gemini' if os.getenv('GEMINI_API_KEY') else 'demo'))
+    provider: str = field(default_factory=lambda: os.getenv(
+        'PROVIDER', 'gemini' if os.getenv('GEMINI_API_KEY') else 'grok' if os.getenv('XAI_API_KEY') else 'demo',
+    ))
     provider_fallback: str = field(default_factory=lambda: os.getenv('PROVIDER_FALLBACK', 'fal'))
     max_concurrency: int = field(default_factory=lambda: max(1, min(6, int(os.getenv('MAX_CONCURRENCY', '6')))))
     gemini_api_key: str = field(default_factory=lambda: os.getenv('GEMINI_API_KEY', ''), repr=False)
+    grok_api_key: str = field(default_factory=lambda: os.getenv('XAI_API_KEY', ''), repr=False)
     fal_key: str = field(default_factory=lambda: os.getenv('FAL_KEY', ''), repr=False)
     k2_api_key: str = field(default_factory=lambda: os.getenv('K2_API_KEY', ''), repr=False)
     gemini_image_model: str = field(default_factory=lambda: os.getenv('GEMINI_IMAGE_MODEL', 'gemini-2.5-flash-image'))
     gemini_text_model: str = field(default_factory=lambda: os.getenv('GEMINI_TEXT_MODEL', 'gemini-2.5-flash'))
+    grok_image_model: str = field(default_factory=lambda: os.getenv('GROK_IMAGE_MODEL', 'grok-imagine-image-2.0'))
     k2_model: str = field(default_factory=lambda: os.getenv('K2_MODEL', 'IFM/K2-Horizon-375B-A23B'))
     k2_base_url: str = field(default_factory=lambda: os.getenv('K2_BASE_URL', 'https://api.ifm.ai/v1'))
     fal_model: str = field(default_factory=lambda: os.getenv('FAL_MODEL', 'fal-ai/flux/dev/image-to-image'))

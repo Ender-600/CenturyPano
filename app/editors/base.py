@@ -80,13 +80,16 @@ def get_editor(name: str) -> ImageEditor:
     if name == "gemini":
         from .gemini import GeminiEditor
         return GeminiEditor()
+    if name == "grok":
+        from .grok import GrokImagineEditor
+        return GrokImagineEditor()
     if name == "fal":
         from .fal import FalImg2ImgEditor
         return FalImg2ImgEditor()
     if name == "demo":
         from .demo import DemoEditor
         return DemoEditor()
-    raise ValueError("PROVIDER must be demo, gemini, or fal")
+    raise ValueError("PROVIDER must be demo, gemini, grok, or fal")
 
 
 class EditorPool:

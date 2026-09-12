@@ -4,7 +4,7 @@ Examples:
   .venv/bin/python scripts/probe_providers.py panorama.jpg
   .venv/bin/python scripts/probe_providers.py panorama.jpg --provider gemini
 
-The default order is Gemini, then fal. Configured probes incur provider usage.
+The default order is Gemini, Grok Imagine, then fal. Configured probes incur provider usage.
 No retries, fallback, demo editor, VLM, or constraint-model calls are performed.
 Exit status: 0 = every requested provider passed, 1 = at least one failed,
 2 = at least one was skipped because its credential is missing.
@@ -50,6 +50,7 @@ async def probe_provider(provider: str, image: bytes, prompt: str,
                          output_dir: Path, timeout_s: float) -> dict:
     credential, configured = {
         "gemini": ("GEMINI_API_KEY", bool(settings.gemini_api_key)),
+        "grok": ("XAI_API_KEY", bool(settings.grok_api_key)),
         "fal": ("FAL_KEY", bool(settings.fal_key)),
     }[provider]
     record = {"provider": provider, "status": "skipped", "generation_calls": 0}
@@ -119,7 +120,7 @@ async def run_probes(image_path: Path, providers: list[str], output_dir: Path,
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("image", type=Path, help="User-supplied panorama or photo (JPEG, PNG, HEIC)")
-    parser.add_argument("--provider", choices=("all", "gemini", "fal"), default="all")
+    parser.add_argument("--provider", choices=("all", "gemini", "grok", "fal"), default="all")
     parser.add_argument("--decade", choices=DECADE_ANCHOR, default=DEFAULT_DECADE)
     parser.add_argument("--timeout", type=float, default=60.0, help="Maximum seconds for each edit (default: 60)")
     parser.add_argument("--output-dir", type=Path, default=None)
@@ -130,7 +131,7 @@ def main() -> int:
         parser.error("--timeout must be greater than zero and at most 300 seconds.")
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     output_dir = (args.output_dir or ROOT / "data/probes" / f"{stamp}-{uuid.uuid4().hex[:6]}").resolve()
-    providers = ["gemini", "fal"] if args.provider == "all" else [args.provider]
+    providers = ["gemini", "grok", "fal"] if args.provider == "all" else [args.provider]
     try:
         _, code = asyncio.run(run_probes(args.image, providers, output_dir,
                                        decade=args.decade, timeout_s=args.timeout))

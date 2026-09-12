@@ -6,7 +6,7 @@
 
 ## 当前可运行版本
 
-已实现移动端页面、FastAPI 图像流水线、Gemini 主服务、fal 回退、精确年份与地点历史背景推理、磁盘缓存、渐进瓦片、前后对比、陀螺仪与拖动、音频揭幕、离线回放和串行基线。
+已实现移动端页面、FastAPI 图像流水线、Gemini / Grok Imagine 主服务、fal 回退、精确年份与地点历史背景推理、磁盘缓存、渐进瓦片、前后对比、陀螺仪与拖动、音频揭幕、离线回放和串行基线。
 
 仓库自带的是 **工程示例**：程序绘制的街景插画经过本地色调变换，没有调用 AI，不是实拍照片，不代表历史重建画质。真实模型效果、真实模型性能、iPhone 的实体传感器验收需在配置密钥后完成，不能把下方本地数值作为 Gemini 的结果。
 
@@ -48,16 +48,20 @@ Node 回归测试运行实际前端脚本，覆盖方向计算、模拟传感器
 PROVIDER=gemini
 PROVIDER_FALLBACK=fal
 GEMINI_API_KEY=你的密钥
+XAI_API_KEY=你的密钥
 FAL_KEY=你的密钥
 K2_API_KEY=你的IFM密钥
 GEMINI_IMAGE_MODEL=gemini-2.5-flash-image
 GEMINI_TEXT_MODEL=gemini-2.5-flash
+GROK_IMAGE_MODEL=grok-imagine-image-2.0
 K2_BASE_URL=https://api.ifm.ai/v1
 K2_MODEL=IFM/K2-Horizon-375B-A23B
 MAX_CONCURRENCY=6
 ```
 
 这里的 K2 是 HackCMU 赞助方 **IFM K2**。未配置完整 K2 时可使用 Gemini 文本模型；历史推理不可用时采用精确年份通用约束，并明确标记地点历史尚未确认。VLM 失败使用默认场景，锚点失败仍继续瓦片。真实图像服务失败时不会偷偷退回本地色调变换：失败瓦片使用原图并标记 `done_partial`。
+
+如需使用 Grok Imagine，将 `PROVIDER` 改为 `grok`，并配置 `XAI_API_KEY`；默认模型为 `grok-imagine-image-2.0`，也可通过 `GROK_IMAGE_MODEL` 覆盖。
 
 先验证单次调用，再准备实拍回放。下列命令会使用所配置服务并产生对应服务用量；基线会额外完整运行一次。
 
@@ -69,7 +73,7 @@ uv run python scripts/make_replay.py /absolute/path/panorama.jpg 1945 --place "P
 uv run python scripts/baseline.py JOB_ID
 ```
 
-官方接口参考：[Gemini 图片编辑](https://ai.google.dev/gemini-api/docs/generate-content/image-generation)、[fal img2img](https://fal.ai/models/fal-ai/flux/dev/image-to-image/api)、[IFM 快速开始](https://docs.ifm.ai/#/quickstart)、[IFM JSON 输出](https://docs.ifm.ai/#/structured-output)。
+官方接口参考：[Gemini 图片编辑](https://ai.google.dev/gemini-api/docs/generate-content/image-generation)、[Grok Imagine 图片编辑](https://docs.x.ai/developers/rest-api-reference/inference/images)、[fal img2img](https://fal.ai/models/fal-ai/flux/dev/image-to-image/api)、[IFM 快速开始](https://docs.ifm.ai/#/quickstart)、[IFM JSON 输出](https://docs.ifm.ai/#/structured-output)。
 
 ## 手机 HTTPS 演示
 
