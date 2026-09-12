@@ -5,6 +5,8 @@ import vm from 'node:vm';
 import * as THREE from 'three';
 import { createPanoramaMesh, PanoramaLookControls, panoramaHeading, setCameraBearing, cameraBearing } from '../web/world/panorama.js';
 import { createOrientationController } from '../web/world/orientation.js';
+import { createLiveLocation, positionFix, locationDistance } from '../web/world/location.js';
+import { createYearWheel } from '../web/world/year-wheel.js';
 
 const source = readFileSync(new URL('../web/world/app.js', import.meta.url), 'utf8');
 const html = readFileSync(new URL('../web/world/index.html', import.meta.url), 'utf8');
@@ -24,7 +26,7 @@ class Element {
   addEventListener(type, callback) { (this.handlers[type] ||= []).push(callback); }
   removeEventListener(type, callback) { this.handlers[type] = (this.handlers[type] || []).filter((item) => item !== callback); }
   async emit(type, event = {}) {
-    for (const callback of this.handlers[type] || []) await callback({ target: this, preventDefault() {}, ...event });
+    for (const callback of this.handlers[type] || []) await callback({ target: this, preventDefault() {}, stopPropagation() {}, ...event });
   }
   append(...elements) { this.children.push(...elements); }
   replaceChildren(...elements) { this.children = [...elements]; this.textContent = ''; }
@@ -55,13 +57,13 @@ function app(options = {}) {
   for (const [id, value] of Object.entries({ lat: '', lon: '', year: 1925, radius: 100, 'location-mode': 'device' })) {
     elements.get(id).value = String(value);
   }
-  elements.get('plan-form').inputs = ['lat', 'lon', 'year', 'radius', 'gps', 'snapshot', 'prepare', 'location-mode', 'geometry-test', 'open-streetview'].map((id) => elements.get(id));
+  elements.get('plan-form').inputs = ['lat', 'lon', 'year', 'radius', 'gps', 'snapshot', 'test-prepare', 'location-mode', 'geometry-test', 'open-streetview'].map((id) => elements.get(id));
   const tabs = ['source', 'historical', 'modern', 'depth', 'pano', 'world'].map((view) => Object.assign(new Element('BUTTON'), { dataset: { view } }));
   const moves = ['forward', 'back', 'left', 'right'].map((move) => Object.assign(new Element('BUTTON'), { dataset: { move } }));
   const storage = new Map(Object.entries(options.storage || {})), requests = [], timers = new Map(), rewrites = [], gpsOptions = [], popups = [];
   const objects = new Map(), revoked = [], documentEvents = {}, windowEvents = {}, watches = new Map();
   const workspace = new Element('SECTION');
-  let timerId = 0, objectId = 0, gpsCalls = 0;
+  let timerId = 0, objectId = 0, gpsCalls = 0, watchId = 0;
   class ObjectURL extends URL {
     static createObjectURL(blob) { const url = `blob:test-${++objectId}`; objects.set(url, blob); return url; }
     static revokeObjectURL(url) { revoked.push(url); objects.delete(url); }
@@ -81,7 +83,7 @@ function app(options = {}) {
   };
   const context = vm.createContext({
     THREE, createPanoramaMesh, PanoramaLookControls, panoramaHeading, setCameraBearing, cameraBearing,
-    createOrientationController, SplatMesh: SplatStub, SparkRenderer: class {},
+    createOrientationController, createLiveLocation, positionFix, locationDistance, createYearWheel, SplatMesh: SplatStub, SparkRenderer: class {},
     GLTFLoader: class { async parseAsync() { return { scene: options.gltf || new THREE.Group() }; } },
     document, window: { DeviceOrientationEvent: options.orientation,
       setTimeout(callback, milliseconds) { const id = ++timerId; timers.set(id, { callback, milliseconds }); return id; },
@@ -96,7 +98,7 @@ function app(options = {}) {
     sessionStorage: { getItem: (key) => storage.get(key) || null, setItem: (key, value) => storage.set(key, value), removeItem: (key) => storage.delete(key) },
     navigator: { userAgent: options.userAgent || '', permissions: options.permissions, clipboard: options.clipboard,
       geolocation: options.noGPS ? undefined : {
-      watchPosition(success, failure, settings) { const id = watches.size + 1; watches.set(id, { success, failure, settings }); return id; },
+      watchPosition(success, failure, settings) { const id = ++watchId; watches.set(id, { success, failure, settings }); return id; },
       clearWatch(id) { watches.delete(id); },
       getCurrentPosition(success, failure, settings) {
       gpsCalls++; gpsOptions.push(settings);
@@ -118,7 +120,9 @@ function app(options = {}) {
       throw new Error('Unexpected fetch');
     },
   });
-  const hooks = '{state,api,safeAssetURL,safeSourceURL,initialiseAccess,boot,bindEvents,preparePlan,renderPlan,startGeneration,pollJob,applyJob,restoreSaved,showView,semanticsTransform,importEdits,resumeJob,changeReason,refreshLocation,setLocationMode,resolveLocation,openStreetView,toggleMotion,calibrateView,manualLook,generateForYear,moveCamera}';
+  document.defaultView = context.window;
+  for (const element of elements.values()) element.ownerDocument = document;
+  const hooks = '{state,api,safeAssetURL,safeSourceURL,initialiseAccess,boot,bindEvents,preparePlan,renderPlan,startGeneration,pollJob,applyJob,restoreSaved,showView,semanticsTransform,importEdits,resumeJob,changeReason,refreshLocation,setLocationMode,resolveLocation,openStreetView,toggleMotion,calibrateView,manualLook,generateForYear,moveCamera,startLiveLocation,stopLiveLocation,maybePrepareCurrent}';
   vm.runInContext(source.replace(/^import .*;\n/gm, '').replace('void boot();', `globalThis.hooks = ${hooks};`), context);
   return { ...context.hooks, elements, tabs, moves, requests, timers, storage, rewrites, objects, revoked,
     gpsCalls: () => gpsCalls, gpsOptions, popups, document, SplatStub, workspace, watches,
@@ -176,7 +180,7 @@ test('OSM failure exits loading without silently switching to a snapshot', async
   assert.equal(view.requests.length, 1);
   assert.equal(JSON.parse(view.requests[0].body).source, 'osm');
   assert.equal(view.state.planBusy, false);
-  assert.equal(view.elements.get('prepare').disabled, false);
+  assert.equal(view.elements.get('test-prepare').disabled, false);
   assert.match(view.elements.get('message').textContent, /地图来源/);
 });
 
@@ -727,7 +731,7 @@ test('photo generation separates image-edit charges from World Labs credits', ()
 });
 
 test('fresh location automatically prepares the source scene once without starting AI generation', async () => {
-  const view = app({ location: { hostname: 'localhost' }, fetch: (url) => {
+  const view = app({ visibility: 'visible', location: { hostname: 'localhost' }, fetch: (url) => {
     if (url === '/world-config') return response({ configured: true, model: 'marble-1.1', streetview: { available: true } });
     if (url === '/world-plans') return response(plan({ input_kind: 'streetview_panorama',
       source_panorama: { metadata: { heading: 264 } },
@@ -741,7 +745,7 @@ test('fresh location automatically prepares the source scene once without starti
   assert.equal(view.state.engine.current.userData.kind, 'panorama');
   assert.equal(view.elements.get('flat-preview').hidden, true);
   assert.equal(view.elements.get('generate').hidden, false);
-  assert.equal(view.watches.size, 0);
+  assert.equal(view.watches.size, 1);
 });
 
 test('source and historical panorama share the viewing direction and forbid simulated translation', async () => {
@@ -842,12 +846,12 @@ test('back-forward cache preserves panorama rendering and allows an explicit sen
   assert.ok(view.state.jobEpoch > oldEpoch);
   await view.emitWindow('pageshow', { persisted: true });
   assert.equal(view.state.engine, engine); assert.equal(view.state.orientation, orientation);
-  assert.equal(permissions, 1); assert.equal(view.watches.size, 0);
+  assert.equal(permissions, 1); assert.equal(view.watches.size, 1); // Live GPS resumes without sensor permission.
   assert.ok([...view.timers.values()].some((timer) => timer.milliseconds === 5000));
   view.toggleMotion(); await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
   await view.emitWindow('deviceorientation', { alpha: 270, beta: 90, gamma: 0, absolute: true });
   assert.equal(permissions, 2); assert.equal(view.state.orientation.getStatus().phase, 'tracking');
-  assert.equal(view.watches.size, 1);
+  assert.equal(view.watches.size, 2);
   view.state.orientation.stop();
 });
 
@@ -877,4 +881,144 @@ test('queued location-watch callbacks cannot restore stopped travel or overwrite
   await view.setLocationMode('test'); newWatch.success(fix(90));
   assert.equal(view.state.travel, null); assert.equal(view.watches.size, 0);
   view.state.orientation.stop();
+});
+
+function liveLocationApp(options = {}) {
+  const view = app({ visibility: 'visible', fetch: (url, init) => {
+    if (url === '/world-plans') {
+      if (options.prepare) return options.prepare(init);
+      const body = JSON.parse(init.body);
+      return response(plan({ plan_id: '33333333-3333-3333-3333-333333333333', target_year: body.year,
+        location: { lat: body.lat, lon: body.lon }, input_kind: 'streetview_panorama',
+        source_panorama: { metadata: { heading: 90 } },
+        assets: { 'source_panorama.jpg': `/world-plans/${PLAN}/assets/source_panorama.jpg` } }));
+    }
+    return response('source');
+  }, ...options });
+  authorised(view); view.bindEvents(); view.state.engine = fakeEngine();
+  view.state.config.streetview = { available: true }; view.state.bootReady = true;
+  view.state.plan = plan({ location: { lat: 1, lon: 2 }, input_kind: 'streetview_panorama',
+    source_panorama: { metadata: { heading: 0, lat: 1.01, lon: 2.01 } },
+    assets: { 'source_panorama.jpg': `/world-plans/${PLAN}/assets/source_panorama.jpg` } });
+  view.startLiveLocation();
+  const feed = async (lat, { accuracy = 5, timestamp = Date.now() } = {}) => {
+    [...view.watches.values()][0].success({ coords: { latitude: lat, longitude: 2, accuracy }, timestamp });
+    await new Promise(setImmediate);
+  };
+  return { ...view, feed, posts: () => view.requests.filter((item) => item.method === 'POST') };
+}
+
+test('live GPS updates coordinates continuously but only refreshes source after meaningful movement', async () => {
+  const view = liveLocationApp();
+  await view.showView('source'); setCameraBearing(view.state.engine.camera, 123, 15);
+  await view.feed(1.00002); // Small drift; pano camera itself is much farther away.
+  assert.equal(view.elements.get('lat').value, '1.000020'); assert.equal(view.posts().length, 0);
+  await view.feed(1.001);
+  assert.deepEqual(view.posts().map((item) => item.url), ['/world-plans']);
+  assert.equal(JSON.parse(view.posts()[0].body).lat, 1.001);
+  assert.ok(Math.abs(cameraBearing(view.state.engine.camera).heading - 123) < 1e-7);
+  await view.feed(1.002); // Already moved again, still within the request cooldown.
+  assert.equal(view.posts().length, 1); assert.ok(view.state.liveTimer !== null);
+  view.state.liveAttemptAt -= 16000; await view.maybePrepareCurrent();
+  assert.equal(view.posts().length, 2); assert.equal(JSON.parse(view.posts()[1].body).lat, 1.002);
+  await view.feed(1.00201); assert.equal(view.posts().length, 2);
+});
+
+test('live GPS preserves historical views, running jobs, native tracking and scale calibration', async () => {
+  const view = liveLocationApp();
+  view.state.job = { job_id: JOB, stage: 'generating_world' };
+  await view.feed(1.001); assert.equal(view.posts().length, 0);
+  view.state.job.stage = 'ready'; view.state.view = 'pano';
+  await view.feed(1.002); assert.equal(view.posts().length, 0); assert.equal(view.state.job.job_id, JOB);
+  view.state.view = 'world'; await view.feed(1.003); assert.equal(view.posts().length, 0);
+  view.state.view = 'source'; view.state.scaleCalibration = { isActive: () => true };
+  await view.feed(1.004); assert.equal(view.posts().length, 0);
+  assert.equal(view.elements.get('lat').value, '1.004000');
+  view.state.scaleCalibration = null;
+  view.state.walking = { getStatus: () => ({ locked: true }) };
+  const camera = view.state.engine.camera.position.clone();
+  await view.feed(1.005);
+  assert.equal(view.elements.get('lat').value, '1.005000');
+  assert.equal(view.posts().length, 0); assert.ok(view.state.engine.camera.position.equals(camera));
+});
+
+test('a late automatic source response cannot replace a newly chosen view', async () => {
+  let complete;
+  const view = liveLocationApp({ prepare: () => new Promise((resolve) => { complete = resolve; }) });
+  await view.feed(1.001); assert.equal(view.state.planBusy, true);
+  view.state.view = 'world'; ++view.state.viewEpoch;
+  const original = view.state.plan;
+  complete(response(plan({ plan_id: '33333333-3333-3333-3333-333333333333' })));
+  await new Promise(setImmediate);
+  assert.equal(view.state.plan, original); assert.equal(view.state.view, 'world');
+  assert.equal(view.state.planBusy, false);
+});
+
+test('live updates pause in background, resume once, and reject old watch callbacks after mode changes', async () => {
+  const view = liveLocationApp(); const old = [...view.watches.values()][0];
+  await view.feed(1.00001);
+  view.document.visibilityState = 'hidden'; await view.emitDocument('visibilitychange');
+  assert.equal(view.watches.size, 0);
+  old.success({ coords: { latitude: 50, longitude: 20, accuracy: 5 }, timestamp: Date.now() });
+  assert.equal(view.elements.get('lat').value, '1.000010');
+  view.document.visibilityState = 'visible'; await view.emitDocument('visibilitychange');
+  await view.emitDocument('visibilitychange'); assert.equal(view.watches.size, 1);
+  const active = [...view.watches.values()][0]; await view.setLocationMode('test');
+  active.success({ coords: { latitude: 50, longitude: 20, accuracy: 5 }, timestamp: Date.now() });
+  assert.equal(view.elements.get('lat').value, ''); assert.equal(view.watches.size, 0);
+});
+
+test('poor GPS accuracy defers source refresh and failed requests have a retry cooldown', async () => {
+  const view = liveLocationApp({ prepare: () => response({ detail: '附近没有街景' }, 404) });
+  await view.feed(1.001, { accuracy: 100 });
+  assert.equal(view.posts().length, 0); assert.match(view.elements.get('location-status').textContent, /更准确/);
+  await view.feed(1.001); assert.equal(view.posts().length, 1);
+  await view.feed(1.0011); assert.equal(view.posts().length, 1);
+  assert.equal(view.state.plan.plan_id, PLAN);
+  view.state.liveAttemptAt -= 61000; await view.maybePrepareCurrent();
+  assert.equal(view.posts().length, 2); assert.equal(view.state.plan.plan_id, PLAN);
+});
+
+test('a year wheel selection updates the generation year without submitting on scroll or Enter', async () => {
+  const view = app(); authorised(view); view.bindEvents(); view.state.plan = plan();
+  assert.equal(view.elements.has('prepare'), false);
+  await view.elements.get('year-wheel').emit('keydown', { key: 'ArrowUp' });
+  assert.equal(view.elements.get('year').value, '1926');
+  assert.match(view.elements.get('generate').textContent, /1926/);
+  await view.elements.get('plan-form').emit('submit');
+  assert.equal(view.requests.length, 0);
+  view.state.yearWheel.setRange(1900, 1950); view.state.yearWheel.setValue(2100);
+  assert.equal(view.elements.get('year').value, '1950');
+});
+
+test('generation at a moved location must successfully prepare the new location even for the same year', async () => {
+  for (const fails of [false, true]) {
+    const view = app({ gps: (success) => success({ coords: { latitude: 1.001, longitude: 2, accuracy: 5 }, timestamp: Date.now() }),
+      fetch: (url, init) => {
+        if (url === '/world-plans') return fails ? response({ detail: '没有街景' }, 404)
+          : response(plan({ location: { lat: JSON.parse(init.body).lat, lon: 2 }, input_kind: 'streetview_panorama' }));
+        if (url === '/world-jobs') return response({ job_id: JOB, stage: 'queued', assets: [] });
+      } });
+    authorised(view); view.state.plan = plan({ location: { lat: 1, lon: 2 } });
+    view.state.locationFix = { lat: 1.001, lon: 2, accuracy_m: 5, timestamp_ms: Date.now() };
+    await view.generateForYear();
+    const posts = view.requests.filter((request) => request.method === 'POST');
+    assert.equal(JSON.parse(posts[0].body).lat, 1.001);
+    assert.deepEqual(posts.map((request) => request.url), fails ? ['/world-plans'] : ['/world-plans', '/world-jobs']);
+  }
+});
+
+test('automatic refresh cannot clear a job that became active during the source request', async () => {
+  let complete;
+  const view = liveLocationApp({ prepare: () => new Promise((resolve) => { complete = resolve; }) });
+  await view.feed(1.001);
+  const original = view.state.plan;
+  view.applyJob({ job_id: JOB, stage: 'generating_world', assets: [] });
+  complete(response(plan({ plan_id: '33333333-3333-3333-3333-333333333333' })));
+  await new Promise(setImmediate);
+  assert.equal(view.state.plan, original); assert.equal(view.state.job.job_id, JOB);
+  assert.equal(view.state.job.stage, 'generating_world'); assert.equal(view.state.planBusy, false);
+  view.state.job.stage = 'submission_unknown'; await view.feed(1.002);
+  view.state.job.stage = 'error'; await view.feed(1.003);
+  assert.equal(view.posts().length, 1);
 });

@@ -4,6 +4,8 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { SparkRenderer, SplatMesh } from '@sparkjsdev/spark';
 import { createPanoramaMesh, PanoramaLookControls, panoramaHeading, setCameraBearing, cameraBearing } from './panorama.js';
 import { createOrientationController } from './orientation.js';
+import { createLiveLocation, positionFix, locationDistance } from './location.js';
+import { createYearWheel } from './year-wheel.js';
 
 const $ = (id) => document.getElementById(id);
 const TOKEN_KEY = 'century.world.access';
@@ -42,6 +44,7 @@ const state = {
   locationLinkBusy: false,
   orientation: null, calibrating: false, panoramaPose: null, travelWatch: null, travel: null, travelEpoch: 0,
   motionFrameAt: 0, autoPrepareAttempted: false, bootReady: false,
+  liveLocation: null, liveAnchor: null, liveAttemptAt: 0, liveFailed: false, liveTimer: null, yearWheel: null,
 };
 
 function storageGet(key) { try { return sessionStorage.getItem(key); } catch { return null; } }
@@ -205,7 +208,8 @@ function syncUI() {
   const running = state.job && !TERMINAL.has(state.job.stage || state.job.status);
   const busy = state.planBusy || state.generateBusy || state.restoring || state.resumeBusy || running;
   for (const element of $('plan-form').elements || $('plan-form').querySelectorAll('input,select,button')) element.disabled = !!busy;
-  $('prepare').disabled = !!busy || !state.token;
+  state.yearWheel?.setDisabled(!!busy);
+  if ($('test-prepare')) $('test-prepare').disabled = !!busy || !state.token || state.locationMode !== 'test';
   if ($('snapshot')) $('snapshot').disabled = !!busy || !state.token || state.locationMode !== 'test';
   $('lat').readOnly = $('lon').readOnly = state.locationMode === 'device';
   $('gps').disabled = !!busy || state.locationBusy;
@@ -225,8 +229,6 @@ function syncUI() {
     || state.plan?.input_kind === 'streetview_panorama' && state.config?.panorama_editor_configured === false;
   $('world-model').disabled = !!busy || !!state.job || state.submissionUnknown;
   renderGenerationQuality();
-  $('prepare').textContent = state.planBusy ? '获取街景中…' : state.plan ? '更新位置' : '查看当前位置';
-  $('prepare').classList.toggle('secondary-action', !!state.plan);
   const streetview = state.config?.streetview;
   $('streetview-status').textContent = !state.config ? '正在检查街景服务…'
     : !streetview?.configured ? '服务器尚未配置 Google 全景获取。可以先在 Google 地图查看当前位置。'
@@ -353,9 +355,9 @@ function manualLook() {
   updateMotionUI();
 }
 
-function renderPlan(plan) {
+function renderPlan(plan, { preserveDirection = false } = {}) {
   if (state.plan?.plan_id !== plan.plan_id) {
-    state.orientation?.stop(); stopTravelTracking(); state.panoramaPose = null; state.calibrating = false;
+    if (!preserveDirection) { state.orientation?.stop(); stopTravelTracking(); state.panoramaPose = null; state.calibrating = false; }
   }
   state.plan = plan;
   $('plan-panel').hidden = false;
@@ -422,7 +424,8 @@ function renderLocationStatus() {
   if (state.locationBusy) $('location-status').textContent = '正在请求手机当前位置，请允许位置权限…';
   else if (state.locationError) $('location-status').textContent = state.locationError;
   else if (state.locationPermissionState === 'denied' && !state.locationFix) $('location-status').textContent = locationFailure({ code: 1 });
-  else if (state.locationFix) $('location-status').textContent = '已获取设备位置。准备新区块时会再次定位。';
+  else if (state.locationFix) $('location-status').textContent = state.locationFix.accuracy_m > 35
+    ? '位置已更新，等待更准确的定位后更新街景。' : '位置实时更新中，移动到附近街区会自动更新当前街景。';
   else $('location-status').textContent = '尚未获取手机位置。请允许位置权限并重新定位。';
   const fix = state.locationFix;
   $('location-meta').textContent = fix
@@ -534,6 +537,30 @@ async function copyLocationLink() {
   } finally { state.locationLinkBusy = false; syncUI(); }
 }
 
+function acceptLiveFix(fix) {
+  if (state.locationMode !== 'device' || state.locationFix?.timestamp_ms > fix.timestamp_ms) return;
+  state.locationFix = fix; state.locationError = ''; state.locationErrorCode = 0; state.locationBusy = false;
+  $('lat').value = fix.lat.toFixed(6); $('lon').value = fix.lon.toFixed(6);
+  syncUI();
+}
+
+function startLiveLocation() {
+  if (state.locationMode !== 'device' || document.visibilityState === 'hidden' || !window.isSecureContext
+      || state.locationErrorCode === 1 || !navigator.geolocation?.watchPosition) return;
+  if (!state.liveLocation) state.liveLocation = createLiveLocation({ geolocation: navigator.geolocation,
+    onFix: (fix) => { acceptLiveFix(fix); void maybePrepareCurrent(); },
+    onError: (error) => {
+      state.locationError = locationFailure(error); state.locationErrorCode = Number(error.code) || 0;
+      state.locationBusy = false; syncUI();
+    },
+  });
+  state.liveLocation.start();
+}
+
+function stopLiveLocation() {
+  state.liveLocation?.stop(); clearTimeout(state.liveTimer); state.liveTimer = null;
+}
+
 async function refreshLocation() {
   const epoch = ++state.locationEpoch;
   state.locationFix = null; state.locationError = ''; state.locationErrorCode = 0; state.locationBusy = true;
@@ -550,29 +577,23 @@ async function refreshLocation() {
     void observeLocationPermission();
     const position = await pendingPosition;
     if (epoch !== state.locationEpoch || state.locationMode !== 'device') throw new Error('位置模式已切换，本次定位已忽略。');
-    const fix = { lat: position.coords?.latitude, lon: position.coords?.longitude,
-      accuracy_m: position.coords?.accuracy, timestamp_ms: position.timestamp };
-    const age = Date.now() - fix.timestamp_ms;
-    if (![fix.lat, fix.lon, fix.accuracy_m, fix.timestamp_ms].every(Number.isFinite)
-        || Math.abs(fix.lat) > 85 || Math.abs(fix.lon) > 180 || fix.accuracy_m < 0
-        || age > 60000 || age < -10000) throw new Error('设备返回的位置无效或已过期，请重新定位。');
-    state.locationFix = fix;
-    $('lat').value = fix.lat.toFixed(6); $('lon').value = fix.lon.toFixed(6);
-    return fix;
+    const fix = positionFix(position);
+    acceptLiveFix(fix);
+    return state.locationFix;
   } catch (error) {
     if (epoch === state.locationEpoch && state.locationMode === 'device') {
       state.locationError = locationFailure(error); state.locationErrorCode = Number(error?.code) || 0;
     }
     throw new Error(locationFailure(error));
   } finally {
-    if (epoch === state.locationEpoch) { state.locationBusy = false; syncUI(); void maybePrepareCurrent(); }
+    if (epoch === state.locationEpoch) { state.locationBusy = false; startLiveLocation(); syncUI(); void maybePrepareCurrent(); }
   }
 }
 
 async function setLocationMode(mode) {
   if (mode !== 'device' && mode !== 'test') return;
   state.locationMode = mode; ++state.locationEpoch;
-  stopTravelTracking();
+  stopTravelTracking(); stopLiveLocation(); state.liveAnchor = null; state.liveAttemptAt = 0; state.liveFailed = false;
   state.locationFix = null; state.locationError = ''; state.locationErrorCode = 0; state.locationBusy = false;
   state.locationRecoveryPending = false;
   $('lat').value = ''; $('lon').value = '';
@@ -611,16 +632,34 @@ async function openStreetView() {
 }
 
 async function maybePrepareCurrent() {
-  if (!state.bootReady || state.autoPrepareAttempted || state.plan || state.job || state.planBusy || state.restoring
-      || state.submissionUnknown || !state.token || state.locationMode !== 'device' || !state.locationFix
-      || !state.config?.streetview?.available || new URLSearchParams(location.search).has('world')) return;
-  state.autoPrepareAttempted = true;
-  await preparePlan('google_streetview', { reuseLocation: true });
+  const fix = state.locationFix;
+  if (!state.bootReady || state.planBusy || state.generateBusy || state.restoring || state.resumeBusy
+      || state.submissionUnknown || state.walking?.getStatus?.()?.locked === true || state.scaleCalibration?.isActive?.() || !state.token || state.locationMode !== 'device'
+      || document.visibilityState === 'hidden' || state.view !== 'source' || state.locationError
+      || state.job && (state.job.stage || state.job.status) !== 'ready'
+      || !fix || fix.accuracy_m > 35 || Date.now() - fix.timestamp_ms > 60000
+      || !state.config?.streetview?.available || !state.plan && new URLSearchParams(location.search).has('world')) return;
+  const anchor = state.liveAnchor || state.plan?.location;
+  const threshold = Math.max(30, 1.5 * Math.max(anchor?.accuracy_m || 0, fix.accuracy_m));
+  if (state.plan && !state.liveFailed && locationDistance(anchor, fix) < threshold) return;
+  const remaining = (state.liveFailed ? 60000 : 15000) - (Date.now() - state.liveAttemptAt);
+  if (remaining > 0) {
+    if (state.liveTimer === null) state.liveTimer = setTimeout(() => {
+      state.liveTimer = null; void maybePrepareCurrent();
+    }, remaining);
+    return;
+  }
+  clearTimeout(state.liveTimer); state.liveTimer = null;
+  state.autoPrepareAttempted = true; state.liveAttemptAt = Date.now(); state.liveAnchor = { ...fix }; state.liveFailed = true;
+  const prepared = await preparePlan('google_streetview', { reuseLocation: true, automatic: true });
+  state.liveFailed = prepared !== true;
+  if (prepared) void maybePrepareCurrent();
 }
 
-async function preparePlan(source = 'google_streetview', { reuseLocation = false } = {}) {
+async function preparePlan(source = 'google_streetview', { reuseLocation = false, automatic = false } = {}) {
   if (state.planBusy || state.generateBusy || state.restoring
       || state.job && !TERMINAL.has(state.job.stage || state.job.status)) return;
+  state.yearWheel?.commit();
   if (source !== 'google_streetview' && state.locationMode !== 'test') {
     message('地图粗模型与 CMU 快照仅用于明确开启的测试模式。', true); return;
   }
@@ -628,7 +667,7 @@ async function preparePlan(source = 'google_streetview', { reuseLocation = false
     $('lat').value = String(state.config?.test_location?.lat ?? 40.4433);
     $('lon').value = String(state.config?.test_location?.lon ?? -79.9436);
   }
-  const epoch = ++state.planEpoch;
+  const epoch = ++state.planEpoch, viewEpoch = state.viewEpoch, jobEpoch = state.jobEpoch, locationMode = state.locationMode;
   state.planBusy = true; syncUI();
   try {
     const fix = state.locationFix;
@@ -645,11 +684,18 @@ async function preparePlan(source = 'google_streetview', { reuseLocation = false
       : '正在查询所选位置的地图轮廓并核对历史来源，可能需要片刻…');
     const plan = await api('/world-plans', { method: 'POST', body: payload });
     if (epoch !== state.planEpoch) return;
+    if (automatic && (state.view !== 'source' || state.viewEpoch !== viewEpoch || state.jobEpoch !== jobEpoch
+        || state.resumeBusy || state.generateBusy || state.submissionUnknown
+        || state.job && (state.job.stage || state.job.status) !== 'ready'
+        || state.walking?.getStatus?.()?.locked === true || state.scaleCalibration?.isActive?.()
+        || state.locationMode !== locationMode || document.visibilityState === 'hidden')) { message(); return; }
     clearTimeout(state.pollTimer); ++state.jobEpoch;
     state.job = null; state.submissionUnknown = false; state.userViewLocked = false; state.viewingSavedPlan = false; setJobURL();
-    $('job-panel').hidden = true; renderPlan(plan);
+    state.liveAnchor = { lat: coordinates.lat, lon: coordinates.lon, accuracy_m: coordinates.location_accuracy_m || 0 };
+    $('job-panel').hidden = true; renderPlan(plan, { preserveDirection: automatic });
     await showView(plan.input_kind === 'streetview_panorama' ? 'source' : 'historical', { automatic: true });
     revealMobilePreview();
+    return true;
   } catch (error) {
     if (epoch === state.planEpoch) message(error.message, true);
   } finally {
@@ -659,11 +705,16 @@ async function preparePlan(source = 'google_streetview', { reuseLocation = false
 
 async function generateForYear() {
   if (!state.plan || state.generateBusy || state.planBusy || state.submissionUnknown) return;
+  state.yearWheel?.commit();
   if (!$('plan-form').reportValidity()) return;
   const selectedYear = Number($('year').value);
-  if (state.plan.target_year !== selectedYear) {
-    await preparePlan('google_streetview');
-    if (state.plan?.target_year !== selectedYear || state.job) return;
+  const fix = state.locationFix, place = state.plan.location;
+  const changedLocation = state.locationMode === 'device' && fix && Number.isFinite(place?.lat) && Number.isFinite(place?.lon)
+    && fix.accuracy_m <= 35 && Date.now() - fix.timestamp_ms < 60000
+    && locationDistance(place, fix) >= Math.max(30, 1.5 * fix.accuracy_m);
+  if (state.plan.target_year !== selectedYear || changedLocation) {
+    const prepared = await preparePlan('google_streetview');
+    if (!prepared || state.plan?.target_year !== selectedYear || state.job) return;
   }
   await startGeneration();
 }
@@ -1114,6 +1165,7 @@ async function restoreSaved() {
 }
 
 function bindEvents() {
+  state.yearWheel = createYearWheel({ element: $('year-wheel'), input: $('year'), onChange: syncUI });
   $('settings-open').addEventListener('click', () => { $('settings-dialog').showModal?.(); });
   $('settings-close').addEventListener('click', () => { $('settings-dialog').close?.(); });
   $('settings-dialog').addEventListener('click', (event) => {
@@ -1122,7 +1174,8 @@ function bindEvents() {
   $('motion-toggle').addEventListener('click', toggleMotion);
   $('align-view').addEventListener('click', calibrateView);
   $('year').addEventListener('input', syncUI);
-  $('plan-form').addEventListener('submit', (event) => { event.preventDefault(); void preparePlan('google_streetview'); });
+  $('plan-form').addEventListener('submit', (event) => { event.preventDefault(); });
+  $('test-prepare').addEventListener('click', () => { if (state.locationMode === 'test') void preparePlan('google_streetview'); });
   $('geometry-test').addEventListener('click', () => { void preparePlan('osm'); });
   $('open-streetview').addEventListener('click', openStreetView);
   $('snapshot')?.addEventListener('click', () => { void preparePlan('cmu_snapshot'); });
@@ -1145,17 +1198,18 @@ function bindEvents() {
   $('retry-location').addEventListener('click', retryLocation);
   $('copy-location-link').addEventListener('click', copyLocationLink);
   const revisitLocationPermission = () => {
-    if (document.visibilityState !== 'visible') return;
+    if (document.visibilityState !== 'visible') { stopLiveLocation(); return; }
     // Re-read the live PermissionStatus when Safari resumes from Settings;
     // the browser may defer its change event while the page is backgrounded.
     if (state.locationPermissionStatus) applyLocationPermission(state.locationPermissionStatus);
     else void observeLocationPermission();
     resumeLocationRecovery();
+    startLiveLocation(); void maybePrepareCurrent();
   };
   window.addEventListener('focus', revisitLocationPermission);
   document.addEventListener('visibilitychange', revisitLocationPermission);
   for (const button of document.querySelectorAll('[data-view]')) {
-    button.addEventListener('click', () => { void showView(button.dataset.view); });
+    button.addEventListener('click', async () => { await showView(button.dataset.view); await maybePrepareCurrent(); });
   }
   $('reset-view').addEventListener('click', () => {
     const engine = state.engine;
@@ -1186,16 +1240,18 @@ function bindEvents() {
   window.addEventListener('pagehide', (event) => {
     clearTimeout(state.pollTimer); state.pollTimer = null; ++state.jobEpoch;
     state.viewAbort?.abort(); releaseMoves();
+    stopLiveLocation();
     state.orientation?.stop('paused'); stopTravelTracking();
     // A back/forward-cache entry retains this JS state and its live canvas.
     // Keep rendering resources and controls so browser Back can resume them.
     if (event.persisted) return;
-    state.orientation?.dispose();
+    state.orientation?.dispose(); state.yearWheel?.dispose();
     if (state.imageURL) URL.revokeObjectURL(state.imageURL);
     if (state.engine) { state.engine.renderer.setAnimationLoop(null); state.engine.observer.disconnect(); state.engine.look?.dispose(); }
   });
   window.addEventListener('pageshow', (event) => {
     if (!event.persisted) return;
+    startLiveLocation(); void maybePrepareCurrent();
     if (state.engine) state.engine.previousTime = 0;
     schedulePoll(state.jobEpoch);
     // An asset fetch may have been interrupted during navigation.
@@ -1215,6 +1271,7 @@ async function boot() {
       configureModels();
       if (Number.isInteger(config.min_year)) $('year').min = String(config.min_year);
       if (Number.isInteger(config.max_year)) $('year').max = String(config.max_year);
+      state.yearWheel?.setRange(Number($('year').min) || 1800, Number($('year').max) || new Date().getFullYear());
       syncUI();
     }), initialiseAccess(),
   ]);

@@ -46,8 +46,10 @@
     <section class="journey-controls" aria-label="选择年代与开始旅程">
       <p id="view-caption" class="view-caption">同一个地方，另一个年代。</p>
       <form id="plan-form">
-        <label class="year-entry" for="year"><span class="sr-only">目标年份</span><input id="year" type="number" inputmode="numeric" min="1800" value="1925" required aria-label="目标年份"><span class="year-suffix">年</span></label>
-        <div class="primary-actions"><button class="primary" id="prepare" type="submit">准备当前街景 <span aria-hidden="true">→</span></button><button class="primary" id="generate" type="button" hidden>生成历史世界 <span aria-hidden="true">→</span></button></div>
+        <input id="year" type="hidden" value="1925">
+        <div class="year-entry"><div id="year-wheel" class="year-wheel" role="spinbutton" tabindex="0" aria-label="目标年份" aria-describedby="year-wheel-hint" aria-valuemin="1800" aria-valuemax="2026" aria-valuenow="1925" aria-valuetext="1925 年"></div><span class="year-suffix" aria-hidden="true">年</span></div>
+        <p id="year-wheel-hint" class="sr-only">上下滑动选择年份；键盘上下键逐年调整，Page Up 和 Page Down 调整十年。</p>
+        <div class="primary-actions"><button class="primary" id="generate" type="button" hidden>生成历史世界 <span aria-hidden="true">→</span></button></div>
       </form>
       <p id="generation-price" class="generation-price" hidden>标准质量 · 1,500 credits，图片处理另计</p>
       <p class="viewer-note" id="viewer-note">想象重建，非历史影像。</p>
@@ -93,7 +95,7 @@
       <label>位置来源<select id="location-mode" form="plan-form"><option value="device" selected>手机当前位置</option><option value="test">测试模式 · 指定点位</option></select></label>
       <div class="field-grid"><label>纬度<input id="lat" form="plan-form" type="number" step="any" min="-85" max="85" readonly required></label><label>经度<input id="lon" form="plan-form" type="number" step="any" min="-180" max="180" readonly required></label></div>
       <label>范围半径<select id="radius" form="plan-form"><option value="50">50 米</option><option value="100" selected>100 米</option><option value="150">150 米</option></select></label>
-      <div id="test-controls" hidden><p class="small">测试模式：使用上方指定坐标，不代表手机当前位置。</p><button class="secondary" id="snapshot" type="button" form="plan-form">旧几何实验 · CMU 快照 · 2026-09-12</button><button class="secondary" id="geometry-test" type="button" form="plan-form">旧几何实验 · 指定测试点位</button></div>
+      <div id="test-controls" hidden><p class="small">测试模式：使用上方指定坐标，不代表手机当前位置。</p><button class="secondary" id="test-prepare" type="button" form="plan-form">查看测试点位街景</button><button class="secondary" id="snapshot" type="button" form="plan-form">旧几何实验 · CMU 快照 · 2026-09-12</button><button class="secondary" id="geometry-test" type="button" form="plan-form">旧几何实验 · 指定测试点位</button></div>
       <nav class="experiment-tabs" aria-label="实验视图"><button type="button" data-view="historical" aria-pressed="false">历史粗模型</button><button type="button" data-view="modern" aria-pressed="false">现代粗模型</button><button type="button" data-view="depth" aria-pressed="false">深度全景</button></nav>
       <p class="small">输入是 Google Street View 的 360° 实景全景照片。历史变化按来源记录；地图粗模型仅保留为测试实验。</p>
     </details>
