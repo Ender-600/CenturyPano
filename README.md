@@ -32,6 +32,8 @@ PROVIDER=demo uv run python scripts/seed_demo.py
 
 ## 连接真实模型
 
+Marble 按需历史三维世界的实现、延迟实验与手机 AR 方案见 [实施计划](docs/MARBLE_IMPLEMENTATION_PLAN.md)。该方案目前处于规划阶段，下面仍是已有全景图像流程的配置。
+
 把密钥写入本地 `.env`，不要写入前端或提交到 Git。变更配置后重启服务器。
 
 ```dotenv
