@@ -468,7 +468,18 @@
     }
   }
   function frame() {
-    if (state.gyro && !state.drag && !state.revealing && !document.hidden && !$('options-dialog').open && !$('replay-dialog').open) {
+    if (state.velocity && !state.drag && !state.revealing) {
+      state.velocity *= .94;
+      if (Math.abs(state.velocity) < .2) state.velocity = 0;
+      else {
+        const next = state.offset + state.velocity;
+        const clamped = constrainOffset(next);
+        if (!state.wrap && clamped !== next) state.velocity = 0;   // hit the edge: stop, don't bounce
+        state.offset = clamped; render();
+        if (state.gyro) resetMotionOrigin();
+      }
+    }
+    if (state.gyro && !state.drag && !state.revealing && !state.velocity && !document.hidden && !$('options-dialog').open && !$('replay-dialog').open) {
       if (state.wrap) {
         let delta = state.gyroTarget - state.offset;
         delta = ((delta + state.renderWidth * 1.5) % state.renderWidth) - state.renderWidth / 2;
@@ -495,7 +506,9 @@
       const handle = event.target.closest('#slider-handle');
       if (!handle && event.target.closest('button, a, input, select, textarea')) return;
       $('gesture-hint').hidden = true;
-      state.drag = { pointerId: event.pointerId, x: event.clientX, y: event.clientY, offset: state.offset, slider: !!handle, target: viewport };
+      state.velocity = 0;
+      state.drag = { pointerId: event.pointerId, x: event.clientX, y: event.clientY, offset: state.offset, slider: !!handle,
+        target: viewport, axis: null, lastX: event.clientX, lastT: performance.now(), velocity: 0 };
       viewport.setPointerCapture(event.pointerId); viewport.classList.add('dragging');
       if (handle) { event.preventDefault(); sliderAt(event.clientX); }
     });
@@ -503,13 +516,25 @@
       const drag = state.drag; if (!drag || event.pointerId !== drag.pointerId) return;
       if (drag.slider) { event.preventDefault(); sliderAt(event.clientX); return; }
       const dx = event.clientX - drag.x, dy = event.clientY - drag.y;
-      if (Math.abs(dx) > Math.abs(dy)) {
+      // Decide the gesture axis once, after a short dead zone, then keep it. Re-deciding on
+      // every move made diagonal drags flicker between panning and page scrolling.
+      if (!drag.axis && Math.hypot(dx, dy) >= 8) drag.axis = Math.abs(dx) > Math.abs(dy) ? 'x' : 'y';
+      if (drag.axis === 'x') {
         if (event.cancelable) event.preventDefault();
+        const now = performance.now(), dt = Math.max(1, now - drag.lastT);
+        const instant = (event.clientX - drag.lastX) / dt * 16;      // px per 60 Hz frame
+        drag.velocity = drag.velocity * .6 + instant * .4;
+        drag.lastX = event.clientX; drag.lastT = now;
         state.offset = constrainOffset(drag.offset - dx); render();
       }
     });
     const endDrag = (event) => {
       if (!state.drag || state.drag.pointerId !== event.pointerId) return;
+      const drag = state.drag;
+      if (drag.axis === 'x' && !drag.slider && performance.now() - drag.lastT < 80) {
+        // Flick: carry the last measured speed into the inertia loop in frame().
+        state.velocity = -drag.velocity;
+      }
       if (state.gyro) resetMotionOrigin();
       state.drag = null; viewport.classList.remove('dragging');
       if (viewport.hasPointerCapture(event.pointerId)) viewport.releasePointerCapture(event.pointerId);
@@ -702,15 +727,23 @@
     const date = /^(\d{4})-(\d{2})-(\d{2})$/.exec(context.reference_date || '');
     const reference = date ? `${date[1]} 年 ${Number(date[2])} 月 ${Number(date[3])} 日` : `${context.target_year ?? yearOf(manifest) ?? '所选'} 年 7 月 1 日`;
     const siteLabels = { undeveloped: '未开发', agricultural: '农业用地', built: '已建成', mixed: '混合用途', unknown: '尚未确认' };
+    const literary = context.literary_summary
+      || (context.period_summary && !String(context.period_summary).includes('尚未确认')
+        ? context.period_summary
+        : '时光在此停住片刻。关于这一年的此地，我们只能轻轻想象，不敢断言。');
     const list = (heading, values) => Array.isArray(values) && values.length ? `<div class="history-section"><h4>${heading}</h4><ul>${values.map((value) => `<li>${escapeHTML(value)}</li>`).join('')}</ul></div>` : '';
     panel.innerHTML = `<div class="history-heading"><h3>历史背景推测</h3><span>${escapeHTML(reference)} · 参考时点</span></div>`
       + `<p class="history-status">${fallback ? '地点历史尚未确认 · 使用保守推测' : '基于模型知识的推测 · 未经史料核实'}</p>`
-      + `<p>${escapeHTML(context.period_summary || '该地点在目标年份的背景尚未确认。')}</p>`
+      + `<p class="history-literary">${escapeHTML(literary)}</p>`
+      + `<details class="history-raw">`
+      + `<summary>查看原始历史推测</summary>`
+      + `<p class="history-raw-lead">${escapeHTML(context.period_summary || '该地点在目标年份的背景尚未确认。')}</p>`
       + `<p><strong>推测土地用途：${escapeHTML(siteLabels[context.site_state] || siteLabels.unknown)}</strong>${context.site_history ? `<br>${escapeHTML(context.site_history)}` : ''}</p>`
       + list('当地背景', context.local_context)
       + list('画面重建依据', context.reconstruction_changes)
       + list('仍待确认', context.uncertainties)
-      + '<p class="history-footnote">同一地点可能曾是荒地、农田，或存在不同建筑。当前全景不代表这些建筑在所选年份已经存在；影像与背景均需史料核实。</p>';
+      + '<p class="history-footnote">同一地点可能曾是荒地、农田，或存在不同建筑。当前全景不代表这些建筑在所选年份已经存在；影像与背景均需史料核实。</p>'
+      + `</details>`;
   }
   function updateMetadata(manifest) {
     const demo = isDemo(manifest), replay = manifest.mode === 'replay' || state.viewingReplay;
@@ -728,7 +761,7 @@
     $('past-label').innerHTML = `${escapeHTML(year ?? '待确认')} 年 <span>REIMAGINED</span>`;
     document.title = `${year ?? '年份待确认'} · ${placeName(manifest.place)} · CENTURY PANO`;
     $('replay-badge').hidden = !replay;
-    text('result-mode', demo ? '本地效果演示 · 未调用 AI' : replay ? '已存档旅程 · 无生成调用' : 'AI 想象重建');
+    text('result-mode', (demo ? '本地效果演示 · 未调用 AI' : replay ? '已存档旅程 · 无生成调用' : 'AI 想象重建') + (manifest.scene?.is_outdoor === false ? ' · 室内场景，效果有限' : ''));
     text('result-note', demo ? '工程示例 / 本地调色用于验证交互与流程，不代表 AI 重建效果。' : '结合所选年份与拍摄地点推测历史场景，建筑和土地用途可能与今天不同。');
     const done = manifest.tiles?.filter((tile) => ['done', 'error'].includes(tile.status)).length || 0;
     const total = manifest.geometry?.n || manifest.tiles?.length || 0;
@@ -839,23 +872,29 @@
     const viewRevision = state.viewRevision;
     state.revealing = true; state.drag = null;
     const center = (state.offset + $('pano-viewport').clientWidth / 2) / state.renderWidth;
-    setPastPercent(0);
-    document.body.classList.add('revealing'); resizeViewport();
-    state.offset = constrainOffset(center * state.renderWidth - $('pano-viewport').clientWidth / 2); render();
-    await new Promise((resolve) => setTimeout(resolve, 210));
-    if (generation !== state.generation) return;
-    playAudio();
-    const duration = matchMedia('(prefers-reduced-motion: reduce)').matches ? 0 : 1500;
-    await new Promise((resolve) => {
+    const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
+    const ease = (t) => (t < .5 ? 2 * t * t : 1 - ((-2 * t + 2) ** 2) / 2);
+    const sweep = (from, to, duration) => new Promise((resolve) => {
+      if (!duration) { setPastPercent(to); resolve(); return; }
       const start = performance.now();
       function animate(now) {
         if (generation !== state.generation || viewRevision !== state.viewRevision) { resolve(); return; }
-        const t = duration ? Math.min(1, (now - start) / duration) : 1;
-        setPastPercent((t < .5 ? 2 * t * t : 1 - ((-2 * t + 2) ** 2) / 2) * 100);
+        const t = Math.min(1, (now - start) / duration);
+        setPastPercent(from + (to - from) * ease(t));
         if (t < 1) requestAnimationFrame(animate); else resolve();
       }
       requestAnimationFrame(animate);
     });
+    document.body.classList.add('revealing'); resizeViewport();
+    state.offset = constrainOffset(center * state.renderWidth - $('pano-viewport').clientWidth / 2); render();
+    // The viewer has been watching tiles land on the past layer. Do not snap that away:
+    // sweep back to the present as a deliberate "before", hold, then sweep into the past.
+    await sweep(state.pastPercent, 0, reduced ? 0 : 420);
+    if (generation !== state.generation) return;
+    await new Promise((resolve) => setTimeout(resolve, reduced ? 60 : 320));
+    if (generation !== state.generation) return;
+    playAudio();
+    await sweep(0, 100, reduced ? 0 : 1500);
     if (generation !== state.generation) return;
     document.body.classList.remove('revealing'); state.revealing = false;
     resizeViewport(); state.offset = constrainOffset(center * state.renderWidth - $('pano-viewport').clientWidth / 2);
@@ -866,14 +905,16 @@
 
   function metricNumber(value, suffix = ' s') { return typeof value === 'number' && Number.isFinite(value) ? value.toFixed(2) + suffix : '—'; }
   function renderMetrics(manifest) {
-    const metrics = manifest.metrics || {}, seam = metrics.seam_err || {};
+    const metrics = manifest.metrics || {}, seam = metrics.seam_err || {}, align = metrics.alignment || {};
     const cells = [
       ['首个可见画面', metricNumber(metrics.first_view_s), '首次完成的重建画面'],
       ['完整旅程', metricNumber(metrics.total_s), '本次运行实际用时'],
       ['接缝色差 · 调色前 / 后', `${metricNumber(seam.raw, '')} / ${metricNumber(seam.after_color_match, '')}`, `原图参考值 ${metricNumber(seam.originals_floor, '')}`],
       ['相对串行加速', metricNumber(metrics.speedup, '×'), metrics.serial_baseline_s == null ? '尚未测量串行基线' : `串行基线 ${metricNumber(metrics.serial_baseline_s)}`],
+      ['像素对齐 · 配准前 / 后', `${metricNumber(align.score_before, '')} / ${metricNumber(align.score_after, '')}`,
+        align.mean_shift_px == null ? '尚未测量' : `平均漂移 ${metricNumber(align.mean_shift_px, ' px')} · 已校正 ${align.applied ?? 0} 块`],
     ];
-    $('metrics-panel').innerHTML = cells.map(([name, value, note]) => `<div class="metric"><span>${escapeHTML(name)}</span><strong>${escapeHTML(value)}</strong><small>${escapeHTML(note)}</small></div>`).join('') + `<p class="metrics-note">${isDemo(manifest) ? '以上为本地演示管线的运行数据，不代表 AI 服务的速度或质量。' : '数据来自该旅程的实际运行；回放不重新计时。'} 破折号表示尚未测量。接缝色差采用重叠区域 Lab 距离，数值越小代表色彩越接近；这不衡量历史真实性。${manifest.scene?.fallback ? ' 场景解析使用了默认设置。' : ''}${manifest.anchor?.status === 'skipped' ? ' 年代参考图未生成，已跳过色彩匹配。' : ''}</p>`;
+    $('metrics-panel').innerHTML = cells.map(([name, value, note]) => `<div class="metric"><span>${escapeHTML(name)}</span><strong>${escapeHTML(value)}</strong><small>${escapeHTML(note)}</small></div>`).join('') + `<p class="metrics-note">${isDemo(manifest) ? '以上为本地演示管线的运行数据，不代表 AI 服务的速度或质量。' : '数据来自该旅程的实际运行；回放不重新计时。'} 破折号表示尚未测量。接缝色差采用重叠区域 Lab 距离，数值越小代表色彩越接近；这不衡量历史真实性。${manifest.scene?.fallback ? ' 场景解析使用了默认设置。' : ''}${manifest.anchor?.status === 'skipped' ? ' 年代参考图未生成，已跳过色彩匹配。' : ''}${manifest.scene?.is_outdoor === false ? ' 这是室内场景：重建只更换材质与陈设，效果通常弱于室外街景。' : ''} 像素对齐为原图与生成图边缘结构的相关度，1 表示完全重合。</p>`;
   }
   $('metrics-toggle').addEventListener('click', () => {
     const open = $('metrics-panel').hidden;
@@ -881,6 +922,14 @@
     $('metrics-toggle').lastElementChild.textContent = open ? '−' : '+';
   });
 
+  // A phone panorama does not record its sweep angle, but width/height is a good
+  // proxy: a wider strip was swept further. Roughly 55° of sweep per unit of aspect.
+  function panoFovDegrees() {
+    if (state.wrap) return 360;
+    const geometry = state.manifest?.geometry;
+    const aspect = geometry?.W && geometry?.H ? geometry.W / geometry.H : state.imageWidth && state.imageHeight ? state.imageWidth / state.imageHeight : 3;
+    return Math.max(90, Math.min(360, 55 * aspect)) * (state.gyroSensitivity || 1);
+  }
   function resetMotionOrigin() {
     state.gyroHeading = null; state.gyroTarget = state.offset;
   }
@@ -924,7 +973,7 @@
     const delta = CenturyMotion.shortestDelta(heading, state.gyroHeading);
     state.gyroHeading = heading;
     // Integrating short steps preserves a full turn without a jump at +/-180°.
-    state.gyroTarget = constrainOffset(state.gyroTarget + delta * state.renderWidth / (state.wrap ? 360 : 120));
+    state.gyroTarget = constrainOffset(state.gyroTarget + delta * state.renderWidth / panoFovDegrees());
   }
   async function enableGyro() {
     if (state.gyroPending) return;

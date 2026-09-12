@@ -20,6 +20,7 @@ DEFAULT_SCENE_SPEC = {
     "modern_elements": ["contemporary vehicles", "LED signage", "plastic street furniture", "modern shopfronts"],
     "keep_structure": ["camera position", "viewing direction", "image projection", "complete frame"],
     "sky_fraction": 0.35,
+    "is_outdoor": True,
 }
 
 SCENE_SCHEMA = {
@@ -29,8 +30,9 @@ SCENE_SCHEMA = {
         "modern_elements": {"type": "ARRAY", "items": {"type": "STRING"}},
         "keep_structure": {"type": "ARRAY", "items": {"type": "STRING"}},
         "sky_fraction": {"type": "NUMBER"},
+        "is_outdoor": {"type": "BOOLEAN"},
     },
-    "required": ["summary", "modern_elements", "keep_structure", "sky_fraction"],
+    "required": ["summary", "modern_elements", "keep_structure", "sky_fraction", "is_outdoor"],
 }
 
 
@@ -49,7 +51,8 @@ def parse_json_object(text: str) -> dict:
 
 
 def validate_scene(value: dict) -> dict:
-    if set(value) != set(DEFAULT_SCENE_SPEC):
+    # is_outdoor is optional for backwards compatibility with older manifests and tests.
+    if set(value) - {"is_outdoor"} != set(DEFAULT_SCENE_SPEC) - {"is_outdoor"}:
         raise ValueError("Invalid scene fields")
     summary = value["summary"]
     if not isinstance(summary, str) or not summary.strip() or len(summary.split()) > 80 or len(summary) > 600:
@@ -69,6 +72,10 @@ def validate_scene(value: dict) -> dict:
     if isinstance(sky, bool) or not isinstance(sky, (float, int)) or not math.isfinite(sky) or not 0 <= sky <= 1:
         raise ValueError("Invalid sky fraction")
     result["sky_fraction"] = float(sky)
+    outdoor = value.get("is_outdoor", True)
+    if not isinstance(outdoor, bool):
+        raise ValueError("Invalid is_outdoor flag")
+    result["is_outdoor"] = outdoor
     return result
 
 
@@ -145,15 +152,51 @@ async def _request_scene_gemini(image_jpeg: bytes) -> tuple[dict, int]:
     return validate_scene(parse_json_object(text)), int(data.get("usageMetadata", {}).get("totalTokenCount", 0))
 
 
-async def _request_scene(image: bytes) -> tuple[dict, int]:
+async def _request_scene_openai_api(image_jpeg: bytes) -> tuple[dict, int]:
+    """Official OpenAI chat completions multimodal path for scene JSON."""
+    from app.config import settings
+
+    data_url = "data:image/jpeg;base64," + base64.b64encode(image_jpeg).decode("ascii")
+    payload = {
+        "model": settings.openai_text_model,
+        "messages": [{
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": data_url}},
+                {"type": "text", "text": SCENE_PROMPT},
+            ],
+        }],
+        "response_format": {"type": "json_object"},
+        "temperature": 0.1,
+        "max_tokens": 1200,
+    }
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        response = await client.post(
+            "https://api.openai.com/v1/chat/completions",
+            headers={"Authorization": "Bearer " + settings.openai_api_key},
+            json=payload,
+        )
+    check_response(response, "openai")
+    data = response.json()
+    text = data["choices"][0]["message"]["content"]
+    return validate_scene(parse_json_object(text)), int(data.get("usage", {}).get("total_tokens", 0))
+
+
+async def _request_scene(image: bytes, *, prefer_gemini: bool = False, prefer_openai: bool = False) -> tuple[dict, int]:
     from app.config import settings
 
     preview = _preview_jpeg(image)
-    use_openai = bool(settings.k2_api_key and settings.k2_base_url and settings.k2_vl_model)
-    if use_openai:
+    if prefer_openai and settings.openai_api_key:
+        return await _request_scene_openai_api(preview)
+    if prefer_gemini and settings.gemini_api_key:
+        return await _request_scene_gemini(preview)
+    use_compat = bool(settings.k2_api_key and settings.k2_base_url and settings.k2_vl_model)
+    if use_compat:
         return await _request_scene_openai(preview)
     if settings.gemini_api_key:
         return await _request_scene_gemini(preview)
+    if settings.openai_api_key:
+        return await _request_scene_openai_api(preview)
     raise RuntimeError("No VLM credentials configured")
 
 
@@ -161,12 +204,19 @@ async def parse_scene(image: bytes, *, provider: str | None = None) -> dict:
     from app.config import settings
 
     selected_provider = settings.provider if provider is None else provider
-    vlm_ready = bool(settings.gemini_api_key) or bool(
+    vlm_ready = bool(settings.gemini_api_key) or bool(settings.openai_api_key) or bool(
         settings.k2_api_key and settings.k2_base_url and settings.k2_vl_model
     )
     if selected_provider != "demo" and vlm_ready:
         try:
-            scene, tokens = await asyncio.wait_for(_request_scene(image), timeout=30.0)
+            scene, tokens = await asyncio.wait_for(
+                _request_scene(
+                    image,
+                    prefer_gemini=selected_provider == "gemini",
+                    prefer_openai=selected_provider == "openai",
+                ),
+                timeout=30.0,
+            )
             return {**scene, "fallback": False, "_tokens": tokens}
         except Exception:
             # Do not log response bodies, original image data, or provider errors.

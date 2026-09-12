@@ -38,6 +38,7 @@ class QwenImageEditor:
         self, image: bytes, prompt: str, *, reference: bytes | None = None,
         strength: float | None = None, seed: int | None = None,
         negative: str | None = None, timeout_s: float = 90.0,
+        structure_lock: bool = False,
     ) -> bytes:
         del strength, seed  # Not supported by this DashScope endpoint.
         if not self.api_key:
@@ -46,16 +47,33 @@ class QwenImageEditor:
             source_size = source.size
         content: list[dict] = [{"image": _data_url(image)}]
         instruction = prompt
-        if reference:
-            content.append({"image": _data_url(reference)})
+        if structure_lock and not reference:
             instruction = (
                 prompt
-                + " Edit image 1 using the exact date and site history in the reconstruction prompt. "
-                "Match the lighting, palette and sky of image 2. Keep image 1's composition and camera "
-                "projection, but remove or replace buildings and roads when the historical context "
-                "requires it. Image 2 is a consistency reference, not historical evidence. "
-                "Return only the edited image 1."
+                + " Keep the camera framing fixed. Historical reconstruction may reshape, remove or "
+                "replace buildings and roads when the prompt requires it; keep major masses in "
+                "broadly similar positions so neighbouring panorama tiles can stitch."
             )
+        if reference:
+            content.append({"image": _data_url(reference)})
+            if structure_lock:
+                instruction = (
+                    prompt
+                    + " Edit image 1 using the reconstruction prompt. Match the lighting, palette and sky "
+                    "of image 2. Keep image 1's camera framing; allow historically justified removals and "
+                    "replacements, but keep major masses in broadly similar positions so neighbouring "
+                    "tiles agree. Image 2 is a consistency reference, not historical evidence. "
+                    "Return only the edited image 1."
+                )
+            else:
+                instruction = (
+                    prompt
+                    + " Edit image 1 using the exact date and site history in the reconstruction prompt. "
+                    "Match the lighting, palette and sky of image 2. Keep image 1's composition and camera "
+                    "projection, but remove or replace buildings and roads when the historical context "
+                    "requires it. Image 2 is a consistency reference, not historical evidence. "
+                    "Return only the edited image 1."
+                )
         if negative:
             instruction += " Avoid these visual elements: " + negative
         content.append({"text": instruction})

@@ -1,4 +1,4 @@
-"""Cosine feathering with original-image fallback for failed tiles."""
+"""Cosine feathering, overlap fusion, and original-image fallback for failed tiles."""
 from __future__ import annotations
 
 import numpy as np
@@ -20,6 +20,45 @@ def feather_weights(index: int, x: list[int], tile_w: int = TILE) -> np.ndarray:
             ramp = .5 - .5 * np.cos(np.pi * np.linspace(1, 0, right, dtype=np.float32))
             weights[-right:] *= ramp
     return weights
+
+
+def fuse_overlaps(tiles: list[Image.Image], x: list[int], *, fade_px: int = 24) -> list[Image.Image]:
+    """Force a single clean geometry through every overlap.
+
+    1. Translate the right tile onto the left overlap.
+    2. Dense-warp the right strip onto the left strip (railings / wires follow).
+    3. Hard-copy the left strip into both tiles, with only a short tail fade into
+       the flow-warped right strip — never a full-width double exposure.
+    """
+    from .alignment import MAX_SHIFT_PX, MIN_SHIFT_PX, apply_shift, estimate_shift, warp_to_reference
+
+    if len(tiles) != len(x):
+        raise ValueError("A tile is required for every planned position")
+    arrays = [np.asarray(tile.convert("RGB"), dtype=np.float32).copy() for tile in tiles]
+    for index in range(len(tiles) - 1):
+        overlap = int(x[index] + TILE - x[index + 1])
+        if overlap <= 0:
+            continue
+        left_img = Image.fromarray(np.round(np.clip(arrays[index][:, -overlap:], 0, 255)).astype(np.uint8))
+        right_tile = Image.fromarray(np.round(np.clip(arrays[index + 1], 0, 255)).astype(np.uint8))
+        right_img = Image.fromarray(np.round(np.clip(arrays[index + 1][:, :overlap], 0, 255)).astype(np.uint8))
+        dx, dy = estimate_shift(left_img, right_img)
+        magnitude = float(np.hypot(dx, dy))
+        if MIN_SHIFT_PX <= magnitude <= MAX_SHIFT_PX:
+            arrays[index + 1] = np.asarray(apply_shift(right_tile, dx, dy), dtype=np.float32)
+            right_img = Image.fromarray(np.round(np.clip(arrays[index + 1][:, :overlap], 0, 255)).astype(np.uint8))
+        # Bend the right strip onto the left strip's edge field (thin structures).
+        warped_right = warp_to_reference(left_img, right_img, max_flow=16.0, scale=0.5)
+        left = arrays[index][:, -overlap:]
+        right = np.asarray(warped_right, dtype=np.float32)
+        strip = left.copy()
+        fade = max(0, min(int(fade_px), overlap // 5, overlap - 1))
+        if fade > 0:
+            ramp = (.5 - .5 * np.cos(np.pi * np.linspace(0.0, 1.0, fade, dtype=np.float32)))[None, :, None]
+            strip[:, -fade:] = left[:, -fade:] * (1.0 - ramp) + right[:, -fade:] * ramp
+        arrays[index][:, -overlap:] = strip
+        arrays[index + 1][:, :overlap] = strip
+    return [Image.fromarray(np.round(np.clip(array, 0, 255)).astype(np.uint8)) for array in arrays]
 
 
 def stitch(tiles: list[Image.Image | np.ndarray | None], x: list[int], overlap: float | None = None,

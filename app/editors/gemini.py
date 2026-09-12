@@ -24,6 +24,7 @@ class GeminiEditor:
         self, image: bytes, prompt: str, *, reference: bytes | None = None,
         strength: float | None = None, seed: int | None = None,
         negative: str | None = None, timeout_s: float = 60.0,
+        structure_lock: bool = False,
     ) -> bytes:
         if not self.api_key:
             raise ProviderError("GEMINI_API_KEY is not configured", provider=self.name, retryable=False)
@@ -33,12 +34,33 @@ class GeminiEditor:
             {"text": prompt},
             {"inlineData": {"mimeType": "image/jpeg", "data": base64.b64encode(image).decode("ascii")}},
         ]
+        if structure_lock and not reference:
+            parts[0] = {
+                "text": (
+                    prompt
+                    + " Keep the camera framing fixed. Historical reconstruction may reshape, remove or "
+                    "replace buildings and roads when the prompt requires it; keep major masses in "
+                    "broadly similar positions so neighbouring panorama tiles can stitch."
+                )
+            }
         if reference:
+            if structure_lock:
+                guide = (
+                    "Edit image 1 using the reconstruction prompt. Match the lighting, palette and sky "
+                    "of image 2. Keep image 1's camera framing; allow historically justified removals and "
+                    "replacements, but keep major masses in broadly similar positions so neighbouring "
+                    "tiles agree. Image 2 is a consistency reference, not historical evidence. "
+                    "Return only the edited image 1."
+                )
+            else:
+                guide = (
+                    "Edit image 1 using the exact date and site history in the reconstruction prompt. "
+                    "Match the lighting, palette and sky of image 2. Keep image 1's composition and camera projection, "
+                    "but remove or replace buildings and roads when the historical context requires it. "
+                    "Image 2 is a consistency reference, not historical evidence. Return only the edited image 1."
+                )
             parts.extend([
-                {"text": "Edit image 1 using the exact date and site history in the reconstruction prompt. "
-                 "Match the lighting, palette and sky of image 2. Keep image 1's composition and camera projection, "
-                 "but remove or replace buildings and roads when the historical context requires it. "
-                 "Image 2 is a consistency reference, not historical evidence. Return only the edited image 1."},
+                {"text": guide},
                 {"inlineData": {"mimeType": "image/jpeg", "data": base64.b64encode(reference).decode("ascii")}},
             ])
         if negative:

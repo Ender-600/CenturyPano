@@ -220,16 +220,19 @@ test('selecting Now while generating remains on the original as tiles and the fi
   assert.equal(view.elements.get('window-year').textContent, '现在');
 });
 
-test('historical context includes the reference date and unverified site uncertainty safely', () => {
+test('historical context shows a literary teaser and keeps the raw speculation behind a toggle', () => {
   const view = app();
   view.updateMetadata({ target_year: 1945, place: 'Shanghai', constraints: { historical_context: {
     target_year: 1945, reference_date: '1945-07-01', evidence_basis: 'model_knowledge_unverified',
+    literary_summary: '江风掠过石库门的檐角，这一年的夏天还带着未散尽的硝烟。',
     period_summary: 'Background <script>alert(1)</script>', site_state: 'undeveloped',
     site_history: 'Earlier undeveloped land', uncertainties: ['Exact site history is unknown'],
   } } });
   const content = view.elements.get('historical-context').innerHTML;
   assert.match(content, /1945 年 7 月 1 日/);
   assert.match(content, /未经史料核实/);
+  assert.match(content, /江风掠过石库门的檐角/);
+  assert.match(content, /查看原始历史推测/);
   assert.match(content, /未开发/);
   assert.match(content, /Exact site history is unknown/);
   assert.ok(!content.includes('<script>'));

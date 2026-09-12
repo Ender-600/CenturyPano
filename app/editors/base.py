@@ -18,6 +18,7 @@ class ImageEditor(Protocol):
         self, image: bytes, prompt: str, *, reference: bytes | None = None,
         strength: float | None = None, seed: int | None = None,
         negative: str | None = None, timeout_s: float = 60.0,
+        structure_lock: bool = False,
     ) -> bytes: ...
 
 
@@ -80,16 +81,22 @@ def get_editor(name: str) -> ImageEditor:
     if name == "gemini":
         from .gemini import GeminiEditor
         return GeminiEditor()
+    if name == "grok":
+        from .grok import GrokImagineEditor
+        return GrokImagineEditor()
     if name == "fal":
         from .fal import FalImg2ImgEditor
         return FalImg2ImgEditor()
+    if name == "openai":
+        from .openai import OpenAIImageEditor
+        return OpenAIImageEditor()
     if name == "qwen":
         from .qwen import QwenImageEditor
         return QwenImageEditor()
     if name == "demo":
         from .demo import DemoEditor
         return DemoEditor()
-    raise ValueError("PROVIDER must be demo, gemini, fal, or qwen")
+    raise ValueError("PROVIDER must be demo, gemini, grok, fal, qwen, or openai")
 
 
 class EditorPool:
@@ -163,6 +170,7 @@ class EditorPool:
         self, image: bytes, prompt: str, *, reference: bytes | None = None,
         strength: float | None = None, seed: int | None = None,
         negative: str | None = None, timeout_s: float = 120.0,
+        structure_lock: bool = False,
     ) -> EditResult:
         attempts = 0
         current_negative = negative
@@ -180,6 +188,7 @@ class EditorPool:
                     result = await self._invoke(
                         editor, image, prompt, reference=reference, strength=strength,
                         seed=seed, negative=current_negative, timeout_s=timeout_s,
+                        structure_lock=structure_lock,
                     )
                     if editor is self.primary:
                         self._primary_failures = 0
