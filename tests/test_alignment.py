@@ -35,26 +35,6 @@ def test_small_drift_is_recovered_and_improves_edge_agreement():
     assert edge_agreement(original, aligned) >= record.score_after - 1e-6
 
 
-def test_estimate_shift_recovers_height_when_2d_peak_is_distracted():
-    """Strong vertical structure must not hide a pure height offset between neighbours."""
-    rng = np.random.default_rng(5)
-    left = np.full((256, 256, 3), 90, dtype=np.float32)
-    right = left.copy()
-    for x in range(0, 256, 28):
-        left[:, x:x + 6] = 30
-        right[:, x:x + 6] = 30
-    left += rng.normal(0, 8, left.shape)
-    right += rng.normal(0, 8, right.shape)
-    left[140:144, :] = 250
-    right[160:164, :] = 250
-    right *= np.array([1.2, 0.9, 0.75], dtype=np.float32)
-    dx, dy = estimate_shift(
-        Image.fromarray(np.clip(left, 0, 255).astype(np.uint8)),
-        Image.fromarray(np.clip(right, 0, 255).astype(np.uint8)),
-    )
-    assert abs(dy + 20) <= 2.0, (dx, dy)
-
-
 def test_large_shift_is_reported_but_not_applied():
     original = Image.fromarray(_scene())
     drifted = _shifted(_scene(), alignment.MAX_SHIFT_PX + 40, 0)

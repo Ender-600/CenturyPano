@@ -3,9 +3,9 @@
 Each tile is generated independently, so neighbours disagree inside their shared
 overlap. Continuity is enforced in two stages:
 
-1. `fuse_overlaps` registers neighbours (translation + edge-guided optical flow)
-   and writes one shared, full-overlap feather strip so thin structures track
-   without hard-pasting one tile's appearance onto the other.
+1. `fuse_overlaps` registers and hard-unifies the shared strip (translation +
+   edge-guided optical flow, then identical pixels on both tiles) so railings
+   and other thin structures cannot fork.
 2. `seam_plan` / `stitch` then choose a minimum-cost cut when residual structural
    disagreement remains, or a wide cosine feather when the leftover is only tonal.
 
@@ -62,29 +62,20 @@ def fuse_overlaps(
     tiles: list[Image.Image],
     x: list[int],
     *,
-    fade_px: int | None = None,
+    fade_px: int = 24,
     fixed: frozenset[int] | None = None,
 ) -> list[Image.Image]:
-    """Align neighbours in every overlap, then share one smooth strip.
+    """Force a single clean geometry through every overlap.
 
-    1. Translate the whole right tile when the shift improves edge agreement
-       (incl. a gated 1D height lock).
+    1. Translate the right tile onto the left overlap.
     2. Dense-warp the right strip onto the left strip (railings / wires follow).
-    3. Cosine-blend left → warped-right across the full overlap and write that
-       strip into both tiles so the exit into the right body stays continuous —
-       avoid hard-pasting the left tile, which reads as a collage.
+    3. Hard-copy the left strip into both tiles, with only a short tail fade into
+       the flow-warped right strip — never a full-width double exposure.
 
     Tiles listed in `fixed` (typically failed originals) are left untouched and
     do not overwrite their neighbours.
     """
-    from .alignment import (
-        MAX_SHIFT_PX,
-        MIN_SHIFT_PX,
-        apply_shift,
-        edge_agreement,
-        estimate_shift,
-        warp_to_reference,
-    )
+    from .alignment import MAX_SHIFT_PX, MIN_SHIFT_PX, apply_shift, estimate_shift, warp_to_reference
 
     if len(tiles) != len(x):
         raise ValueError("A tile is required for every planned position")
@@ -97,35 +88,21 @@ def fuse_overlaps(
         if overlap <= 0:
             continue
         left_img = Image.fromarray(np.round(np.clip(arrays[index][:, -overlap:], 0, 255)).astype(np.uint8))
+        right_tile = Image.fromarray(np.round(np.clip(arrays[index + 1], 0, 255)).astype(np.uint8))
         right_img = Image.fromarray(np.round(np.clip(arrays[index + 1][:, :overlap], 0, 255)).astype(np.uint8))
-        before = edge_agreement(left_img, right_img)
-        for _ in range(2):
-            dx, dy = estimate_shift(left_img, right_img)
-            if not (MIN_SHIFT_PX <= float(np.hypot(dx, dy)) <= MAX_SHIFT_PX):
-                break
-            right_tile = Image.fromarray(np.round(np.clip(arrays[index + 1], 0, 255)).astype(np.uint8))
-            shifted = apply_shift(right_tile, dx, dy)
-            shifted_strip = Image.fromarray(np.asarray(shifted)[:, :overlap])
-            after = edge_agreement(left_img, shifted_strip)
-            if after < before + 0.01:
-                break
-            arrays[index + 1] = np.asarray(shifted, dtype=np.float32)
-            right_img = shifted_strip
-            before = after
-        warped_right = warp_to_reference(left_img, right_img, max_flow=12.0, scale=0.5)
+        dx, dy = estimate_shift(left_img, right_img)
+        magnitude = float(np.hypot(dx, dy))
+        if MIN_SHIFT_PX <= magnitude <= MAX_SHIFT_PX:
+            arrays[index + 1] = np.asarray(apply_shift(right_tile, dx, dy), dtype=np.float32)
+            right_img = Image.fromarray(np.round(np.clip(arrays[index + 1][:, :overlap], 0, 255)).astype(np.uint8))
+        warped_right = warp_to_reference(left_img, right_img, max_flow=16.0, scale=0.5)
         left = arrays[index][:, -overlap:]
         right = np.asarray(warped_right, dtype=np.float32)
-        # Full-overlap feather: left-weighted at the left edge, right-weighted where
-        # the strip meets the right tile body — natural continuity without a paste cut.
-        span = overlap if fade_px is None else max(8, min(int(fade_px), overlap))
-        if span >= overlap:
-            ramp = (.5 - .5 * np.cos(np.pi * np.linspace(0.0, 1.0, overlap, dtype=np.float32)))[None, :, None]
-            strip = left * (1.0 - ramp) + right * ramp
-        else:
-            # Legacy short-tail path used by older tests that pass an explicit fade_px.
-            strip = left.copy()
-            ramp = (.5 - .5 * np.cos(np.pi * np.linspace(0.0, 1.0, span, dtype=np.float32)))[None, :, None]
-            strip[:, -span:] = left[:, -span:] * (1.0 - ramp) + right[:, -span:] * ramp
+        strip = left.copy()
+        fade = max(0, min(int(fade_px), overlap // 5, overlap - 1))
+        if fade > 0:
+            ramp = (.5 - .5 * np.cos(np.pi * np.linspace(0.0, 1.0, fade, dtype=np.float32)))[None, :, None]
+            strip[:, -fade:] = left[:, -fade:] * (1.0 - ramp) + right[:, -fade:] * ramp
         arrays[index][:, -overlap:] = strip
         arrays[index + 1][:, :overlap] = strip
     return [Image.fromarray(np.round(np.clip(array, 0, 255)).astype(np.uint8)) for array in arrays]
