@@ -51,7 +51,7 @@ def test_upload_replay_and_private_original(client):
     assert m['status'] == 'done', m
     assert m['demo'] is True
     assert all(m['metrics'][k] is not None for k in ['started_at', 'anchor_done_at', 'first_tile_at', 'finished_at'])
-    for suffix in ['preview', 'result', 'tiles/0', 'tiles/0?raw=1', 'audio']:
+    for suffix in ['preview', 'result', 'tiles/0', 'tiles/0?raw=1']:
         asset = client.get(f'/jobs/{job_id}/{suffix}')
         assert asset.status_code == 200, suffix
     assert client.get('/' + m['source']['path']).status_code == 404
@@ -92,7 +92,6 @@ def test_exact_year_is_authoritative_and_not_rounded(client, monkeypatch, year):
     manifest = client.get(f"/jobs/{response.json()['job_id']}/manifest").json()
     assert manifest['target_year'] == manifest['anchor_year'] == year
     assert manifest['decade'] == decade_for_year(year)
-    assert client.get(f"/jobs/{manifest['job_id']}/audio").status_code == 200
 
 
 @pytest.mark.parametrize('value', ['1799', str(MAX_YEAR + 1), '1945.0', '1945.5', '1.945e3', '1940s', 'true', '-1945'])

@@ -18,7 +18,7 @@ from app.temporal import decade_for_year, resolve_year
 
 
 # Also versions the pre-model request cache: old decade-only images cannot replay.
-PROMPT_VERSION = "location-year-history-v3-lock"
+PROMPT_VERSION = "location-year-history-v5-en"
 SITE_STATES = {"undeveloped", "agricultural", "built", "mixed", "unknown"}
 GEOMETRY_POLICY = (
     "Keep the camera position, viewing direction, projection and complete input frame fixed. "
@@ -50,6 +50,28 @@ STRUCTURE_LOCK_POLICY = (
     "reference date, replace it in place with a period-appropriate element of the same footprint rather "
     "than deleting it or leaving a gap. Use consistent lighting, sky and palette across the full scene."
 )
+# The reference image goes in the same request as the prompt above, so its
+# instruction has to agree with the policy that prompt carries. A permissive
+# reference line ("remove or replace buildings when the history requires it")
+# next to the PIXEL LOCK is a contradiction, and the model resolves it in favour
+# of the permissive one: it regenerates a plausible period street instead of
+# re-rendering this one. Each tile then invents its own scene, the seam carve
+# joins them invisibly, and the panorama has four different vanishing points.
+REFERENCE_INSTRUCTION_LOCKED = (
+    "Image 1 is the photograph to re-render; image 2 is a colour and lighting reference only, "
+    "not historical evidence and not a composition to copy. Keep image 1's camera position, "
+    "viewing direction, projection, framing and every structure exactly as they are, at the same "
+    "size and position. Change only surfaces and materials, paving, vehicles, street furniture, "
+    "signage, lighting fixtures, vegetation, sky and film rendition. Do not recompose, do not move "
+    "the viewpoint, and do not add, remove, resize or replace any building, roofline or road. "
+    "Match image 2's palette, lighting and sky. Return only the edited image 1."
+)
+REFERENCE_INSTRUCTION_OPEN = (
+    "Edit image 1 using the exact date and site history in the reconstruction prompt. "
+    "Match the lighting, palette and sky of image 2. Keep image 1's composition and camera projection, "
+    "but remove or replace buildings and roads when the historical context requires it. "
+    "Image 2 is a consistency reference, not historical evidence. Return only the edited image 1."
+)
 INDOOR_POLICY = (
     "This is an interior. Keep the room geometry, furniture footprints and openings fixed. Re-dress "
     "surfaces, furniture styles, lighting fixtures, appliances and decoration for the reference date; "
@@ -65,7 +87,7 @@ HISTORY_SYSTEM = (
     "site_state (undeveloped, agricultural, built, mixed or unknown), site_history (a short account "
     "of land use and development at the actual site), reconstruction_changes (1 to 8 concrete "
     "changes to the present-day scene), uncertainties (1 to 8 strings). Each string <= 600 characters; "
-    "each era_fact <= 240 characters. Write user-facing descriptions in Simplified Chinese. "
+    "each era_fact <= 240 characters. Write user-facing descriptions in English. "
     "Reason for the exact year, never a fixed decade or twenty-year cycle. Use July 1 of the selected "
     "year as the explicit snapshot date because only a year was supplied. When events change the "
     "city within that year, distinguish before/after the reference date; do not visually combine "
@@ -164,24 +186,49 @@ def _fallback_history(year: int) -> dict:
             "Choose street furniture and signs only if this site was already developed at the reference date.",
             "Date every visible structure; do not preserve present-day development by default.",
         ],
-        "period_summary": f"{year} 年当地历史背景尚未确认",
-        "local_context": [f"以 {year}-07-01 为参考，尚未获得可靠的当地事件与历史时期判断。"],
+        "period_summary": f"The local historical context for {year} has not been established.",
+        "local_context": [f"No reliable local events or historical period could be established for {year}-07-01."],
         "site_state": "unknown",
-        "site_history": "尚未确认该地块当年的土地用途、开发时间或建筑更替。现代照片不代表历史状态。",
+        "site_history": "The land use, development date and building turnover at this site in that year have not "
+                        "been established. The present-day photo is not evidence of its historical state.",
         "reconstruction_changes": [
-            "逐项判断建筑、道路和设施在参考时点是否存在；不能只给现代建筑添加旧材质。",
-            "若可确认尚未开发或用于农业，应表现相应地貌、植被或农田；证据不足时不虚构特定前身建筑。",
+            "Assess each building, road and installation for whether it existed at the reference date; do not "
+            "merely give modern buildings old materials.",
+            "If the site can be confirmed as undeveloped or agricultural, show the matching terrain, vegetation "
+            "or fields; where evidence is insufficient, do not invent a specific predecessor building.",
         ],
-        "uncertainties": ["历史推理服务不可用或当前处于演示模式；仅应用通用年份约束。",
-                          "地块用途与建筑变化须用历史地图、照片或档案核实。"],
+        "uncertainties": ["The history reasoning service is unavailable or demo mode is active; only generic "
+                          "year constraints are applied.",
+                          "Site use and building changes must be verified against historical maps, photos or archives."],
     }
 
 
+# Under the pixel lock the tile's job is to re-skin surfaces that stay exactly
+# where they are, so anything in the payload that argues about whether a
+# structure should exist is a standing invitation to redraw the scene:
+# site_state "undeveloped" licenses erasing everything, reconstruction_changes
+# is literally a list of changes to make, and uncertainties is hedging prose with
+# no visual meaning to an image editor. All three belong in the open policy,
+# where structures may legitimately change, and in the manifest for the history
+# panel -- not in a locked tile request.
+#
+# site_history deliberately stays. It is what the place actually was, and it is
+# where period-specific detail comes from: drop it and the reconstruction loses
+# the signage and naming that makes it this building rather than a generic one.
+REDRAW_LICENCE_KEYS = ("site_state", "reconstruction_changes", "uncertainties")
+
+
+def _lean_context(context: dict) -> dict:
+    return {key: value for key, value in context.items() if key not in REDRAW_LICENCE_KEYS}
+
+
 def _prompt(year: int, context: dict, facts: list[str], *, structure_lock: bool = True,
-            is_outdoor: bool = True) -> str:
+            is_outdoor: bool = True, lean: bool = False) -> str:
     policy = STRUCTURE_LOCK_POLICY if structure_lock else GEOMETRY_POLICY
     if not is_outdoor:
         policy = policy + " " + INDOOR_POLICY
+    if structure_lock and lean:
+        context = _lean_context(context)
     return (
         f"Reconstruct this same location as an imagined photograph taken in {year}. "
         f"Exact reference date: {year}-07-01 (a declared midyear snapshot, not the whole year). "
@@ -285,18 +332,24 @@ async def build_constraints(place: dict, decade: str | int, scene: dict, *, prov
         facts = conservative["era_facts"]
         history["reconstruction_changes"] = conservative["reconstruction_changes"]
         history["site_state"] = "unknown"
-        history["site_history"] = "缺少精确拍摄位置，无法确认具体地块在参考年份的开发状态或建筑前身。"
-        history["uncertainties"].append("城市级背景不能证明具体地块的历史；需提供拍摄位置并核对档案。")
-    history["uncertainties"].append("默认采用当年 7 月 1 日为参考时点；年内转折前后的景象可能不同。")
+        history["site_history"] = ("Without a precise capture location, the development state of this particular "
+                                   "site at the reference year, or any predecessor building, cannot be established.")
+        history["uncertainties"].append("City-wide context is not evidence for the history of a particular site; "
+                                        "supply the capture location and check archival sources.")
+    history["uncertainties"].append("July 1 of the selected year is used as the reference date by default; the scene "
+                                    "may differ before and after a turning point within that year.")
     context = {**history, "target_year": year, "reference_date": f"{year}-07-01", "location": location,
                "evidence_basis": "fallback" if fallback else "model_knowledge_unverified",
                "structure_lock": structure_lock, "environment": "outdoor" if is_outdoor else "indoor"}
     if not fallback:
-        context["uncertainties"].append("模型历史知识未经史料检索验证；建筑更替与地块用途需要历史地图或照片佐证。")
+        context["uncertainties"].append("The model's historical knowledge is unverified against retrieved sources; "
+                                        "building turnover and site use need corroboration from historical maps "
+                                        "or photos.")
     return ConstraintSpec(
         decade=decade_for_year(year), anchor_year=year, target_year=year, era_facts=tuple(facts),
         prompt_global=_prompt(year, {**context, "present_day_scene": _scene_data(scene)}, facts,
-                              structure_lock=structure_lock, is_outdoor=is_outdoor),
+                              structure_lock=structure_lock, is_outdoor=is_outdoor,
+                              lean=settings.lean_locked_prompt),
         negative=f"objects or buildings introduced locally after {year}-07-01, unsupported landmark substitutions, "
                  "anachronistic technology, invented battle damage, any text label, date stamp, watermark, caption or border"
                  + (", moved or resized buildings, added or removed structures, changed skyline, changed road "

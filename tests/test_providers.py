@@ -42,7 +42,13 @@ def test_gemini_sends_two_images_and_normalizes_output():
     parts = payload["contents"][0]["parts"]
     assert len([part for part in parts if "inlineData" in part]) == 2
     assert parts[0]["text"] == "One frozen prompt"
-    assert "Keep image 1's composition" in parts[2]["text"]
+    # The reference instruction shares a request with the structure policy, so it
+    # must never license what that policy forbids.
+    instruction = parts[2]["text"]
+    assert "image 2" in instruction and "reference" in instruction
+    for licence in ("remove or replace buildings", "recompose", "move the viewpoint"):
+        assert f"but {licence}" not in instruction
+    assert "do not add, remove, resize or replace any building" in instruction.lower()
     assert requests[0].headers["x-goog-api-key"] == "test-only-key"
     assert "test-only-key" not in str(requests[0].url)
     assert Image.open(io.BytesIO(output)).size == (96, 48)

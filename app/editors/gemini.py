@@ -25,6 +25,10 @@ class GeminiEditor:
         strength: float | None = None, seed: int | None = None,
         negative: str | None = None, timeout_s: float = 60.0,
     ) -> bytes:
+        # `strength` and `seed` are part of the shared editor interface and are used
+        # by other providers. generateContent exposes neither, so fidelity to the
+        # input here is carried entirely by the instruction text, not by a knob.
+        from app.config import settings
         if not self.api_key:
             raise ProviderError("GEMINI_API_KEY is not configured", provider=self.name, retryable=False)
         with Image.open(io.BytesIO(image)) as source:
@@ -34,11 +38,12 @@ class GeminiEditor:
             {"inlineData": {"mimeType": "image/jpeg", "data": base64.b64encode(image).decode("ascii")}},
         ]
         if reference:
+            # Must agree with the structure policy the prompt carries, or the model
+            # picks whichever instruction gives it more freedom.
+            from app.constraints import REFERENCE_INSTRUCTION_LOCKED, REFERENCE_INSTRUCTION_OPEN
+            instruction = REFERENCE_INSTRUCTION_LOCKED if settings.structure_lock else REFERENCE_INSTRUCTION_OPEN
             parts.extend([
-                {"text": "Edit image 1 using the exact date and site history in the reconstruction prompt. "
-                 "Match the lighting, palette and sky of image 2. Keep image 1's composition and camera projection, "
-                 "but remove or replace buildings and roads when the historical context requires it. "
-                 "Image 2 is a consistency reference, not historical evidence. Return only the edited image 1."},
+                {"text": instruction},
                 {"inlineData": {"mimeType": "image/jpeg", "data": base64.b64encode(reference).decode("ascii")}},
             ])
         if negative:

@@ -57,14 +57,14 @@ def preprocess(source: bytes | str | Path | Image.Image, is_360: bool | None = N
         is_360 = abs(width / height - 2.0) < 0.1
     warnings = []
     if width / height < 2.0:
-        warnings.append("这张照片看起来较窄；使用全景模式能获得更好的体验。")
+        warnings.append("This photo looks narrow; panorama mode gives a better result.")
     target_height = H * 3 if is_360 else H
     original_working_width = max(1, round(width / height * target_height))
     extension = TILE - STEP_TARGET if is_360 else 0
     max_band_width = TILE + (N_MAX - 1) * STEP_TARGET - extension
     working_width = max(TILE, min(max_band_width, original_working_width))
     if working_width != original_working_width:
-        warnings.append("全景已在水平方向归一化，以适配最多八个重叠图块。")
+        warnings.append("The panorama was normalized horizontally to fit at most eight overlapping tiles.")
     resized = image.resize((working_width, target_height), Image.Resampling.LANCZOS)
     band = resized.crop((0, H, working_width, 2 * H)) if is_360 else resized
     extended = Image.new("RGB", (working_width + extension, H))
