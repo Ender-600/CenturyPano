@@ -2190,6 +2190,77 @@ test('white dot requests can be retried after failure and refinement replaces pr
   assert.equal(view.elements.get('street-hotspot-layer').children[0].children[0].textContent, 'Updated detail');
 });
 
+test('Street View waits for grounded detections and never renders old fallback regions', async () => {
+  for (const data of [
+    { ...WHITE_DOTS, items: [], provisional: true, status: 'detecting', progress: { completed: 0, total: 6 } },
+    { ...WHITE_DOTS, fallback: true, status: 'error', retryable: true },
+  ]) {
+    const view = await streetDots({ fetch: (url) => url.endsWith('/hotspots') ? response(data) : undefined });
+    assert.equal(view.elements.get('street-hotspot-layer').children.length, 0);
+    assert.equal(view.elements.get('street-hotspot-layer').hidden, true);
+    const hint = view.elements.get('street-hotspot-hint');
+    if (data.provisional) {
+      assert.match(hint.textContent, /Finding.*0\/6/);
+      assert.equal(hint.disabled, true);
+      const count = view.requests.length;
+      await hint.emit('click'); await new Promise(setImmediate);
+      assert.equal(view.requests.length, count);
+    } else {
+      assert.match(hint.textContent, /retry/);
+      assert.equal(hint.disabled, false);
+      assert.equal([...view.timers.values()].some((timer) => timer.milliseconds === 1500), false);
+    }
+  }
+});
+
+test('additional Street View directions keep a selected dot and its in-flight explanation', async () => {
+  let attempts = 0, release;
+  const item = { ...WHITE_DOTS.items[0], revision: 'c'.repeat(64) };
+  const view = await streetDots({ fetch: (url) => {
+    if (url.endsWith('/explain')) return new Promise((resolve) => {
+      release = () => resolve(response({ label: item.label, distinctive: 'Carved stone trim' }));
+    });
+    if (!url.endsWith('/hotspots')) return;
+    if (++attempts === 1) return response({ ...WHITE_DOTS, items: [item], provisional: true, status: 'detecting' });
+    return response({ ...WHITE_DOTS, revision: 'b'.repeat(64), status: 'ready', items: [item,
+      { ...item, id: 'h6', label: 'Timber door', point: [.52, .55], revision: 'd'.repeat(64) }] });
+  } });
+  const layer = view.elements.get('street-hotspot-layer'), dot = layer.children[0];
+  await dot.emit('click'); await new Promise(setImmediate);
+  const request = view.requests.find((request) => request.url.endsWith('/explain'));
+  assert.equal(JSON.parse(request.body).revision, item.revision);
+  const [id, timer] = [...view.timers].find(([, timer]) => timer.milliseconds === 1500);
+  view.timers.delete(id); timer.callback(); await new Promise(setImmediate);
+  assert.equal(layer.children.length, 2);
+  assert.equal(layer.children[0], dot);
+  assert.equal(dot.attributes['aria-pressed'], 'true');
+  assert.equal(view.elements.get('street-hotspot-card').hidden, false);
+  assert.equal(request.signal.aborted, false);
+  release(); await new Promise(setImmediate);
+  assert.equal(view.elements.get('street-hotspot-body').children[0].children[1].textContent, 'Carved stone trim');
+  assert.equal([...view.timers.values()].some((timer) => timer.milliseconds === 1500), false);
+});
+
+test('partial Street View detections retain real dots and offer explicit retry without a request loop', async () => {
+  let attempts = 0;
+  const view = await streetDots({ fetch: (url) => url.endsWith('/hotspots') ? response(++attempts === 1
+    ? { ...WHITE_DOTS, status: 'partial', retryable: true }
+    : { ...WHITE_DOTS, status: 'detecting', provisional: true, progress: { completed: 4, total: 6 } }) : undefined });
+  const hint = view.elements.get('street-hotspot-hint'), layer = view.elements.get('street-hotspot-layer');
+  const dot = layer.children[0];
+  assert.match(hint.textContent, /retry the rest/);
+  assert.equal(hint.disabled, false);
+  assert.equal([...view.timers.values()].some((timer) => timer.milliseconds === 1500), false);
+  await hint.emit('click'); await new Promise(setImmediate);
+  assert.equal(attempts, 2);
+  assert.equal(view.requests.at(-1).method, 'POST');
+  assert.equal(layer.children[0], dot);
+  assert.equal(layer.hidden, false);
+  assert.match(hint.textContent, /Finding.*4\/6/);
+  assert.equal(hint.disabled, true);
+  assert.equal([...view.timers.values()].some((timer) => timer.milliseconds === 1500), true);
+});
+
 
 test('host mode changes update generation settings immediately while initial config and GPS are pending', async () => {
   let releaseConfig, releaseGPS;

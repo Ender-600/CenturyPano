@@ -21,6 +21,7 @@ export function createPanoramaHotspots({ document, api, schedule = setTimeout, c
   const $ = (id) => document.getElementById(id);
   const layer = $('street-hotspot-layer'), card = $('street-hotspot-card'), hint = $('street-hotspot-hint');
   let scene = null, epoch = 0, request = null, explanation = null, timer = null, dots = [], revision = '', active = null;
+  let retryable = false;
 
   function close() {
     explanation?.abort(); explanation = null; active = null; card.hidden = true;
@@ -28,12 +29,13 @@ export function createPanoramaHotspots({ document, api, schedule = setTimeout, c
   }
   function clear() {
     ++epoch; request?.abort(); request = null; cancel(timer); timer = null; close();
-    scene = null; dots = []; revision = ''; layer.replaceChildren(); layer.hidden = true; hint.hidden = true;
+    scene = null; dots = []; revision = ''; retryable = false;
+    layer.replaceChildren(); layer.hidden = true; hint.hidden = true; hint.disabled = true;
   }
   async function explain(item, button) {
     if (!scene) return;
     close(); active = item.id; button.setAttribute('aria-pressed', 'true');
-    const generation = epoch, currentRevision = revision;
+    const generation = epoch, currentRevision = item.revision || revision;
     const controller = new AbortController(); explanation = controller;
     card.hidden = false;
     $('street-hotspot-kicker').textContent = `Around ${scene.year}`;
@@ -61,28 +63,56 @@ export function createPanoramaHotspots({ document, api, schedule = setTimeout, c
   }
   async function load(generation, method) {
     const controller = new AbortController(); request = controller;
+    if (method === 'POST') {
+      retryable = false; hint.disabled = true; hint.hidden = false;
+      hint.textContent = 'Finding street details…';
+    }
     try {
       const data = await api(`/world-jobs/${scene.jobId}/hotspots`, { method, signal: controller.signal });
       if (generation !== epoch || controller.signal.aborted) return;
       if (revision !== data.revision) {
-        close(); revision = data.revision; dots = []; layer.replaceChildren();
-        for (const item of Array.isArray(data.items) ? data.items : []) {
+        const items = !data.fallback && Array.isArray(data.items) ? data.items : [];
+        const previous = new Map(dots.map((dot) => [dot.item.id, dot]));
+        const selected = previous.get(active)?.item, nextSelected = items.find((item) => item.id === active);
+        if (active && JSON.stringify(selected) !== JSON.stringify(nextSelected)) close();
+        revision = data.revision; dots = [];
+        for (const item of items) {
           if (!Array.isArray(item.point) || item.point.length !== 2
               || !item.point.every((n) => Number.isFinite(n) && n >= 0 && n <= 1)) continue;
-          const button = document.createElement('button'); button.type = 'button'; button.className = 'street-hotspot';
-          button.setAttribute('aria-label', `Ask about ${item.label}`); button.setAttribute('aria-pressed', 'false');
-          const label = document.createElement('span'); label.textContent = item.label; button.append(label);
-          button.addEventListener('click', () => { void explain(item, button); });
-          button.hidden = true; layer.append(button); dots.push({ button, position: panoramaPoint(item.point, scene.metadata) });
+          let dot = previous.get(item.id);
+          if (!dot) {
+            const button = document.createElement('button'); button.type = 'button'; button.className = 'street-hotspot';
+            const label = document.createElement('span'); button.append(label);
+            dot = { button, label, item };
+            button.addEventListener('click', () => { void explain(dot.item, button); });
+          }
+          dot.item = item; dot.position = panoramaPoint(item.point, scene.metadata);
+          dot.label.textContent = item.label;
+          dot.button.setAttribute('aria-label', `Ask about ${item.label}`);
+          dot.button.setAttribute('aria-pressed', String(active === item.id));
+          dot.button.hidden = true; dots.push(dot);
         }
+        layer.replaceChildren(...dots.map((dot) => dot.button));
       }
-      layer.hidden = !dots.length; hint.hidden = !dots.length;
-      hint.textContent = data.fallback ? 'Tap a white dot to explore this part of the scene.' : 'Tap a white dot to ask about that place.';
+      layer.hidden = !dots.length; hint.hidden = false;
+      const pending = data.provisional || data.status === 'detecting';
+      const progress = data.progress;
+      const progressLabel = Number.isInteger(progress?.completed) && Number.isInteger(progress?.total)
+        && progress.total > 0 && progress.completed >= 0 && progress.completed <= progress.total
+        ? ` (${progress.completed}/${progress.total})` : '';
+      retryable = !pending && (data.retryable === true || data.fallback === true);
+      hint.disabled = !retryable;
+      hint.textContent = pending ? `Finding street details…${progressLabel}`
+        : data.status === 'partial' ? 'Some details are ready. Tap to retry the rest.'
+          : data.status === 'error' || data.fallback ? 'Could not identify street details. Tap to retry.'
+            : !dots.length ? 'No clear objects found. Tap to try again.'
+              : 'Tap a white dot to ask about that place.';
       update();
-      if (data.provisional) timer = schedule(() => { void load(generation, 'GET'); }, 1500);
+      if (pending) timer = schedule(() => { void load(generation, 'GET'); }, 1500);
     } catch (error) {
       if (generation !== epoch || controller.signal.aborted) return;
-      hint.hidden = false; hint.textContent = 'White dots are unavailable. Tap here to retry.';
+      retryable = true; hint.disabled = false; hint.hidden = false;
+      hint.textContent = 'White dots are unavailable. Tap here to retry.';
     }
   }
   function setScene(next) {
@@ -102,7 +132,7 @@ export function createPanoramaHotspots({ document, api, schedule = setTimeout, c
   $('street-hotspot-close').addEventListener('click', close);
   card.addEventListener('keydown', (event) => { if (event.key === 'Escape') close(); });
   hint.addEventListener('click', () => {
-    if (!scene) return;
+    if (!scene || !retryable) return;
     request?.abort(); cancel(timer); void load(epoch, 'POST');
   });
   clear();
