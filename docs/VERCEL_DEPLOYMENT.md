@@ -37,6 +37,13 @@ Cloudflare tunnel. The computer, FastAPI, gateway and tunnel must remain running
 A new tunnel gets a new URL; update the origin and redeploy. The Vercel hostname
 is stable, but it does not make this backend independent of the computer.
 
+Keep the backend checkout, private `.env`, tunnel executable and all storage
+directories outside operating-system temporary directories such as `/private/tmp`.
+Use persistent absolute paths for `IN_DIR`, `OUT_DIR` and `WORLD_DIR` so replacing
+the code checkout does not remove generated data. Background processes must be
+started again after a computer restart; reconnect the tunnel and update the
+production origin before considering the app restored.
+
 For permanent hosting, run the backend and gateway on a server with HTTPS and
 persistent `IN_DIR`, `OUT_DIR`, `WORLD_DIR` storage. Keep one Uvicorn worker. Set
 provider credentials and a persistent `WORLD_ACCESS_TOKEN` on that server,
